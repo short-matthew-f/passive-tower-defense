@@ -16,6 +16,12 @@
 // spot and a low landing, and punishing landings near the Brim Line and burying a smaller orb.
 // The expert also looks one merge ahead (the merged orb's neighbours). Skill sets the cadence
 // (22 / 30 / 34 drops/min), the aim noise and how often the bot settles for a worse spot.
+// Special orbs and tools (04 §3, §5, §6 B; all in the shared SpireCore): Catalysts and Volatility's
+// Hex Stones come out of the real bag. The reference and expert bots aim a Catalyst at the biggest
+// orb it can reach (the expert prefers one whose upgrade touches a twin) and herd Hex Stones onto
+// other Hex Stones; the novice drops them like any orb. With `tremor`, the bot buys the Tremor and
+// jolts the flask when two same-tier orbs sit a hair apart, and the expert also buys the Settle
+// Charm and uses Vent Now when the brim is about to overflow.
 // The greedy buyer ranks Alchemy / Apparatus / Apprentices and Volatility by
 // Δ(idleRate + ACTIVE_W x expected active Arcana/s)/cost, the expectation the 04 §4 formula
 // (cadence x EV_drop at the Distill Ceiling x ~0.7 realization x Resonance); Tomes are bought
@@ -24,7 +30,12 @@ import { longMult } from '../../src/core/longnode';
 import type { DeptSave } from '../../src/core/types';
 import {
   arcanaMult,
+  CATALYST,
+  CATALYST_MAX_FROM,
   cooldown,
+  HEX,
+  isSpecial,
+  orbR,
   evDropTable,
   heldVol,
   idleRateOf,
@@ -55,10 +66,10 @@ export type Skill = 'novice' | 'reference' | 'expert';
 /** dpm: drops per minute; noise: aim noise (px, normal); sloppy: chance of taking the 2nd/3rd
  * best spot; look: one-merge lookahead; settle: seconds a cascade must be quiet (and the pile
  * still) before the next drop. The novice drops on the beat, which clogs the flask (~2x the vents). */
-const SKILL: Record<Skill, { dpm: number; noise: number; sloppy: number; look: boolean; settle: number }> = {
-  novice: { dpm: 22, noise: 5, sloppy: 0.35, look: false, settle: 0 },
-  reference: { dpm: 30, noise: 1.5, sloppy: 0.1, look: false, settle: 1.2 },
-  expert: { dpm: 34, noise: 0.5, sloppy: 0.02, look: true, settle: 1.2 },
+const SKILL: Record<Skill, { dpm: number; noise: number; sloppy: number; look: boolean; settle: number; specials: boolean; tremor: boolean; ventNow: boolean }> = {
+  novice: { dpm: 22, noise: 5, sloppy: 0.35, look: false, settle: 0, specials: false, tremor: false, ventNow: false },
+  reference: { dpm: 30, noise: 1.5, sloppy: 0.1, look: false, settle: 1.2, specials: true, tremor: true, ventNow: true },
+  expert: { dpm: 34, noise: 0.5, sloppy: 0.02, look: true, settle: 1.2, specials: true, tremor: true, ventNow: true },
 };
 
 export interface SpireOpts {
@@ -84,19 +95,22 @@ function gauss(rnd: Rng): number {
 
 // ---------- the bot's expectation (buyer) ----------
 
-function activeEst(r: SpireRun, p: SpirePersistent, dpm: number): number {
+function activeEst(r: SpireRun, p: SpirePersistent, dpm: number, sk?: { tremor: boolean; ventNow: boolean }): number {
   const ceil = Math.max(7, Math.min(MAX_TIER, r.ceiling || 7));
   const ev = evDropTable(spawnTable(r), ceil) * potentMult(r) * arcanaMult(r.vol);
   // Geometry and cascade nodes: proxies for fewer vents and longer chains.
   const proxy =
     (1 + 0.04 * lvOf(r, 'wider') + 0.03 * lvOf(r, 'neck')) *
     (1 + 0.02 * lvOf(r, 'echo')) *
-    Math.min(resCap(r), 1.6 + 0.03 * lvOf(r, 'glass')) / 1.6;
+    (Math.min(resCap(r), 1.6 + 0.03 * lvOf(r, 'glass')) / 1.6) *
+    (1 + 0.01 * lvOf(r, 'coil')) *
+    (sk?.tremor ? 1 + 0.03 * lvOf(r, 'tremor') : 1) *
+    (sk?.ventNow ? 1 + 0.02 * lvOf(r, 'settle') : 1);
   return (Math.min(dpm, 60 / cooldown(r)) / 60) * ev * REALIZE * 1.6 * proxy + idleRateOf(r, p);
 }
 
 function coarseKey(r: SpireRun): string {
-  return [lvOf(r, 'richer'), lvOf(r, 'seed'), lvOf(r, 'wider'), lvOf(r, 'neck'), lvOf(r, 'valve'), Math.floor(lvOf(r, 'echo') / 3), Math.floor(lvOf(r, 'glass') / 4), r.vol].join('|');
+  return [lvOf(r, 'richer'), lvOf(r, 'seed'), lvOf(r, 'wider'), lvOf(r, 'neck'), lvOf(r, 'valve'), Math.floor(lvOf(r, 'echo') / 3), Math.floor(lvOf(r, 'glass') / 4), Math.floor(lvOf(r, 'coil') / 3), lvOf(r, 'tremor'), lvOf(r, 'settle'), r.vol].join('|');
 }
 
 interface TableRow {
@@ -159,7 +173,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
     }
 
     function score(x: number, tier: number): number {
-      const rr = TIERS[tier].r;
+      const rr = orbR(tier);
       const { y, hit } = landing(x, rr);
       const f = core.flask;
       let s = (y / f.h) * 30; // lower is better
@@ -167,6 +181,26 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
       const brim = core.brimY;
       if (top < brim + 12) s -= 200;
       else if (top < brim + 40) s -= 40;
+      if (isSpecial(tier)) {
+        if (!sk.specials) return s;
+        if (tier === CATALYST && hit && !isSpecial(hit.tier) && hit.tier <= CATALYST_MAX_FROM) {
+          s += 20 + 8 * hit.tier;
+          if (sk.look) {
+            for (const o of f.orbs) {
+              if (o === hit || o.tier !== hit.tier + 1) continue;
+              if (Math.hypot(o.x - hit.x, o.y - hit.y) < o.r + orbR(hit.tier + 1) + 3) {
+                s += 60 + 6 * hit.tier;
+                break;
+              }
+            }
+          }
+        } else if (tier === HEX) {
+          for (const o of f.orbs) {
+            if (o.tier === HEX && Math.hypot(o.x - x, o.y - y) < o.r + rr + 3) s += 50;
+          }
+        }
+        return s;
+      }
       if (hit) {
         if (hit.tier === tier) {
           s += 100 + 8 * tier;
@@ -196,7 +230,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
 
     function aim(): number {
       const tier = core.current;
-      const rr = TIERS[tier].r;
+      const rr = orbR(tier);
       const half = core.flask.w / 2;
       const cands: { x: number; s: number }[] = [];
       for (let i = 0; i < AIMS; i++) {
@@ -209,11 +243,37 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
       return core.clampAim(cands[Math.min(k, cands.length - 1)].x + gauss(rnd) * sk.noise);
     }
 
+    /** Two same-tier orbs a hair apart: a Tremor may knock them together. */
+    function nearMiss(): boolean {
+      const orbs = core.flask.orbs;
+      for (let i = 0; i < orbs.length; i++) {
+        const a = orbs[i];
+        if (isSpecial(a.tier) || a.tier >= MAX_TIER) continue;
+        for (let j = i + 1; j < orbs.length; j++) {
+          const b = orbs[j];
+          if (b.tier !== a.tier) continue;
+          const gap = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+          if (gap > 0.6 && gap < 4) return true;
+        }
+      }
+      return false;
+    }
+
+    let toolT = 0;
+    function useTools(h: number): void {
+      toolT -= h;
+      if (toolT > 0) return;
+      toolT = 0.5;
+      if (sk.ventNow && core.hasVentNow && core.brimT > 2.4) core.ventNow();
+      if (sk.tremor && core.hasTremor && core.tremorCool <= 0 && core.sinceMerge > 1.5 && core.sinceDrop > 1 && nearMiss()) core.tremor();
+    }
+
     function liveStep(dt: number): void {
       let left = dt;
       while (left > 1e-9) {
         const h = Math.min(0.1, left);
         if (!opts.passive) {
+          useTools(h);
           dropT -= h;
           // A patient player lets a cascade play out and the pile settle before the next drop.
           const busy = sk.settle > 0 && (core.sinceMerge < sk.settle || core.flask.orbs.some((o) => o.vy > 40));
@@ -287,7 +347,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
 
       buy(goals: BotGoals) {
         const bought: string[] = [];
-        const value = () => (opts.passive ? idleRateOf(r, p) : idleRateOf(r, p) + ACTIVE_W * activeEst(r, p, sk.dpm));
+        const value = () => (opts.passive ? idleRateOf(r, p) : idleRateOf(r, p) + ACTIVE_W * activeEst(r, p, sk.dpm, sk));
         for (let guard = 0; guard < 200; guard++) {
           // The Feat needs tier + held Volatility >= goal; the bot reaches ~T9-T10 by itself.
           const reach = Math.max(7, Math.min(10, r.stats.maxTier));
@@ -333,8 +393,8 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
           } else r.lv[best.id] = lvOf(r, best.id) + 1;
           bought.push(best.id);
         }
-        // Tomes with Grimoire Pages: Mirror (the preview), then Twinning, then Patience.
-        for (const id of ['mirror', 'twinning', 'patience']) {
+        // Tomes with Grimoire Pages: Mirror (the preview), Twinning, Hunger, then Patience.
+        for (const id of ['mirror', 'twinning', 'hunger', 'patience']) {
           const u = UPGRADES.find((x) => x.id === id)!;
           if (tomeOf(p, id) < u.max && p.pages >= upCost(u, 0)) {
             p.pages -= upCost(u, 0);

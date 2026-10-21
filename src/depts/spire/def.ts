@@ -1,7 +1,7 @@
 // The Sorcerer's Spire: pure economy (specs/04). No Pixi, no physics: the shared core, the
 // headless balance simulation and the scene all read this. index.ts spreads `spireEcon` into the
 // full DeptDef.
-import type { Commendation, DeptEcon } from '../../core/dept';
+import type { Commendation, DeptEcon, StewardCandidate } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
 
 // ---------- orb tiers (04 §3; radii re-curved so a Void Star is ~46% of the base width) ----------
@@ -35,6 +35,62 @@ export const MAX_TIER = 11;
 export const SINGULARITY_TIER = 12;
 export const SINGULARITY_VALUE = 250_000;
 
+// ---------- special orbs (04 §3 "Special orbs") ----------
+// Codes live above the tier range so a saved flask stores them like any orb.
+
+/** Merges with any orb T1-T10, upgrading it one tier. 1 per 60 drops (Catalyst Coil: -6 each). */
+export const CATALYST = 20;
+/** Volatility junk: never merges; 3 touching Hex Stones shatter for 3 x the top tier's value / 10. */
+export const HEX = 21;
+/** Merges with nothing, dissolves after 20 s, and shoves what it touches (a nudge tool). */
+export const QUICK = 22;
+/** The Legend's heavy body in the Fall's Last Stand (never in a saved flask). */
+export const LEGEND_BODY = 23;
+export const isSpecial = (t: number) => t >= CATALYST;
+export const SPECIAL_NAMES: Record<number, string> = { [CATALYST]: 'Catalyst', [HEX]: 'Hex Stone', [QUICK]: 'Quicksilver', [LEGEND_BODY]: 'Legend' };
+export const QUICK_LIFE_S = 20;
+
+/** Radius of any orb code (tiers and specials). */
+export function orbR(t: number): number {
+  if (t === CATALYST) return 5;
+  if (t === HEX) return 6;
+  if (t === QUICK) return 4;
+  if (t === LEGEND_BODY) return 13;
+  return TIERS[Math.max(1, Math.min(MAX_TIER, t))].r;
+}
+
+/** Display name of any orb code. */
+export const orbName = (t: number) => SPECIAL_NAMES[t] ?? TIERS[Math.max(1, Math.min(MAX_TIER, t))].name;
+
+/**
+ * Highest tier a Catalyst can lift (it makes at most T6, a Bloodmoon). BALANCE (sim, 04 §3 says
+ * "any orb"): lifting big orbs every 18-60 drops skipped whole chains (an Eclipse straight to an
+ * Abyssal Eye, an Eye to a Void Star), ~3x the Singularities late and +45% active income in a
+ * cycle's first 30 min, which broke the active : offline band. Up to T5 it is the wildcard the
+ * spec describes: a fix for an awkward placement, worth one small orb.
+ */
+export const CATALYST_MAX_FROM = 5;
+
+/** Can these two orbs fuse? Same tier up to T11 (two Void Stars = Singularity), or a Catalyst on T1-T5. */
+export function canMerge(a: number, b: number): boolean {
+  if (a === b) return a >= 1 && a <= MAX_TIER;
+  if (a === CATALYST) return b >= 1 && b <= CATALYST_MAX_FROM;
+  if (b === CATALYST) return a >= 1 && a <= CATALYST_MAX_FROM;
+  return false;
+}
+
+/**
+ * Hex triples pay 3 x the top tier's merge value / 10 (04 §3), the top tier read from the flask and
+ * the Distill Ceiling but capped here. BALANCE: uncapped, a triple beside a Void Star paid 24,300
+ * (~60 drops' worth) and herding junk out-earned merging. At the Eclipse cap a herded stone pays
+ * about two ordinary drops: herding is rewarded, and the stones that aren't herded still clog
+ * (the sim's novice loses ~25% at Volatility 8-9, the reference ~10-20%).
+ */
+export const HEX_TOP_CAP = 9;
+
+/** Hex Stone chance per drawn orb (04 §7): 3% per Volatility level. Ignored offline. */
+export const hexChance = (v: number) => 0.03 * Math.max(0, v);
+
 // ---------- flask geometry (logical px) ----------
 
 export const BASE_FLASK_W = 112;
@@ -54,6 +110,11 @@ export interface SpireStats {
   voidStars: number;
   maxTier: number; // this cycle, including T11
   essence: number; // Essence earned by merges this cycle (Goods export counter)
+  catalysts: number; // Catalyst merges
+  hexShatters: number; // Hex Stone triples shattered
+  tremors: number;
+  ventNows: number;
+  quicks: number;
 }
 
 export interface SpireRun {
@@ -71,6 +132,11 @@ export interface SpireRun {
   flask: number[];
   queue: number[];
   t1Run: number; // consecutive T1s drawn by the bag
+  /** Drops since the last Catalyst was drawn. */
+  catT: number;
+  /** A lowered Volatility waiting to apply (04 §7: on the next vent or after 30 s), or -1. */
+  volPending: number;
+  volPendAt: number;
   stats: SpireStats;
 }
 
@@ -86,7 +152,22 @@ export interface SpirePersistent {
 export type SpireSave = DeptSave<SpireRun, SpirePersistent>;
 
 export function defaultStats(): SpireStats {
-  return { drops: 0, merges: 0, bestChain: 0, vents: 0, dropsSinceVent: 0, singularities: 0, voidStars: 0, maxTier: 0, essence: 0 };
+  return {
+    drops: 0,
+    merges: 0,
+    bestChain: 0,
+    vents: 0,
+    dropsSinceVent: 0,
+    singularities: 0,
+    voidStars: 0,
+    maxTier: 0,
+    essence: 0,
+    catalysts: 0,
+    hexShatters: 0,
+    tremors: 0,
+    ventNows: 0,
+    quicks: 0,
+  };
 }
 
 export function defaultRun(): SpireRun {
@@ -105,6 +186,9 @@ export function defaultRun(): SpireRun {
     // The smarter bag opens with a guaranteed pair (onboarding step 2).
     queue: [1, 1, 2],
     t1Run: 0,
+    catT: 0,
+    volPending: -1,
+    volPendAt: 0,
     stats: defaultStats(),
   };
 }
@@ -126,6 +210,11 @@ export function normalize(run: SpireRun, per: SpirePersistent): void {
   run.minSinceVent ??= 0;
   run.ceiling ??= 0;
   run.featBest ??= 0;
+  run.catT ??= 0;
+  run.volBought ??= 0;
+  if (typeof run.volPending !== 'number' || run.volPending >= run.vol || run.volPending < 0) run.volPending = -1;
+  run.volPendAt ??= 0;
+  if (!Array.isArray(run.flask) || run.flask.length % 3 !== 0) run.flask = [];
   per.tomes ??= {};
   per.singMilestones ??= [];
   per.pages ??= 0;
@@ -147,6 +236,8 @@ export interface UpDef {
   pages?: boolean; // paid in Grimoire Pages (persistent)
   /** Locked until this department's 2nd Fall (the long node, core/longnode.ts). */
   afterFall?: boolean;
+  /** A one-time active tool (no idle value; never on the Steward's list). */
+  tool?: boolean;
   desc(l: number): string;
 }
 
@@ -167,12 +258,17 @@ export const UPGRADES: UpDef[] = [
   { id: 'valve', name: 'Quick Valve', branch: 'apparatus', base: 100, growth: 1.5, max: 4, desc: (l) => `Drop cooldown ${cooldownL(l).toFixed(2)}S > ${cooldownL(l + 1).toFixed(2)}S` },
   { id: 'wider', name: 'Wider Flask', branch: 'apparatus', base: 1000, growth: 3, max: 5, desc: (l) => `Flask width ${BASE_FLASK_W + 6 * l} > ${BASE_FLASK_W + 6 * (l + 1)}` },
   { id: 'neck', name: 'Taller Neck', branch: 'apparatus', base: 1500, growth: 3, max: 4, desc: () => 'Brim Line raised 8 px' },
+  { id: 'coil', name: 'Catalyst Coil', branch: 'apparatus', base: 800, growth: 2.2, max: 7, desc: (l) => `A Catalyst every ${catalystEveryL(l)} > ${catalystEveryL(l + 1)} drops` },
+  { id: 'tremor', name: "Overlord's Tremor", branch: 'apparatus', base: 600, growth: 1, max: 1, tool: true, desc: () => 'SHAKE: flick up to jolt the flask (10S)' },
+  { id: 'quick', name: 'Quicksilver Phial', branch: 'apparatus', base: 1800, growth: 1, max: 1, tool: true, desc: () => 'QS: swap in a shoving bead (25S)' },
+  { id: 'settle', name: 'Settle Charm', branch: 'apparatus', base: 2500, growth: 1, max: 1, tool: true, desc: () => 'VENT NOW: tidy the top, 50% back' },
   // C. Apprentices
   { id: 'hire', name: 'Hire Apprentice', branch: 'apprentices', base: 250, growth: 2.5, max: 4, desc: (l) => `Homunculi ${l} > ${l + 1} (4 drops/min each)` },
   { id: 'diligence', name: 'Diligence', branch: 'apprentices', base: 150, growth: 1.25, max: 25, desc: (l) => `Apprentice speed +${8 * l}% > +${8 * (l + 1)}%` },
   { id: 'tutelage', name: 'Tutelage', branch: 'apprentices', base: 400, growth: 1.4, max: 7, desc: (l) => `Chain skill ${pct(chainFactorL(l))} > ${pct(chainFactorL(l + 1))}` },
   // D. Tomes (Grimoire Pages, persist through Falls)
   { id: 'twinning', name: 'Tome of Twinning', branch: 'tomes', base: 3, growth: 1, max: 1, pages: true, desc: () => '5% of merges skip a tier' },
+  { id: 'hunger', name: 'Tome of Hunger', branch: 'tomes', base: 4, growth: 1, max: 1, pages: true, desc: () => 'Void Stars eat touching T1-T3' },
   { id: 'patience', name: 'Tome of Patience', branch: 'tomes', base: 5, growth: 1, max: 1, pages: true, desc: () => 'Apprentices distill up to T10' },
   { id: 'mirror', name: 'Tome of the Mirror', branch: 'tomes', base: 6, growth: 1, max: 1, pages: true, desc: () => 'Preview 3 orbs instead of 2' },
 ];
@@ -202,6 +298,14 @@ export const potentMultL = (l: number) => 1 + 0.1 * l;
 export const resCapL = (l: number) => 3 + 0.25 * l;
 export const cascadeWindowL = (l: number) => 1.5 + 0.15 * l;
 export const cooldownL = (l: number) => Math.max(0.4, 0.6 - 0.05 * l);
+export const catalystEveryL = (l: number) => Math.max(18, 60 - 6 * l);
+export const catalystEvery = (run: SpireRun) => catalystEveryL(lvOf(run, 'coil'));
+export const TREMOR_CD = 10;
+export const QUICK_CD = 25;
+export const VENT_NOW_CD = 20;
+export const VENT_NOW_REFUND = 0.5;
+/** 04 §7: a lowered Volatility applies on the next vent or after this long. */
+export const VOL_LOWER_MS = 30_000;
 export const chainFactorL = (l: number) => Math.min(1, 0.8 + 0.03 * l);
 
 export const potentMult = (run: SpireRun) => potentMultL(lvOf(run, 'potent')) * longMult(lvOf(run, 'amp'));
@@ -329,6 +433,78 @@ export const commendations: Commendation[] = [
   { id: 'singularity', label: 'SINGULARITY', test: (s) => (per(s).singularitiesEver ?? 0) >= 1 },
 ];
 
+/** Satchel L1 "Ready" list (00 §5.2): the next level of every open Arcana node plus the next
+ * Volatility level, cheapest first. Tomes are paid in Pages, so they never show here. */
+export function readyBuysOf(save: DeptSave): { label: string; cost: number }[] {
+  const r = run(save);
+  if (!r?.lv) return [];
+  const out: { label: string; cost: number }[] = [];
+  for (const u of UPGRADES) {
+    if (u.pages || upLocked(u, save.cycle?.n ?? 0)) continue;
+    const l = lvOf(r, u.id);
+    if (l >= u.max) continue;
+    out.push({ label: u.max > 1 ? `${u.name} ${l + 1}` : u.name, cost: upCost(u, l) });
+  }
+  if ((r.volBought ?? 0) < VOL_MAX) out.push({ label: `Volatility ${r.volBought + 1}`, cost: volCost(r.volBought) });
+  return out.sort((a, b) => a.cost - b.cost);
+}
+
+/** The Steward's list (00 §5.2 m5): only nodes that raise idleRate. No Volatility (a dial), no
+ * one-time tools, no Tomes (Pages). buy() only raises the level; the core already paid. */
+export function stewardCandidatesOf(save: DeptSave): StewardCandidate[] {
+  const r = run(save);
+  const p = per(save);
+  if (!r?.lv || !p) return [];
+  const fuel = save.imports?.souls ?? 0;
+  const base = idleRateOf(r, p, fuel);
+  const out: StewardCandidate[] = [];
+  for (const u of UPGRADES) {
+    if (u.pages || u.tool || upLocked(u, save.cycle?.n ?? 0)) continue;
+    const l = lvOf(r, u.id);
+    if (l >= u.max) continue;
+    r.lv[u.id] = l + 1;
+    const delta = idleRateOf(r, p, fuel) - base;
+    r.lv[u.id] = l;
+    if (!(delta > 0)) continue;
+    out.push({
+      id: u.id,
+      label: u.name,
+      cost: upCost(u, l),
+      deltaIdle: delta,
+      buy: () => {
+        const cur = lvOf(r, u.id);
+        if (cur < u.max) r.lv[u.id] = cur + 1;
+      },
+    });
+  }
+  return out;
+}
+
+/** Head Start (00 §2.5, M4): the first 2L Volatility levels owned and 1 + L free apprentices.
+ * Idempotent (max), run data only. The knob itself stays where the player leaves it. */
+export function applyHeadStartTo(save: DeptSave, level: number): void {
+  const r = run(save);
+  if (!r) return;
+  r.lv ??= {};
+  const L = Math.max(0, Math.floor(level));
+  if (L <= 0) return;
+  r.volBought = Math.max(r.volBought ?? 0, Math.min(VOL_MAX, 2 * L));
+  r.lv.hire = Math.max(lvOf(r, 'hire'), Math.min(UP.hire.max, 1 + L));
+}
+
+/** Signature "Seeded Flask" (00 §2.5): Wider Flask 1 and Catalyst Coil 2 at every cycle start. */
+export const SEEDED_FLASK = {
+  name: 'Seeded Flask',
+  desc: 'Start each cycle with Wider Flask 1 and Catalyst Coil 2',
+  apply(save: DeptSave): void {
+    const r = run(save);
+    if (!r) return;
+    r.lv ??= {};
+    r.lv.wider = Math.max(lvOf(r, 'wider'), 1);
+    r.lv.coil = Math.max(lvOf(r, 'coil'), 2);
+  },
+};
+
 export const spireEcon: DeptEcon = {
   id: 'spire',
   version: 1,
@@ -366,4 +542,8 @@ export const spireEcon: DeptEcon = {
   rankRef: 1500,
   rankTarget: 1e4,
   commendations,
+  readyBuys: readyBuysOf,
+  stewardCandidates: stewardCandidatesOf,
+  applyHeadStart: applyHeadStartTo,
+  signature: SEEDED_FLASK,
 };

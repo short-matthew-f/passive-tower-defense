@@ -29,6 +29,8 @@ export interface Orb {
   landed: boolean;
   /** Merge flash timer for rendering. */
   flash: number;
+  /** Return-ritual gift (rendering only; survives as the merged orb). */
+  sealed?: boolean;
 }
 
 export interface MergeEvent {
@@ -39,6 +41,8 @@ export interface MergeEvent {
   x: number;
   y: number;
   fromTier: number;
+  /** A Catalyst fused into `into` (it upgraded one tier). */
+  catalyst?: boolean;
 }
 
 export class Flask {
@@ -55,6 +59,12 @@ export class Flask {
   private contacts: [Orb, Orb, number, number][] = [];
   /** Tier a merge of two `t` orbs produces; the core may return t+2 (Tome of Twinning). */
   mergeTier: (t: number) => number = (t) => t + 1;
+  /** Which orb codes fuse on contact (default: the same tier up to 11). */
+  mergeable: (a: number, b: number) => boolean = (a, b) => a === b && a <= 11;
+  /** A Catalyst code: fusing with it upgrades the other orb one tier (no tier+2). */
+  catalyst = -1;
+  /** Collision mass (uniform density: r^2); the core makes Quicksilver and the Legend heavy. */
+  mass: (o: Orb) => number = (o) => o.r * o.r;
   radius: (t: number) => number;
   onMerge: (e: MergeEvent) => void = () => {};
 
@@ -158,14 +168,14 @@ export class Flask {
         if (dy > rs + MERGE_SLOP || dy < -rs - MERGE_SLOP) continue;
         const d2 = dx * dx + dy * dy;
         if (d2 >= (rs + MERGE_SLOP) * (rs + MERGE_SLOP)) continue;
-        if (record && a.tier === b.tier) this.pairs.push(a.id < b.id ? [a, b] : [b, a]);
+        if (record && this.mergeable(a.tier, b.tier)) this.pairs.push(a.id < b.id ? [a, b] : [b, a]);
         if (d2 >= rs * rs) continue;
         const d = Math.sqrt(d2) || 0.001;
         const nx = d2 > 0 ? dx / d : 0;
         const ny = d2 > 0 ? dy / d : 1;
         const pen = rs - d;
-        const ma = a.r * a.r;
-        const mb = b.r * b.r;
+        const ma = this.mass(a);
+        const mb = this.mass(b);
         const wa = mb / (ma + mb);
         const wb = 1 - wa;
         a.x -= nx * pen * wa;
@@ -194,8 +204,8 @@ export class Flask {
       const vn = rvx * nx + rvy * ny;
       const tx = rvx - vn * nx;
       const ty = rvy - vn * ny;
-      const ma = a.r * a.r;
-      const mb = b.r * b.r;
+      const ma = this.mass(a);
+      const mb = this.mass(b);
       const k = 0.25;
       const ia = (mb / (ma + mb)) * k;
       const ib = (ma / (ma + mb)) * k;
@@ -212,9 +222,23 @@ export class Flask {
     pairs.sort((p, q) => p[0].id - q[0].id || p[1].id - q[1].id);
     const used = new Set<number>();
     for (const [a, b] of pairs) {
-      if (!a.alive || !b.alive || a.tier !== b.tier || used.has(a.id) || used.has(b.id)) continue;
+      if (!a.alive || !b.alive || !this.mergeable(a.tier, b.tier) || used.has(a.id) || used.has(b.id)) continue;
       used.add(a.id);
       used.add(b.id);
+      if (a.tier !== b.tier && (a.tier === this.catalyst || b.tier === this.catalyst)) {
+        // Catalyst: it dissolves into the other orb, which grows one tier where it sits.
+        const cat = a.tier === this.catalyst ? a : b;
+        const o = cat === a ? b : a;
+        this.remove(cat);
+        const fromTier = o.tier;
+        o.tier = fromTier + 1;
+        o.rt = this.radius(o.tier);
+        o.flash = 0.2;
+        o.landed = true;
+        o.vy = Math.min(0, o.vy);
+        this.onMerge({ a: o, b: cat, into: o, x: o.x, y: o.y, fromTier, catalyst: true });
+        continue;
+      }
       const x = (a.x + b.x) / 2;
       const y = (a.y + b.y) / 2;
       const fromTier = a.tier;
@@ -236,6 +260,7 @@ export class Flask {
       a.vy = Math.min(0, (a.vy + b.vy) / 2);
       a.flash = 0.2;
       a.landed = true;
+      if (b.sealed) a.sealed = true;
       used.add(a.id);
       this.onMerge({ a, b, into: a, x, y, fromTier });
     }

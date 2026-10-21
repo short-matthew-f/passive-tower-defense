@@ -3,23 +3,30 @@
 // Rendering: a few reusable Graphics redrawn per frame plus pooled orb Sprites; every PixelText
 // is created once and updated with .set().
 import { Container, Graphics, Rectangle, Sprite, type FederatedPointerEvent } from 'pixi.js';
-import type { DeptCtx, DeptScene, UpgradeEntry, UpgradeGroup } from '../../core/dept';
+import type { DeptCtx, DeptScene, Rect, SayOpts, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
 import { PixelText } from '../../ui/font';
 import { Button, C, drawSprite } from '../../ui/widgets';
-import { ORB_COL, orbColor, orbLight, orbTexture, PAL, SORC_IDLE_FRAME, SORC_PAL } from './art';
+import { ICON_PAL, ICON_QUICK, ICON_TREMOR, ICON_VENT, ORB_COL, orbColor, orbLight, orbTexture, PAL, SORC_IDLE_FRAME, SORC_PAL, type SorcMood } from './art';
 import {
   apprenticeDropsPerMin,
   apprentices,
   arcanaMult,
+  CATALYST,
   distillCeiling,
   FLASK_H,
   heldVol,
+  HEX,
   idleRateOf,
   lvOf,
   MAX_TIER,
+  orbR,
+  QUICK,
+  QUICK_CD,
   TIERS,
+  TREMOR_CD,
+  VENT_NOW_CD,
   tomeOf,
   UPGRADES,
   upCost,
@@ -33,6 +40,7 @@ import {
 import { MAX_ORBS, SpireCore } from './logic';
 import type { MergeEvent, Orb } from './physics';
 import { sfx } from './sfx';
+import { ToolBtn } from './toolbtn';
 
 const BAR_H = 16;
 const BRAZIER_H = 7;
@@ -131,6 +139,9 @@ export class SpireScene implements DeptScene {
   private upBtn!: Button;
   private volUp!: Button;
   private volDown!: Button;
+  private ventBtn: ToolBtn;
+  private tremorBtn: ToolBtn;
+  private quickBtn: ToolBtn;
   private aimHit = new Container();
 
   // Layout (stage px).
@@ -138,6 +149,9 @@ export class SpireScene implements DeptScene {
   private mouthY = 0; // interior top
   private botY = 0; // interior bottom
   private queueY = 0;
+  /** Short screens: the preview queue and Resonance sit in the right gutter, clear of the manager
+   * strip (04 §18 dock: the strip ends above the dropper and the preview). */
+  private queueSide = false;
   private barY = 0;
   private lgX = 0; // left gutter
   private lgW = 0;
@@ -153,6 +167,13 @@ export class SpireScene implements DeptScene {
   private aiming = false;
   private pending = false;
   private pointerId = -1;
+  private downY = 0;
+  private downT = 0;
+
+  // Return ritual (04 §13): the apprentices' sealed gift orb.
+  private ritual: { tier: number; resolve: (score: number) => void; t: number; orbId: number; dropped: boolean } | null = null;
+  private seenCatalyst = false;
+  private seenHex = false;
 
   // Juice.
   private particles: Particle[] = [];
@@ -174,7 +195,7 @@ export class SpireScene implements DeptScene {
   private floatBudget = 5;
   private heartT = 0;
   private ventPuff = 0;
-  private sorcMood: 'calm' | 'scared' | 'singed' | 'happy' = 'calm';
+  private sorcMood: SorcMood = 'calm';
   private moodT = 0;
   private persistT = 0;
   private checkT = 0;
@@ -191,10 +212,15 @@ export class SpireScene implements DeptScene {
       raiseSkill: (l) => ctx.raiseSkill(l),
       merge: (e, amount, depth, res) => this.onMerge(e, amount, depth, res),
       singularity: (x, y, amount) => this.onSingularity(x, y, amount),
-      vent: (out, refund) => this.onVent(out, refund),
-      drop: () => sfx.drop(this.vol()),
+      vent: (out, refund, manual) => this.onVent(out, refund, manual),
+      drop: (o) => this.onDrop(o),
       newTier: (t) => this.onNewTier(t),
       page: (n, why) => this.onPage(n, why),
+      shatter: (stones, amount) => this.onShatter(stones, amount),
+      devour: (v, o, amount) => this.onDevour(v, o, amount),
+      fizz: (o) => this.onFizz(o),
+      tremor: () => this.onTremor(),
+      volApplied: (v) => this.ctx.float(`VOLATILITY ${v}`, this.cx, this.mouthY + 16, '#e05050'),
       imports: ctx.save.imports,
     });
     // Hold the skill gate after a reload.
@@ -242,7 +268,12 @@ export class SpireScene implements DeptScene {
     this.upBtn = new Button({ w: 70, h: BAR_H - 1, label: 'UPGRADES', color: C.gold, shade: 0x9a7a20, onTap: () => this.openUpgrades() });
     this.volUp = new Button({ w: 16, h: 13, label: '+', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => this.stepVol(1) });
     this.volDown = new Button({ w: 16, h: 13, label: '-', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => this.stepVol(-1) });
-    this.root.addChild(this.upBtn, this.volUp, this.volDown);
+    this.ventBtn = new ToolBtn('VENT', ICON_VENT, ICON_PAL, () => this.useVentNow());
+    this.tremorBtn = new ToolBtn('SHAKE', ICON_TREMOR, ICON_PAL, () => this.useTremor());
+    this.quickBtn = new ToolBtn('QS', ICON_QUICK, ICON_PAL, () => this.useQuick());
+    this.root.addChild(this.upBtn, this.volUp, this.volDown, this.ventBtn, this.tremorBtn, this.quickBtn);
+    this.seenCatalyst = !!ctx.save.seen['ls.catalyst'];
+    this.seenHex = !!ctx.save.seen['ls.hex'];
     this.resize(ctx.layout);
   }
 
@@ -260,6 +291,8 @@ export class SpireScene implements DeptScene {
     this.botY = this.barY - 2 - BRAZIER_H - WALL;
     this.mouthY = this.botY - FLASK_H;
     this.queueY = Math.max(c.y + 1, this.mouthY - DROP_ZONE - QUEUE_H);
+    // The manager strip covers c.y .. c.y + ~34 (portrait 24 + margins): keep the preview out of it.
+    this.queueSide = this.queueY < c.y + 34;
     const left = this.cx - W / 2 - WALL;
     const right = this.cx + W / 2 + WALL;
     this.lgX = c.x + 2;
@@ -276,10 +309,20 @@ export class SpireScene implements DeptScene {
     this.volUp.position.set(this.lgX + Math.floor((this.lgW - bw) / 2), this.mouthY + 10);
     this.volDown.position.set(this.lgX + Math.floor((this.lgW - bw) / 2), this.mouthY + 48);
     this.upBtn.position.set(c.x + 3, this.barY);
-    this.nextText.position.set(left, this.queueY + 2);
+    if (this.queueSide) this.nextText.position.set(this.rgX + Math.floor((this.rgW - this.nextText.width) / 2), this.mouthY + 2);
+    else this.nextText.position.set(left, this.queueY + 2);
+    this.nextText.visible = !this.queueSide || this.rgW >= 16;
     this.volLabel.position.set(this.lgX + Math.floor((this.lgW - 11) / 2), this.mouthY + 2);
     this.warnText.position.set(this.cx - 9, this.mouthY + 3);
     this.chainText.position.set(this.cx, this.mouthY + 30);
+    // Tools in the left gutter under the knob (04 §10: Vent Now there; Tremor and Quicksilver
+    // join it), stacked down towards the Head Sorcerer.
+    let ty = this.mouthY + 92;
+    for (const b of [this.ventBtn, this.tremorBtn, this.quickBtn]) {
+      b.fit(this.lgW);
+      b.position.set(this.lgX + Math.floor((this.lgW - b.bw) / 2), ty);
+      ty += b.bh + 4;
+    }
     this.flaskWDrawn = W;
     this.drawStatic();
   }
@@ -389,7 +432,7 @@ export class SpireScene implements DeptScene {
       name: 'Volatility',
       desc: () => {
         const n = run.volBought + 1;
-        return n > VOL_MAX ? 'The dial is maxed' : `Unlock V${n}: Arcana x${arcanaMult(n).toFixed(2)}, lower brim`;
+        return n > VOL_MAX ? 'The dial is maxed' : `Unlock V${n}: Arcana x${arcanaMult(n).toFixed(2)}, hexes ${n * 3}%`;
       },
       level: () => run.volBought,
       max: VOL_MAX,
@@ -398,8 +441,11 @@ export class SpireScene implements DeptScene {
       buy: () => {
         if (run.volBought >= VOL_MAX) return;
         if (!this.ctx.spend(volCost(run.volBought))) return;
+        const before = run.volBought;
         run.volBought++;
-        this.core.setVol(run.volBought);
+        // The knob follows a new level only when it already sat at the old top (the first level is
+        // turned by hand: the Volatility lesson).
+        if (before > 0 && this.core.volTarget === before) this.core.setVol(run.volBought);
         this.afterBuy('volatility');
       },
     };
@@ -407,42 +453,43 @@ export class SpireScene implements DeptScene {
 
   private groups(): UpgradeGroup[] {
     const by = (b: string) => UPGRADES.filter((u) => u.branch === b).map((u) => this.entry(u));
+    const pagesLine = () => ({ text: `${formatNum(this.per.pages)} GRIMOIRE PAGES`, color: '#e8c04a' });
     return [
       { name: 'Alchemy', entries: by('alchemy') },
       { name: 'Apparatus', entries: [this.volEntry(), ...by('apparatus')] },
       { name: 'Apprent', entries: by('apprentices') },
-      { name: 'Tomes', entries: by('tomes') },
+      { name: 'Tomes', entries: by('tomes'), bank: pagesLine },
     ];
   }
 
   private openUpgrades(): void {
     this.aiming = false;
     this.pending = false;
+    if (this.per.pages > 0 || this.per.pagesEver > 0) this.ctx.save.seen['sp.sheetPages'] = 1;
     this.ctx.openUpgrades(this.groups());
+  }
+
+  /** A manager line plus the in-scene sprite's matching expression (04 §18). */
+  private say(key: string, opts: SayOpts, mood?: SorcMood, t = 3): void {
+    this.ctx.say(key, opts);
+    if (mood) this.mood(mood, t);
   }
 
   private afterBuy(id: string): void {
     this.ctx.saveSoon();
     this.syncState();
-    const once = (key: string, trigger = key) => {
-      if (!this.ctx.seen(`m.${key}`)) {
-        this.ctx.markSeen(`m.${key}`);
-        this.ctx.say(trigger, { milestone: true });
-        return true;
-      }
-      return false;
-    };
-    if (id === 'wider') once('firstWider');
+    if (id === 'wider') this.say('firstWider', { type: 'first_upgrade', key: 'wider' }, 'relieved');
     if (id === 'hire') {
-      if (!once('firstHelper')) once('apprLesson');
+      this.say('firstHelper', { type: 'first_helper' }, 'lecture');
+      this.ctx.lesson('apprentices');
     }
+    if (id === 'tremor' || id === 'quick' || id === 'settle') this.ctx.say(id, { type: 'mechanic_unlocked' });
     if (id === 'volatility') {
       const b = this.run.volBought;
-      if (!once('volLesson')) {
-        const best = this.ctx.save.lifetime.best.spireVol ?? 0;
-        if (b % 3 === 0 || b > best) this.ctx.say('dialRaised', { milestone: true });
-      }
-      this.ctx.save.lifetime.best.spireVol = Math.max(this.ctx.save.lifetime.best.spireVol ?? 0, b);
+      const best = this.ctx.save.lifetime.best.spireVol ?? 0;
+      if (b === 1) this.ctx.say('volatility', { type: 'mechanic_unlocked' });
+      else if (b % 3 === 0 || b > best) this.say('dialRaised', { type: 'dial_raised', key: `vol${b}` }, 'calm');
+      this.ctx.save.lifetime.best.spireVol = Math.max(best, b);
     }
   }
 
@@ -457,7 +504,8 @@ export class SpireScene implements DeptScene {
 
   private stepVol(d: number): void {
     const run = this.run;
-    const want = run.vol + d;
+    const want = this.core.volTarget + d;
+    if (want < 0) return;
     if (want > run.volBought) {
       const msg = run.volBought >= VOL_MAX ? 'MAXED' : `V${run.volBought + 1}: ${formatNum(volCost(run.volBought))} IN UPGRADES`;
       this.ctx.float(msg, this.cx, this.mouthY + 16, '#e05050');
@@ -466,7 +514,8 @@ export class SpireScene implements DeptScene {
     }
     if (this.core.setVol(want)) {
       this.ctx.saveSoon();
-      this.ctx.float(`VOLATILITY ${run.vol}`, this.cx, this.mouthY + 16, '#e05050');
+      if (run.volPending >= 0) this.ctx.float(`V${run.volPending} IN 30S OR NEXT VENT`, this.cx, this.mouthY + 16, '#e8c04a');
+      else this.ctx.float(`VOLATILITY ${run.vol}`, this.cx, this.mouthY + 16, '#e05050');
       this.syncState();
     }
   }
@@ -480,6 +529,8 @@ export class SpireScene implements DeptScene {
   private onDown(e: FederatedPointerEvent): void {
     this.aiming = true;
     this.pointerId = e.pointerId;
+    this.downY = e.getLocalPosition(this.root).y;
+    this.downT = this.time;
     this.core.aimX = this.core.clampAim(this.localX(e));
   }
 
@@ -491,6 +542,12 @@ export class SpireScene implements DeptScene {
   private onUp(e: FederatedPointerEvent): void {
     if (!this.aiming || e.pointerId !== this.pointerId) return;
     this.aiming = false;
+    // A quick upward flick is the Overlord's Tremor (04 §11), not a drop.
+    const dy = this.downY - e.getLocalPosition(this.root).y;
+    if (this.core.hasTremor && dy > 22 && this.time - this.downT < 0.35) {
+      this.useTremor();
+      return;
+    }
     this.core.aimX = this.core.clampAim(this.localX(e));
     if (this.core.canDrop()) this.doDrop();
     else this.pending = true; // drops as soon as the valve is ready
@@ -506,6 +563,45 @@ export class SpireScene implements DeptScene {
     this.ctx.haptic(5);
   }
 
+  private onDrop(o: Orb): void {
+    sfx.drop(this.vol());
+    const r = this.ritual;
+    if (r && !r.dropped && o.tier === r.tier) {
+      r.dropped = true;
+      r.orbId = o.id;
+      r.t = 0;
+      o.sealed = true;
+    }
+  }
+
+  // ---------- tools ----------
+
+  private useTremor(): void {
+    if (!this.core.tremor()) {
+      if (this.core.hasTremor) sfx.deny(this.vol());
+      return;
+    }
+    this.ctx.saveSoon();
+  }
+
+  private useQuick(): void {
+    if (!this.core.quick()) {
+      sfx.deny(this.vol());
+      return;
+    }
+    this.ctx.float('QUICKSILVER!', this.cx, this.mouthY + 16, '#c8d0dc');
+    sfx.page(this.vol());
+  }
+
+  private useVentNow(): void {
+    if (this.core.ventable() === 0 && this.core.ventNowCool <= 0) {
+      this.ctx.float('NOTHING TO VENT', this.cx, this.mouthY + 16, '#a8f0b0');
+      sfx.deny(this.vol());
+      return;
+    }
+    if (!this.core.ventNow()) sfx.deny(this.vol());
+  }
+
   // ---------- sim hooks (juice) ----------
 
   private sx(x: number): number {
@@ -518,6 +614,8 @@ export class SpireScene implements DeptScene {
 
   private onMerge(e: MergeEvent, amount: number, depth: number, res: number): void {
     const t = e.into ? e.into.tier : 12;
+    if (this.ritual?.dropped && (e.a.sealed || e.b.sealed)) this.endRitual(1);
+    if (e.catalyst) this.ctx.float('CATALYZED!', this.sx(e.x), this.sy(e.y) - orbR(t) - 14, '#f0f0ff');
     const x = this.sx(e.x);
     const y = this.sy(e.y);
     const r = TIERS[Math.min(MAX_TIER, t)].r;
@@ -537,7 +635,7 @@ export class SpireScene implements DeptScene {
       this.chainShow = 1.4;
       this.resPulse = 1;
       if (depth === 5 && this.sayCooldown <= 0) {
-        this.ctx.say('bigChain');
+        this.say('bigChain', {}, 'happy');
         this.sayCooldown = 8;
       }
     }
@@ -561,12 +659,15 @@ export class SpireScene implements DeptScene {
     this.ctx.float(`SINGULARITY! +${formatNum(amount)}`, X, Y - 20, '#ffffff');
     this.ctx.haptic(30);
     sfx.chord(this.vol());
+    if (this.ritual?.dropped && !this.core.flask.orbs.some((o) => o.sealed)) this.endRitual(1);
     this.mood('happy', 4);
-    this.ctx.say('singularity', { milestone: true });
+    // First Singularity: a mechanic (its micro-lesson points at the new Page); later ones get the line.
+    if (!this.ctx.seen('ls.singularity')) this.ctx.say('singularity', { type: 'mechanic_unlocked' });
+    else this.say('singularity', {}, 'happy');
     this.ctx.saveSoon();
   }
 
-  private onVent(out: Orb[], refund: number): void {
+  private onVent(out: Orb[], refund: number, manual: boolean): void {
     this.ventPuff = 1;
     for (const o of out) {
       if (this.flyers.length >= MAX_FLYERS) break;
@@ -580,19 +681,72 @@ export class SpireScene implements DeptScene {
     if (refund > 0) this.ctx.float(`FUMES +${formatNum(refund)}`, this.cx, y - 14, '#a8f0b0');
     this.ctx.haptic(30);
     sfx.vent(this.vol());
+    this.pending = false;
+    this.ctx.saveSoon();
+    // The sealed gift was vented: the apprentices still count the thought.
+    const r = this.ritual;
+    if (r && r.dropped && !this.core.flask.orbs.some((o) => o.sealed)) this.endRitual(0.4);
+    if (manual) {
+      this.mood('relieved', 2);
+      return;
+    }
     this.mood('singed', 4);
     const now = this.time;
     this.recentVents = this.recentVents.filter((t) => now - t < 300);
     this.recentVents.push(now);
-    if (!this.ctx.seen('m.hazardFirst')) {
-      this.ctx.markSeen('m.hazardFirst');
-      this.ctx.say('hazardFirst', { milestone: true });
-    } else if (this.recentVents.length >= 3 && !this.ctx.seen(`m.struggle.${Math.floor(Date.now() / 1.8e6)}`)) {
-      this.ctx.markSeen(`m.struggle.${Math.floor(Date.now() / 1.8e6)}`);
-      this.ctx.say('struggle', { milestone: true });
+    if (this.run.stats.vents <= 1 || !this.ctx.seen('ls.vents')) {
+      this.say('hazardFirst', { type: 'hazard_first' }, 'singed', 4);
+      this.ctx.lesson('vents');
+    } else if (this.recentVents.length >= 3 && this.core.volTarget > 0) {
+      // Struggle (04 §18): 3 vents in 5 min; the one-tap offer turns the knob down one step.
+      this.say('struggle', { type: 'struggle', offer: () => this.stepVol(-1) }, 'singed', 4);
+      this.recentVents.length = 0;
     }
-    this.pending = false;
-    this.ctx.saveSoon();
+  }
+
+  private onShatter(stones: Orb[], amount: number): void {
+    let x = 0;
+    let y = 0;
+    for (const o of stones) {
+      x += o.x;
+      y += o.y;
+      const X = this.sx(o.x);
+      const Y = this.sy(o.y);
+      for (let i = 0; i < 6; i++) {
+        const a = Math.random() * Math.PI * 2;
+        this.addParticle(X, Y, Math.cos(a) * 50, Math.sin(a) * 50 - 20, 0.5, i % 2 ? 0x6a6470 : PAL.rune, 1, 120);
+      }
+    }
+    x = this.sx(x / stones.length);
+    y = this.sy(y / stones.length);
+    this.addRing(x, y, 4, 20, PAL.rune);
+    this.ctx.float(`HEX POP +${formatNum(amount)}`, x, y - 10, '#c070ff');
+    sfx.bloop(this.vol(), 3, 4);
+    this.ctx.haptic(10);
+    if (this.run.stats.hexShatters === 1) this.say('hexShatter', {}, 'relieved');
+  }
+
+  private onDevour(v: Orb, o: Orb, amount: number): void {
+    const X = this.sx(o.x);
+    const Y = this.sy(o.y);
+    for (let i = 0; i < 5; i++) this.addParticle(X, Y, (this.sx(v.x) - X) * 2, (this.sy(v.y) - Y) * 2, 0.4, orbColor(o.tier), 1, 0);
+    if (this.floatBudget >= 1) {
+      this.floatBudget -= 1;
+      this.ctx.float(`+${formatNum(amount)}`, X, Y - 6, '#c070ff');
+    }
+  }
+
+  private onFizz(o: Orb): void {
+    const X = this.sx(o.x);
+    const Y = this.sy(o.y);
+    for (let i = 0; i < 6; i++) this.addParticle(X, Y, (Math.random() - 0.5) * 30, -20 - Math.random() * 20, 0.6, 0xc8d0dc, 1, -10);
+  }
+
+  private onTremor(): void {
+    this.shake = Math.max(this.shake, 0.25);
+    this.ctx.haptic(20);
+    sfx.vent(this.vol() * 0.5);
+    this.mood('scared', 0.8);
   }
 
   private onNewTier(t: number): void {
@@ -600,24 +754,18 @@ export class SpireScene implements DeptScene {
     const isNew = t > (best.spireTier ?? 0);
     best.spireTier = Math.max(best.spireTier ?? 0, t);
     if (t >= 6) this.mood('happy', 3);
-    if (t === MAX_TIER && !this.ctx.seen('m.voidStar')) {
-      this.ctx.markSeen('m.voidStar');
-      this.ctx.say('voidStar', { milestone: true });
-    } else if (t >= 6 && isNew) {
-      this.ctx.say('tierNew', { milestone: true, vars: { name: TIERS[t].name } });
-    }
+    if (!isNew || t < 6) return;
+    if (t === MAX_TIER) this.say('voidStar', { type: 'tier_reached', key: 'tier11' }, 'happy');
+    else this.say('tierNew', { type: 'tier_reached', key: `tier${t}`, vars: { name: TIERS[t].name.toUpperCase() } }, 'happy');
   }
 
   private onPage(n: number, why: string): void {
     this.ctx.float(`+${n} GRIMOIRE PAGE (${why})`, this.cx, this.mouthY + 40, '#e8c04a');
     sfx.page(this.vol());
-    if (!this.ctx.seen('m.page')) {
-      this.ctx.markSeen('m.page');
-      this.ctx.say('page', { milestone: true });
-    }
+    this.ctx.lesson('tomes');
   }
 
-  private mood(m: 'calm' | 'scared' | 'singed' | 'happy', t: number): void {
+  private mood(m: SorcMood, t: number): void {
     this.sorcMood = m;
     this.moodT = t;
   }
@@ -674,11 +822,9 @@ export class SpireScene implements DeptScene {
         sfx.heartbeat(this.vol());
       }
       if (this.sorcMood !== 'singed') this.mood('scared', 0.5);
-      if (!this.ctx.seen('m.brim')) {
-        this.ctx.markSeen('m.brim');
-        this.ctx.say('brim', { milestone: true });
-      }
     } else this.heartT = 0;
+    this.updateRitual(dt);
+    this.updateTools();
     this.moodT -= dt;
     if (this.moodT <= 0) this.sorcMood = 'calm';
 
@@ -699,10 +845,70 @@ export class SpireScene implements DeptScene {
       this.root.position.set(Math.round((Math.random() - 0.5) * 2 * m), Math.round((Math.random() - 0.5) * 2 * m));
     } else this.root.position.set(0, 0);
 
-    if (!this.core.intense && this.sayCooldown <= 0 && Math.random() < dt / 70) {
-      this.ctx.say('ambient');
-      this.sayCooldown = 20;
+  }
+
+  /** Tool buttons: visible once bought, dimmed while cooling down. */
+  private updateTools(): void {
+    const c = this.core;
+    const set = (b: ToolBtn, owned: boolean, cool: number, cd: number, extra = true) => {
+      b.visible = owned;
+      if (!owned) return;
+      b.cool = cool > 0 ? cool / cd : 0;
+      b.ready = cool <= 0 && extra;
+      b.redraw();
+    };
+    set(this.ventBtn, c.hasVentNow, c.ventNowCool, VENT_NOW_CD, c.lock <= 0 && c.ventable() > 0);
+    set(this.tremorBtn, c.hasTremor, c.tremorCool, TREMOR_CD, c.flask.count > 0);
+    set(this.quickBtn, c.hasQuick, c.quickCool, QUICK_CD, c.current !== QUICK);
+    // First Catalyst / Hex Stone in hand: a one-beat lesson.
+    const cur = c.current;
+    if (cur === CATALYST && !this.seenCatalyst) {
+      this.seenCatalyst = true;
+      this.ctx.lesson('catalyst');
+    } else if (cur === HEX && !this.seenHex) {
+      this.seenHex = true;
+      this.ctx.lesson('hex');
     }
+  }
+
+  // ---------- return ritual (04 §13, 00 §5.3) ----------
+
+  /** The apprentices hand over one sealed orb (Distill Ceiling - 3) to drop yourself; merging it
+   * scores 1, dropping it 0.6, a vent 0.4, and letting them keep it 0.25. */
+  returnRitual(haul: number): Promise<number> {
+    if (!(haul > 0) || this.ritual) return Promise.resolve(0);
+    const tier = Math.max(2, Math.min(8, distillCeiling(this.run, this.per) - 3));
+    return new Promise<number>((resolve) => {
+      this.ritual = { tier, resolve, t: 0, orbId: -1, dropped: false };
+      this.core.pushFront(tier);
+      this.ctx.float('A SEALED GIFT! DROP IT', this.cx, this.mouthY + 24, '#e8c04a');
+      this.mood('relieved', 3);
+      sfx.page(this.vol());
+    });
+  }
+
+  private updateRitual(dt: number): void {
+    const r = this.ritual;
+    if (!r) return;
+    r.t += dt;
+    if (!r.dropped) {
+      // Not dropped in 25 s: the apprentices keep it for their own flask.
+      if (r.t >= 25) {
+        const i = this.run.queue.indexOf(r.tier);
+        if (i >= 0) this.run.queue.splice(i, 1);
+        while (this.run.queue.length < 3) this.run.queue.push(1);
+        this.endRitual(0.25);
+      }
+    } else if (r.t >= 20) this.endRitual(0.6); // dropped, never merged in 20 s
+  }
+
+  private endRitual(score: number): void {
+    const r = this.ritual;
+    if (!r) return;
+    this.ritual = null;
+    for (const o of this.core.flask.orbs) o.sealed = false;
+    if (score >= 1) this.mood('happy', 2);
+    r.resolve(score);
   }
 
   private checkMilestones(): void {
@@ -814,7 +1020,7 @@ export class SpireScene implements DeptScene {
     let j = 0;
     for (const f of this.flyers) {
       const s = this.flyPool[j++];
-      const r = TIERS[f.tier].r;
+      const r = orbR(f.tier);
       const tex = orbTexture(f.tier);
       if (s.texture !== tex) s.texture = tex;
       s.position.set(Math.round(f.x - r), Math.round(f.y - r));
@@ -824,7 +1030,7 @@ export class SpireScene implements DeptScene {
     for (; j < this.flyPool.length; j++) this.flyPool[j].visible = false;
     // The orb in the dropper.
     const cur = this.core.current;
-    const r = TIERS[cur].r;
+    const r = orbR(cur);
     const tex = orbTexture(cur);
     if (this.held.texture !== tex) this.held.texture = tex;
     const ready = this.core.canDrop();
@@ -898,7 +1104,7 @@ export class SpireScene implements DeptScene {
     if (this.aiming || this.pending) {
       // Dotted landing guide straight down to the first orb or the floor.
       const cur = core.current;
-      const rd = TIERS[cur].r;
+      const rd = orbR(cur);
       let stop = this.botY;
       for (const o of core.flask.orbs) {
         if (Math.abs(o.x - core.aimX) < o.r + rd) stop = Math.min(stop, this.sy(o.y - Math.sqrt(Math.max(0, (o.r + rd) ** 2 - (o.x - core.aimX) ** 2))) + rd);
@@ -911,12 +1117,20 @@ export class SpireScene implements DeptScene {
       g.rect(left, ry + 3, Math.round(W * (1 - Math.min(1, frac))), 1).fill(core.lock > 0 ? PAL.steam : PAL.brassHi);
     }
 
-    // Queue previews: next 2 (3 with the Mirror) as small pixel discs.
+    // Queue previews: next 2 (3 with the Mirror) as small pixel discs, in a row above the flask or
+    // stacked at the top of the right gutter on short screens.
     const shown = tomeOf(this.per, 'mirror') > 0 ? 3 : 2;
     let qx = left + 20;
+    const qcx = this.rgX + Math.floor(this.rgW / 2);
     for (let i = 1; i <= shown; i++) {
       const t = this.run.queue[i] ?? 1;
-      const r = Math.min(4, TIERS[t].r - 1);
+      const r = Math.min(4, orbR(t) - 1);
+      if (this.queueSide) {
+        const cy = this.mouthY + 14 + (i - 1) * 10;
+        for (const [dx, dy] of discPts(r)) g.rect(qcx + dx, cy + dy, 1, 1).fill(orbColor(t));
+        g.rect(qcx - 1, cy - 1, 1, 1).fill(orbLight(t));
+        continue;
+      }
       const cy = this.queueY + 4;
       for (const [dx, dy] of discPts(r)) g.rect(qx + r + dx, cy + dy, 1, 1).fill(orbColor(t));
       g.rect(qx + r - 1, cy - 1, 1, 1).fill(orbLight(t));
@@ -933,7 +1147,8 @@ export class SpireScene implements DeptScene {
     // Bought levels as pips under the knob.
     for (let v = 0; v < VOL_MAX; v++) {
       const px = this.lgX + 1 + Math.floor((v * (this.lgW - 2)) / VOL_MAX);
-      const col = v < this.run.vol ? PAL.warn : v < this.run.volBought ? 0x7a3a3a : 0x2a1a2a;
+      const tgt = this.core.volTarget;
+      const col = v < tgt ? PAL.warn : v < this.run.vol ? (pulse ? 0xe8c04a : 0x7a3a3a) : v < this.run.volBought ? 0x7a3a3a : 0x2a1a2a;
       g.rect(px, this.mouthY + 63, Math.max(1, Math.floor((this.lgW - 2) / VOL_MAX) - 1), 2).fill(col);
     }
 
@@ -988,26 +1203,18 @@ export class SpireScene implements DeptScene {
       g.rect(this.apX, this.apY + this.apH - 4, this.apW, 4).fill({ color: 0x2a3a4a, alpha: 0.5 });
     }
 
-    // Onboarding highlight: a pulsing outline on what to do next.
-    const step = this.onboardingStep();
-    if (step && pulse) {
-      const hl = (x: number, y: number, w: number, h: number) => {
-        f.rect(x - 2, y - 2, w + 4, 1).fill(0xffffff);
-        f.rect(x - 2, y + h + 1, w + 4, 1).fill(0xffffff);
-        f.rect(x - 2, y - 2, 1, h + 4).fill(0xffffff);
-        f.rect(x + w + 1, y - 2, 1, h + 4).fill(0xffffff);
+    // The sealed return gift: a gold ring that winks around it (in the dropper and in the flask).
+    if (this.ritual && pulse) {
+      const ring = (x: number, y: number, r: number) => {
+        for (const [dx, dy] of ringPts(r + 2)) f.rect(x + dx, y + dy, 1, 1).fill(0xe8c04a);
       };
-      if (step === 'upgrade') hl(this.upBtn.x, this.upBtn.y, 70, BAR_H);
-      else if (step === 'chains') hl(this.resText.x - 1, this.resText.y - 1, this.resText.width + 2, 7);
-      else if (step === 'line') hl(left, brimY - 1, W, 2);
+      if (!this.ritual.dropped && core.current === this.ritual.tier) ring(ax, Math.round(this.mouthY + core.dropY()), orbR(core.current));
+      for (const o of core.flask.orbs) if (o.sealed) ring(Math.round(this.cx + o.x), Math.round(this.mouthY + o.y), Math.round(o.r));
     }
-    if (step === 'aim' || step === 'merge') {
-      // A ghost finger sweeping across the flask column.
-      const t = (this.time % 2.4) / 2.4;
-      const gx = Math.round(this.cx + Math.sin(t * Math.PI * 2) * (W / 3));
-      const gy = this.mouthY + 70;
-      f.rect(gx - 1, gy, 3, 6).fill({ color: 0xffffff, alpha: 0.5 });
-      f.rect(gx - 2, gy + 4, 5, 4).fill({ color: 0xffffff, alpha: 0.5 });
+    // Quicksilver beads shimmer as they melt (last 5 s).
+    for (const o of core.flask.orbs) {
+      if (o.tier !== QUICK || o.age < 15 || !pulse) continue;
+      f.rect(Math.round(this.cx + o.x) - 1, Math.round(this.mouthY + o.y - o.r) - 2, 2, 1).fill(0xffffff);
     }
 
     // Rings, particles, whiteout.
@@ -1029,23 +1236,24 @@ export class SpireScene implements DeptScene {
     }
   }
 
-  private onboardingStep(): string | null {
-    const s = this.ctx.save.seen;
-    if (s.onboardingDone) return null;
-    for (const id of ['aim', 'merge', 'upgrade', 'chains', 'line']) if (!s[`ob.${id}`]) return id;
-    return null;
-  }
-
   private updateTexts(): void {
     const run = this.run;
     const W = this.core.flask.w;
     const left = this.cx - W / 2;
     const res = this.core.res;
-    this.resText.set(`RES X${res.toFixed(2)}`, res >= 2 ? '#fff2a0' : res > 1 ? '#c070ff' : '#6a5a7a');
-    this.resText.position.set(left + W - this.resText.width, this.queueY + 2 - (this.resPulse > 0.5 ? 1 : 0));
+    const resCol = res >= 2 ? '#fff2a0' : res > 1 ? '#c070ff' : '#6a5a7a';
+    const lift = this.resPulse > 0.5 ? 1 : 0;
+    if (this.queueSide) {
+      this.resText.set(`RES\nX${res.toFixed(this.rgW >= 20 ? 2 : 1)}`, resCol);
+      this.resText.position.set(this.rgX + Math.floor((this.rgW - this.resText.width) / 2), this.mouthY + 46 - lift);
+    } else {
+      this.resText.set(`RES X${res.toFixed(2)}`, resCol);
+      this.resText.position.set(left + W - this.resText.width, this.queueY + 2 - lift);
+    }
     this.chainText.visible = this.chainShow > 0;
     this.chainText.position.set(Math.round(this.cx - this.chainText.width / 2), this.mouthY + 24);
-    this.volOf.set(`${run.vol}/${run.volBought}`);
+    // A lowered setting waits (04 §7): "5>3" until the next vent or 30 s.
+    this.volOf.set(run.volPending >= 0 ? `${run.vol}>${run.volPending}` : `${run.vol}/${run.volBought}`, run.volPending >= 0 ? '#e8c04a' : '#9c8aa8');
     this.volOf.position.set(this.lgX + Math.floor((this.lgW - this.volOf.width) / 2), this.mouthY + 64 - 8 + 15);
     const held = heldVol(run);
     this.featText.set(`F${run.featBest}`, '#9c8aa8');
@@ -1060,8 +1268,65 @@ export class SpireScene implements DeptScene {
     this.pagesText.set(`${formatNum(this.per.pages)} PAGES`);
     const c = this.ctx.content();
     this.pagesText.position.set(c.x + c.w - 11 - this.pagesText.width, this.barY + 5);
-    this.volUp.setEnabled(run.vol < run.volBought || run.volBought < VOL_MAX);
-    this.volDown.setEnabled(run.vol > 0);
+    this.volUp.setEnabled(this.core.volTarget < run.volBought || run.volBought < VOL_MAX);
+    this.volDown.setEnabled(this.core.volTarget > 0);
+  }
+
+  // ---------- manager hooks (00 §5.4) ----------
+
+  /** 04 §18: a cascade (a merge in the last 1.5 s), the brim filling, or the 0.6 s after a drop. */
+  isIntense(): boolean {
+    return this.core.intense;
+  }
+
+  /** Beat targets (logical px). 'aim' spans the dropper and the flask column, so a beat that
+   * points at it starts with the bubble collapsed whenever the strip would cover the dropper. */
+  targetRect(id: string): Rect | null {
+    const W = this.core.flask.w;
+    const left = this.cx - W / 2;
+    const railY = this.mouthY - DROP_ZONE;
+    const brimY = this.sy(this.core.brimY);
+    switch (id) {
+      case 'aim':
+        return { x: left, y: railY - 2, w: W, h: this.botY - railY + 2 };
+      case 'aim.left':
+      case 'aim.right': {
+        const y = Math.round((railY + this.botY) / 2);
+        return { x: id === 'aim.left' ? left + 6 : left + W - 18, y, w: 12, h: 4 };
+      }
+      case 'flask':
+        return { x: left, y: this.mouthY, w: W, h: FLASK_H };
+      case 'dropper':
+        return { x: this.cx + this.core.aimX - 8, y: railY - 2, w: 16, h: DROP_ZONE };
+      case 'queue':
+        return this.queueSide ? { x: this.rgX, y: this.mouthY, w: this.rgW, h: 44 } : { x: left, y: this.queueY, w: W, h: QUEUE_H };
+      case 'res':
+        return { x: this.resText.x - 1, y: this.resText.y - 1, w: this.resText.width + 2, h: this.resText.height + 1 };
+      case 'brim':
+        return { x: left, y: brimY - 1, w: W, h: 3 };
+      case 'brimZone':
+        return { x: left, y: railY - 2, w: W, h: brimY - railY + 4 };
+      case 'btn.upgrades':
+        return { x: this.upBtn.x, y: this.upBtn.y, w: 70, h: BAR_H };
+      case 'knob':
+        return { x: this.lgX, y: this.mouthY, w: this.lgW, h: 66 };
+      case 'vol.up':
+        return { x: this.volUp.x, y: this.volUp.y, w: 16, h: 13 };
+      case 'feat':
+        return { x: this.featText.x - 1, y: this.featText.y - 1, w: this.featText.width + 2, h: 7 };
+      case 'appr':
+        return { x: this.apX - 2, y: this.apY - 12, w: this.apW + 4, h: this.apH + 14 };
+      case 'pages':
+        return { x: this.pagesText.x - 1, y: this.barY + 2, w: this.ctx.content().x + this.ctx.content().w - this.pagesText.x - 1, h: BAR_H - 3 };
+      case 'btn.vent':
+        return this.ventBtn.visible ? this.ventBtn.rect() : null;
+      case 'btn.tremor':
+        return this.tremorBtn.visible ? this.tremorBtn.rect() : null;
+      case 'btn.quick':
+        return this.quickBtn.visible ? this.quickBtn.rect() : null;
+      default:
+        return null;
+    }
   }
 
   /** Tempered Glass bought: widen the flask now (the frame loop redraws when the width changes). */
@@ -1071,6 +1336,7 @@ export class SpireScene implements DeptScene {
   }
 
   destroy(): void {
+    this.endRitual(this.ritual?.dropped ? 0.6 : 0);
     this.core.persist();
     this.root.destroy({ children: true });
   }

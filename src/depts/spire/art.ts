@@ -2,7 +2,7 @@
 // the Head Sorcerer's portrait and the lab palette. Orb textures are built once per page and
 // cached for its lifetime (12 tiny textures), never per frame.
 import { CanvasSource, Texture } from 'pixi.js';
-import { TIERS } from './def';
+import { CATALYST, HEX, LEGEND_BODY, orbR, QUICK, TIERS } from './def';
 
 export const PAL = {
   bg: 0x120a1e,
@@ -41,8 +41,68 @@ export const ORB_COL: [string, string, string][] = [
   ['#e8dce4', '#ffffff', '#8a6a80'], // 10 Abyssal Eye
   ['#08040c', '#ffffff', '#3a1a5a'], // 11 Void Star
 ];
-export const orbColor = (t: number) => parseInt(ORB_COL[Math.max(1, Math.min(11, t))][0].slice(1), 16);
-export const orbLight = (t: number) => parseInt(ORB_COL[Math.max(1, Math.min(11, t))][1].slice(1), 16);
+/** Special orb colors [base, light, dark]. */
+export const SPECIAL_COL: Record<number, [string, string, string]> = {
+  [CATALYST]: ['#f0f0ff', '#ffffff', '#c070ff'],
+  [HEX]: ['#6a6470', '#9a94a0', '#3a3440'],
+  [QUICK]: ['#c8d0dc', '#ffffff', '#7a8494'],
+  [LEGEND_BODY]: ['#8a8a9a', '#d8d8e8', '#3a3a4a'],
+};
+const colOf = (t: number): [string, string, string] => SPECIAL_COL[t] ?? ORB_COL[Math.max(1, Math.min(11, t))];
+export const orbColor = (t: number) => parseInt(colOf(t)[0].slice(1), 16);
+export const orbLight = (t: number) => parseInt(colOf(t)[1].slice(1), 16);
+export const orbCss = (t: number) => colOf(t)[1];
+
+/** Special orbs: Catalyst (a white star-cored pearl), Hex Stone (a cursed grey hexagon), Quicksilver
+ * (a liquid-metal bead) and the Legend's helmeted body (Last Stand). */
+function drawSpecial(px: Px, t: number): void {
+  const r = orbR(t);
+  const D = r * 2;
+  const [base, light, dark] = SPECIAL_COL[t];
+  const ink = '#0a0410';
+  const hexIn = (dx: number, dy: number) => {
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
+    return ax <= r * 0.95 && ax * 0.5 + ay * 0.866 <= r * 0.95;
+  };
+  const inside = (x: number, y: number) => {
+    const dx = x + 0.5 - r;
+    const dy = y + 0.5 - r;
+    return t === HEX ? hexIn(dx, dy) : dx * dx + dy * dy <= r * r;
+  };
+  for (let y = 0; y < D; y++)
+    for (let x = 0; x < D; x++) {
+      if (!inside(x, y)) continue;
+      const edge = !inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1);
+      const dx = x + 0.5 - r;
+      const dy = y + 0.5 - r;
+      let c = dx + dy < -r * 0.5 ? light : dx + dy > r * 0.6 ? dark : base;
+      if (t === QUICK) c = dx + dy < -r * 0.3 ? '#ffffff' : dy > r * 0.3 ? dark : base;
+      if (t === LEGEND_BODY) {
+        // A steel helm: a dark visor slot and a gold crest.
+        if (Math.abs(dy) < 1.5 && Math.abs(dx) < r * 0.7) c = ink;
+        else if (Math.abs(dx) < 1.2 && dy < -r * 0.3) c = '#e8c04a';
+      }
+      px(x, y, edge ? (t === CATALYST ? '#c070ff' : ink) : c);
+    }
+  if (t === CATALYST) {
+    // A violet four-point spark at the core.
+    for (const [x, y] of [[0, -2], [0, -1], [0, 0], [0, 1], [-2, 0], [-1, 0], [1, 0], [2, 0]]) px(r + x - 1 + 1, r + y - 1 + 1, '#a040ff');
+    px(r, r, '#ffffff');
+  } else if (t === HEX) {
+    // A glowing cursed X.
+    for (let k = -2; k <= 2; k++) {
+      px(r + k - 1 + 1, r + k, '#c070ff');
+      px(r - k, r + k, '#c070ff');
+    }
+  } else if (t === QUICK) {
+    px(r - 2, r - 2, '#ffffff');
+  } else if (t === LEGEND_BODY) {
+    // Little gold eyes glinting in the visor.
+    px(r - 3, r, '#fff070');
+    px(r + 2, r, '#fff070');
+  }
+}
 
 type Px = (x: number, y: number, c: string) => void;
 
@@ -172,23 +232,25 @@ function drawOrb(px: Px, tier: number, closed: boolean): void {
 const cache = new Map<string, Texture>();
 
 function makeTexture(tier: number, closed: boolean): Texture {
-  const r = TIERS[tier].r;
+  const r = orbR(tier);
   const D = r * 2;
   const canvas = document.createElement('canvas');
   canvas.width = D;
   canvas.height = D;
   const g = canvas.getContext('2d')!;
-  drawOrb((x, y, c) => {
+  const px: Px = (x, y, c) => {
     if (x < 0 || y < 0 || x >= D || y >= D) return;
     g.fillStyle = c;
     g.fillRect(x, y, 1, 1);
-  }, tier, closed);
+  };
+  if (SPECIAL_COL[tier]) drawSpecial(px, tier);
+  else drawOrb(px, tier, closed);
   return new Texture({ source: new CanvasSource({ resource: canvas, scaleMode: 'nearest' }) });
 }
 
 /** The orb texture for a tier (and the Abyssal Eye's blink frame). Built once, cached. */
 export function orbTexture(tier: number, closed = false): Texture {
-  const t = Math.max(1, Math.min(11, tier));
+  const t = SPECIAL_COL[tier] ? tier : Math.max(1, Math.min(11, tier));
   const key = `${t}${closed && t === 10 ? 'c' : ''}`;
   let tex = cache.get(key);
   if (!tex || tex.destroyed) {
@@ -244,9 +306,22 @@ export const SORC_PAL: Record<string, string> = {
 /** The in-scene sprite (left gutter) mirrors his mood (04 §18 expressions). */
 const SORC_SCARED = SORC_IDLE.map((row, y) => (y === 4 ? '.pwkeweekwp.'.replace('week', 'wwek') : y === 8 ? '..pPkkkkPp..' : row));
 const SORC_SINGED = SORC_IDLE.map((row, y) => (y === 2 ? '.pPsswwssPp.' : y === 3 ? '.pPswwwwsPp.' : y === 5 ? '.pwkswwskwp.' : row));
-export function SORC_IDLE_FRAME(mood: 'calm' | 'scared' | 'singed' | 'happy'): string[] {
+/** Lecturing: a bony finger raised beside the hood. */
+const SORC_LECTURE = SORC_IDLE.map((row, y) => (y === 7 ? '.pPgwwwwgPph' : y === 8 ? '..pPwkwkPp.h' : y === 9 ? '.ppPgwwgPpph' : row));
+/** Relieved: eyes shut in bliss. */
+const SORC_RELIEVED = SORC_IDLE.map((row, y) => (y === 4 ? '.pwwwwwwwwp.' : y === 5 ? '.pwkkwwkkwp.' : row));
+export type SorcMood = 'calm' | 'scared' | 'singed' | 'happy' | 'lecture' | 'relieved';
+export function SORC_IDLE_FRAME(mood: SorcMood): string[] {
   if (mood === 'scared') return SORC_SCARED;
   if (mood === 'singed') return SORC_SINGED;
   if (mood === 'happy') return SORC_TALK;
+  if (mood === 'lecture') return SORC_LECTURE;
+  if (mood === 'relieved') return SORC_RELIEVED;
   return SORC_IDLE;
 }
+
+/** 7x7 tool icons (Vent Now steam, Tremor zig-zag, Quicksilver drop). */
+export const ICON_VENT = ['..g.g..', '.g.g.g.', '..g.g..', '.ggggg.', '.bwwwb.', '.bwwwb.', '..bbb..'];
+export const ICON_TREMOR = ['w.....w', '.w...w.', 'w.w.w.w', '...w...', '.bbbbb.', '.bwwwb.', '..bbb..'];
+export const ICON_QUICK = ['...s...', '..sss..', '.sswss.', '.swwss.', '.sssss.', '..sss..', '.......'];
+export const ICON_PAL: Record<string, string> = { g: '#a8f0b0', w: '#f4e8c1', b: '#6a4a1a', s: '#c8d0dc' };
