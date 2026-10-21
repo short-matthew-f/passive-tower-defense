@@ -93,7 +93,21 @@ function cached(key: string, build: (c: GraphicsContext) => void): GraphicsConte
   return c;
 }
 
-export type ArtKind = 'common' | 'vein' | 'geode' | 'keg' | 'rubble' | 'sprout';
+export type ArtKind =
+  | 'common'
+  | 'vein'
+  | 'geode'
+  | 'keg'
+  | 'rubble'
+  | 'sprout'
+  | 'mother'
+  | 'gas'
+  | 'bedrock'
+  | 'magnet'
+  | 'mirror'
+  | 'hot'
+  | 'hollow'
+  | 'hollowCore';
 
 export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): GraphicsContext {
   return cached(`rock.${kind}.${stratum}.${v}.${s}`, (c) => {
@@ -116,18 +130,37 @@ export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): G
       return;
     }
     const p = profile(s, v);
+    if (kind === 'bedrock') {
+      blob(c, s, v, 0x24202c, 0x3a3444, 0x100c14);
+      for (let i = 0; i < 6; i++) {
+        const x = Math.floor(r() * s);
+        const y = Math.floor(r() * s);
+        if (inside(p, x, y, 4)) c.rect(x, y, 2, 2).fill(0x4a4458).rect(x, y, 1, 1).fill(0x6a6478);
+      }
+      // iron bolts: "can't be tapped"
+      for (const [bx, by] of [[0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7]]) {
+        const x = Math.floor(s * bx) - 1;
+        const y = Math.floor(s * by) - 1;
+        c.rect(x, y, 3, 3).fill(OUTLINE).rect(x + 1, y + 1, 1, 1).fill(0x8a8494);
+      }
+      return;
+    }
     const geode = kind === 'geode';
-    blob(c, s, v, geode ? pal.dark : pal.base, geode ? pal.base : pal.light, geode ? OUTLINE : pal.dark);
+    const base = kind === 'gas' ? 0x5a7a3a : kind === 'hot' ? 0x6a2a1a : kind === 'mirror' ? pal.light : kind === 'hollowCore' ? pal.dark : pal.base;
+    const light = kind === 'gas' ? 0x8ab05a : kind === 'hot' ? 0xa0402a : kind === 'mirror' ? 0xf4f0ff : pal.light;
+    const dark = kind === 'gas' ? 0x3a4a22 : kind === 'hot' ? 0x3a1010 : pal.dark;
+    blob(c, s, v, geode ? pal.dark : base, geode ? pal.base : light, geode ? OUTLINE : dark);
     // Specks and strata streaks.
     for (let i = 0; i < 9; i++) {
       const x = Math.floor(r() * s);
       const y = Math.floor(r() * s);
-      if (inside(p, x, y) && inside(p, x + 1, y)) c.rect(x, y, 2, 1).fill(pal.speck);
+      if (inside(p, x, y) && inside(p, x + 1, y)) c.rect(x, y, 2, 1).fill(kind === 'gas' ? 0xb8e070 : pal.speck);
     }
     const sy = Math.floor(s * (0.4 + r() * 0.25));
-    if (inside(p, 4, sy, 2)) c.rect(p[sy][0] + 3, sy, Math.floor((p[sy][1] - p[sy][0]) * 0.5), 1).fill(pal.dark);
-    if (kind === 'vein') {
-      for (let i = 0, n = 0; i < 30 && n < 5; i++) {
+    if (inside(p, 4, sy, 2)) c.rect(p[sy][0] + 3, sy, Math.floor((p[sy][1] - p[sy][0]) * 0.5), 1).fill(dark);
+    if (kind === 'vein' || kind === 'mother') {
+      const want = kind === 'mother' ? 11 : 5;
+      for (let i = 0, n = 0; i < 60 && n < want; i++) {
         const x = Math.floor(r() * s);
         const y = Math.floor(r() * s);
         if (!inside(p, x, y, 4) || !inside(p, x + 3, y + 2, 4)) continue;
@@ -136,6 +169,56 @@ export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): G
         c.rect(x, y, 1, 1).fill(GOLD_LIGHT);
         n++;
       }
+      if (kind === 'mother') {
+        // a gold crown band: the Motherlode
+        const y = Math.floor(s * 0.2);
+        c.rect(p[y][0] + 2, y, p[y][1] - p[y][0] - 4, 2).fill(GOLD_LIGHT);
+        c.rect(Math.floor(s / 2) - 2, Math.floor(s / 2) - 2, 5, 5).fill(GOLD).rect(Math.floor(s / 2) - 1, Math.floor(s / 2) - 1, 2, 2).fill(0xffffff);
+      }
+    }
+    if (kind === 'gas') {
+      // vents with green wisps
+      for (const [vx, vy] of [[0.35, 0.4], [0.62, 0.55], [0.45, 0.72]]) {
+        const x = Math.floor(s * vx);
+        const y = Math.floor(s * vy);
+        c.rect(x, y, 2, 2).fill(OUTLINE).rect(x, y - 2, 1, 1).fill(0xc8f080);
+      }
+    }
+    if (kind === 'hot') {
+      for (let i = 0, n = 0; i < 40 && n < 6; i++) {
+        const x = Math.floor(r() * s);
+        const y = Math.floor(r() * s);
+        if (!inside(p, x, y, 4)) continue;
+        c.rect(x, y, 3, 1).fill(0xff7a2a).rect(x + 1, y, 1, 1).fill(0xffe060);
+        n++;
+      }
+    }
+    if (kind === 'magnet') {
+      // a red-and-silver horseshoe lodged in the rock
+      const x = Math.floor(s / 2) - 4;
+      const y = Math.floor(s / 2) - 4;
+      c.rect(x, y, 8, 3).fill(OUTLINE);
+      c.rect(x, y, 3, 8).fill(OUTLINE).rect(x + 5, y, 3, 8).fill(OUTLINE);
+      c.rect(x + 1, y + 1, 6, 1).fill(0xc03a3a).rect(x + 1, y + 1, 1, 5).fill(0xc03a3a).rect(x + 6, y + 1, 1, 5).fill(0xc03a3a);
+      c.rect(x + 1, y + 6, 1, 1).fill(0xd8d8e0).rect(x + 6, y + 6, 1, 1).fill(0xd8d8e0);
+    }
+    if (kind === 'mirror') {
+      const x = Math.floor(s * 0.3);
+      const y = Math.floor(s * 0.25);
+      for (let k = 0; k < 6; k++) c.rect(x + k, y + k, 2, 1).fill(0xffffff);
+      c.rect(x + 8, y + 2, 1, 4).fill(0xc8e8ff);
+    }
+    if (kind === 'hollow' || kind === 'hollowCore') {
+      // the outer shell's seam (or, for the core, a dark heart)
+      const cx = Math.floor(s / 2);
+      const cy = Math.floor(s / 2);
+      if (kind === 'hollow') {
+        for (let a = 0; a < 16; a++) {
+          const x = Math.round(cx + Math.cos((a / 16) * Math.PI * 2) * s * 0.28);
+          const y = Math.round(cy + Math.sin((a / 16) * Math.PI * 2) * s * 0.28);
+          c.rect(x, y, 1, 1).fill(pal.speck);
+        }
+      } else c.rect(cx - 3, cy - 3, 6, 6).fill(0x08040a).rect(cx - 1, cy - 1, 2, 2).fill(pal.speck);
     }
     if (geode) {
       const cx = Math.floor(s / 2);
@@ -146,6 +229,33 @@ export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): G
       c.rect(cx + 2, cy - 1, 1, 3).fill(0xb070e0);
       c.rect(cx, cy - 3, 1, 1).fill(0xffffff);
     }
+  });
+}
+
+/** A puff of gas over a tile (alpha drawn by the scene). */
+export function gasArt(s: number, frame: number): GraphicsContext {
+  return cached(`gas.${s}.${frame}`, (c) => {
+    const r = rng(s * 7 + frame * 131);
+    for (let i = 0; i < 7; i++) {
+      const x = Math.floor(r() * (s - 8)) + 2;
+      const y = Math.floor(r() * (s - 8)) + 2;
+      const w = 4 + Math.floor(r() * 6);
+      c.rect(x, y, w, 3).fill({ color: 0x9ad050, alpha: 0.45 });
+      c.rect(x + 1, y - 1, w - 2, 1).fill({ color: 0xc8f080, alpha: 0.4 });
+    }
+  });
+}
+
+/** Keen Eye glint on a regrowing socket. */
+export function glintArt(s: number, frame: number, gem: boolean): GraphicsContext {
+  return cached(`glint.${s}.${frame}.${gem}`, (c) => {
+    const col = gem ? 0xd090ff : 0xfff0a0;
+    const cx = Math.floor(s / 2);
+    const cy = Math.floor(s * 0.7);
+    const k = frame ? 3 : 2;
+    c.rect(cx - k, cy, k * 2 + 1, 1).fill(col);
+    c.rect(cx, cy - k, 1, k * 2 + 1).fill(col);
+    c.rect(cx, cy, 1, 1).fill(0xffffff);
   });
 }
 
@@ -246,21 +356,48 @@ function sprite(c: GraphicsContext, rows: string[], pal: Record<string, number>,
   });
 }
 
+/** Pick-head colours by Sharper Picks tier (a new pick every 10 levels, 02 §6). */
+const PICK_HEADS = [
+  [0xb0b0b8, 0x6a6a74],
+  [0xe8c04a, 0xa07a20],
+  [0x8ae0ff, 0x3a8ab0],
+  [0xff7a2a, 0xa03a10],
+  [0xd090ff, 0x7040a0],
+];
+
+export type GobArtKind = 'grunt' | 'sapper' | 'shocker' | 'prospector' | 'bone';
+
 /** Goblin frames: 0 = pick raised, 1 = pick down (strike), 2 = hop. Origin is the feet centre. */
-export function goblinArt(frame: number, sapper: boolean): GraphicsContext {
-  return cached(`gob.${frame}.${sapper}`, (c) => {
+export function goblinArt(frame: number, kind: GobArtKind | boolean, pick = 0): GraphicsContext {
+  const k: GobArtKind = kind === true ? 'sapper' : kind === false ? 'grunt' : kind;
+  const pt = Math.max(0, Math.min(PICK_HEADS.length - 1, pick));
+  return cached(`gob.${frame}.${k}.${pt}`, (c) => {
     const ox = -5;
     const oy = -11;
-    if (sapper) {
+    if (k === 'sapper') {
       c.rect(ox - 2, oy + 4, 4, 4).fill(0x1a1020);
       c.rect(ox - 1, oy + 5, 2, 2).fill(0x4a4a54);
       c.rect(ox - 1, oy + 2, 1, 2).fill(0xe8c04a);
     }
     sprite(c, frame === 2 ? GOB_BODY.slice(0, 9).concat(['..kb..kb..', '..b....b..']) : GOB_BODY, GOB_PAL, ox, oy);
-    if (sapper) c.rect(ox + 2, oy, 6, 1).fill(0xc03a3a);
+    if (k === 'sapper') c.rect(ox + 2, oy, 6, 1).fill(0xc03a3a);
+    if (k === 'shocker') {
+      // blue cap with a little lightning rod
+      c.rect(ox + 2, oy, 6, 1).fill(0x3a6ad8);
+      c.rect(ox + 4, oy - 3, 1, 3).fill(0x8a8494);
+      c.rect(ox + 3, oy - 4, 3, 1).fill(0x7af0ff);
+    }
+    if (k === 'prospector') {
+      // miner's helmet and lamp
+      c.rect(ox + 2, oy - 1, 6, 2).fill(0xe8c04a);
+      c.rect(ox + 7, oy, 2, 1).fill(0xfff0a0);
+    }
+    if (k === 'bone') {
+      // skull face paint: Bone Miner
+      c.rect(ox + 3, oy + 4, 4, 1).fill(0xf4e8c1);
+    }
     const handle = 0xa07040;
-    const head = 0xb0b0b8;
-    const headD = 0x6a6a74;
+    const [head, headD] = PICK_HEADS[pt];
     if (frame === 0) {
       // raised behind the head
       c.rect(ox + 7, oy + 5, 1, 2).fill(handle);
@@ -312,10 +449,22 @@ const FIST = [
   '.kRRRRRk..',
 ];
 
-export function gauntletArt(heavy: boolean): GraphicsContext {
-  return cached(`fist.${heavy}`, (c) => {
-    const pal = { k: 0x1a1020, H: heavy ? 0xe8c04a : 0xa8aebc, h: heavy ? 0xa07a20 : 0x5e6474, r: 0x8a2a2a, R: 0x5a1a1a };
+/** Gauntlet plating by Tap Damage tier (a new sprite every 25 levels, 02 §6). */
+const FIST_PLATES = [
+  [0xa8aebc, 0x5e6474],
+  [0x8a6a4a, 0x5a3a22],
+  [0x7ab0d8, 0x3a5a8a],
+  [0x3a3444, 0x1a1420],
+  [0xd090ff, 0x7040a0],
+];
+
+export function gauntletArt(heavy: boolean, tier = 0): GraphicsContext {
+  const t = Math.max(0, Math.min(FIST_PLATES.length - 1, tier));
+  return cached(`fist.${heavy}.${t}`, (c) => {
+    const [H, h] = FIST_PLATES[t];
+    const pal = { k: 0x1a1020, H: heavy ? 0xe8c04a : H, h: heavy ? 0xa07a20 : h, r: t >= 3 ? 0xc03a3a : 0x8a2a2a, R: 0x5a1a1a };
     sprite(c, FIST, pal, -5, -3);
+    if (t >= 2) c.rect(-3, -4, 1, 1).fill(0xffffff).rect(1, -4, 1, 1).fill(0xffffff);
   });
 }
 

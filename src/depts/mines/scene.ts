@@ -1,10 +1,12 @@
-// The Goblin Mines scene: a 5x5 rock wall you smash, a goblin crew that chips beside you,
-// the depth lever, and (once bought) the Doom Drum's beat. Logic and rendering live together
-// here; all numbers come from model.ts.
+// The Goblin Mines scene: renders the headless Wall (wall.ts) - the 5x5 rock wall you smash, the
+// goblin crew that chips beside you, the depth lever, and (once bought) the Doom Drum's beat - and
+// feeds it taps, holds and rakes. All rules live in wall.ts and every number in model.ts; this
+// file owns input, juice, sound, the manager hooks, the keg return ritual and drum calibration.
 import { Container, Graphics, Rectangle, Sprite, Texture, type FederatedPointerEvent } from 'pixi.js';
-import type { DeptCtx, DeptScene, UpgradeGroup } from '../../core/dept';
+import type { DeptCtx, DeptScene, Rect, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
+import { offlineCapSeconds, offlineFactor } from '../../core/economy';
 import { PixelText, measure } from '../../ui/font';
 import { Button, C } from '../../ui/widgets';
 import * as M from './model';
@@ -13,62 +15,46 @@ import {
   drumArt,
   drummerArt,
   flashArt,
+  gasArt,
   gauntletArt,
+  glintArt,
   goblinArt,
   GOLD,
   OUTLINE,
   rockArt,
   STRATA_PAL,
   torchArt,
+  type ArtKind,
 } from './art';
+import { audioNow, sfx } from './sfx';
 import { anyAffordable, buildGroups, maxDepthEver } from './upgrades';
+import { U, Wall, type By, type Tile } from './wall';
 
-/** Touch-to-screen latency we assume when judging the beat (no calibration in this build). */
-const BEAT_LATENCY = 0.04;
-const KEG_FUSE = 1.2;
-const KEG_AUTO = 8;
-const SAPPER_PLANT = 20;
-const MAX_PARTICLES = 160;
 const SOFT_CAP = 8;
 const HARD_CAP = 15;
 const RAKE_MAX = 8;
+const HOLD_DELAY = 0.35;
+const MAX_FX = 12;
+const CALIB_TAPS = 8;
+const RITUAL_WAIT = 8;
 
-interface Tile {
-  i: number;
-  col: number;
-  row: number;
-  x: number;
-  y: number;
-  kind: M.RockKind | null;
-  hp: number;
-  maxHp: number;
-  regrow: number;
-  variant: number;
-  stage: number;
+interface TileView {
   cont: Container;
   body: Graphics;
   crack: Graphics;
   flash: Graphics;
+  over: Graphics; // gas cloud / glint
   flashT: number;
   squashT: number;
-  fuse: number; // keg: < 0 unlit, else seconds to blast
-  kegAge: number;
-  sparkle: number;
+  variant: number;
   shownKey: string;
+  overKey: string;
 }
 
-interface Gob {
+interface GobView {
   g: Graphics;
-  sapper: boolean;
-  tile: number;
-  x: number;
-  y: number;
-  hop: { fx: number; fy: number; tx: number; ty: number; t: number; dur: number } | null;
-  swing: number;
-  frame: number;
-  face: number;
-  plant: number;
   cheer: number;
+  frame: number;
 }
 
 interface Particle {
@@ -90,6 +76,33 @@ interface Fx {
   x?: number;
   y?: number;
   w?: number;
+  color?: number;
+}
+
+interface Ptr {
+  tile: number;
+  raked: number;
+  hold: number;
+  auto: number;
+}
+
+interface Ritual {
+  t: number;
+  kegs: number[];
+  lit: number; // index into kegs where the chain started, or -1 while waiting
+  next: number[]; // blast order once lit
+  chainT: number;
+  score: number;
+  resolve: (score: number) => void;
+  doneT: number;
+}
+
+interface Calib {
+  t: number;
+  period: number;
+  offsets: number[];
+  lastBeat: number;
+  sched: number;
 }
 
 const rand = Math.random;
@@ -101,13 +114,16 @@ export class MinesScene implements DeptScene {
   private run: M.MinesRun;
   private per: M.MinesPersistent;
   private groups: UpgradeGroup[];
+  private wall: Wall;
 
   // layout
   private T = 32;
   private s = 30;
+  private k = 1; // screen px per wall unit (T / U)
   private wallX = 0;
   private wallY = 0;
   private ledgeY = 0;
+  private statusY = 0;
 
   // layers
   private bg = new Graphics();
@@ -116,6 +132,13 @@ export class MinesScene implements DeptScene {
   private gobLayer = new Container();
   private fxG = new Graphics();
   private partLayer = new Container();
+  private ritualLayer = new Container();
+  private ritualG = new Graphics();
+  private calibLayer = new Container();
+  private calibG = new Graphics();
+  private calibText = new PixelText('');
+  private ritualText = new PixelText('', '#ffe060');
+  private edgeG = new Graphics();
   private ui = new Container();
   private uiG = new Graphics();
   private hit = new Container();
@@ -123,10 +146,11 @@ export class MinesScene implements DeptScene {
   private drummers: Graphics[] = [];
   private torches: Graphics[] = [];
   private fist = new Graphics();
+  private kegViews: Graphics[] = [];
 
   // state
-  private tiles: Tile[] = [];
-  private gobs: Gob[] = [];
+  private views: TileView[] = [];
+  private gobViews: GobView[] = [];
   private parts: Particle[] = [];
   private pool: Sprite[] = [];
   private fx: Fx[] = [];
@@ -138,19 +162,19 @@ export class MinesScene implements DeptScene {
   private fistT = 0;
   private shownDepth = 0;
   private tapTimes: number[] = [];
-  private pointers = new Map<number, { tile: number; raked: number }>();
-  private beatClock = 0;
-  private lastJudged = -1;
-  private streak = 0;
-  private pips = 0;
-  private pipDecay = 0;
-  private frenzyT = 0;
+  private pointers = new Map<number, Ptr>();
   private lastBeatIdx = -1;
+  private schedBeat = -1;
   private beatPulse = 0;
   private slowTick = 0;
-  private flavorT = 30;
-  private lessonHits = 0;
-  private recentTaps = 0;
+  private maxParts = 160;
+  private slowFrames = 0;
+  private obTile = 12;
+  private lastBeatHitK = Number.NaN;
+  private ritual: Ritual | null = null;
+  private calib: Calib | null = null;
+  private calibPending = false;
+  private btnCache = new Map<Button, string>();
 
   // ui widgets
   private status = new PixelText('');
@@ -164,8 +188,6 @@ export class MinesScene implements DeptScene {
   private hireBtn!: Button;
   private drumBtn!: Button;
   private badge = new Graphics();
-  private glowTarget: Button | null = null;
-  private statusY = 0;
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -176,13 +198,76 @@ export class MinesScene implements DeptScene {
     this.groups = buildGroups(ctx, {
       onDig: () => this.onDig(),
       onDrum: () => this.onDrumBought(),
+      onCalibrate: () => (this.calibPending = true),
+      onBuy: (id) => this.onBuy(id),
     });
-    this.root.addChild(this.bg, this.wallLayer, this.ringG, this.drum, this.gobLayer, this.fxG, this.partLayer, this.fist, this.ui, this.hit);
+    this.wall = new Wall(ctx.save, {
+      earn: (b) => ctx.earn(b),
+      raiseSkill: (l) => ctx.raiseSkill(l),
+      rnd: rand,
+      forceKind: () => this.forceKind(),
+      onHit: (t, d, by) => this.onHit(t, d, by),
+      onBreak: (t, kind, by, got, gems) => this.onBreak(t, kind, by, got, gems),
+      onShell: (t, got) => this.onShell(t, got),
+      onBlast: (t, auto) => this.onBlast(t, auto),
+      onZap: (path, by) => this.onZap(path, by),
+      onCaveIn: (ts) => this.onCaveIn(ts),
+      onGas: (t) => this.onGas(t),
+      onSpawn: (t) => this.onSpawn(t),
+      onPlant: (t) => (this.view(t).squashT = 0.1),
+      onClink: (t) => this.onClink(t),
+      onFrenzy: (start) => this.onFrenzy(start),
+    });
+    this.root.addChild(
+      this.bg,
+      this.wallLayer,
+      this.ringG,
+      this.drum,
+      this.gobLayer,
+      this.fxG,
+      this.partLayer,
+      this.ritualLayer,
+      this.fist,
+      this.edgeG,
+      this.ui,
+      this.calibLayer,
+      this.hit,
+    );
     this.fist.visible = false;
+    this.ritualLayer.addChild(this.ritualG);
+    for (let i = 0; i < M.GRID; i++) {
+      const g = new Graphics();
+      this.kegViews.push(g);
+      this.ritualLayer.addChild(g);
+    }
+    this.ritualLayer.addChild(this.ritualText);
+    this.ritualLayer.visible = false;
+    this.calibLayer.addChild(this.calibG, this.calibText);
+    this.calibLayer.visible = false;
+    for (let i = 0; i < M.TILES; i++) {
+      const cont = new Container();
+      const body = new Graphics();
+      const crack = new Graphics();
+      const flash = new Graphics();
+      const over = new Graphics();
+      flash.visible = false;
+      cont.addChild(body, crack, flash, over);
+      this.wallLayer.addChild(cont);
+      this.views.push({ cont, body, crack, flash, over, flashT: 0, squashT: 0, variant: (i * 7 + Math.floor(i / 5)) % 3, shownKey: '', overKey: '' });
+    }
     this.buildLayout();
-    this.buildWall(true);
-    this.syncGoblins(true);
+    this.placeTiles();
+    this.shownDepth = this.run.depth;
+    this.drawBackground();
     this.updateMaxDepthEver();
+    // Onboarding beat 1: a rock already cracked, pulsing under the ghost finger (02 §18).
+    if (!ctx.seen('ob.smash') && !ctx.save.seen.onboardingDone) {
+      const t = this.wall.tiles[this.obTile];
+      t.kind = 'common';
+      t.maxHp = M.H(this.run.depth);
+      t.hp = t.maxHp * 0.3;
+    }
+    this.creditOfflineGems();
   }
 
   // ---------- layout ----------
@@ -191,18 +276,22 @@ export class MinesScene implements DeptScene {
     const c = this.ctx.content();
     this.T = c.w >= 172 ? 32 : Math.max(24, Math.floor((c.w - 12) / 5));
     this.s = this.T - 2;
+    this.k = this.T / U;
     const wallW = this.T * M.GRID;
     this.wallX = c.x + Math.floor((c.w - wallW) / 2);
     const btnY = c.y + c.h - 4 - 21;
     const depthY = btnY - 5 - 16;
     this.statusY = depthY - 4 - 7;
-    this.wallY = this.statusY - 5 - wallW;
+    this.wallY = Math.max(c.y + 30, this.statusY - 5 - wallW);
     this.ledgeY = this.wallY - 4;
 
     // UI
     const x0 = c.x + 4;
     const right = c.x + c.w - 4;
-    this.ui.removeChildren().forEach((ch) => ch.destroy({ children: true }));
+    this.btnCache.clear();
+    this.ui.removeChildren().forEach((ch) => {
+      if (ch !== this.uiG && ch !== this.status && ch !== this.statusR && ch !== this.depthText && ch !== this.hintText && ch !== this.badge) ch.destroy({ children: true });
+    });
     this.ui.addChild(this.uiG, this.status, this.statusR, this.depthText, this.hintText);
     this.status.position.set(x0, this.statusY);
 
@@ -213,6 +302,8 @@ export class MinesScene implements DeptScene {
       return b;
     };
     const dark = { color: C.edge, shade: 0x3a2046, textColor: C.ink };
+    // The manager strip docks over the HUD rows at the top (02 §18), far from this row, so the
+    // lever keeps the thumb-friendly left edge.
     this.downBtn = mk({ w: 15, h: 15, label: '{darr}', ...dark, onTap: () => this.setDepth(this.run.depth - 1) }, x0, depthY);
     this.depthText.position.set(x0 + 19, depthY + 5);
     this.upBtn = mk({ w: 15, h: 15, label: '{uarr}', ...dark, onTap: () => this.setDepth(this.run.depth + 1) }, x0 + 67, depthY);
@@ -225,7 +316,11 @@ export class MinesScene implements DeptScene {
     const gap = 3;
     const upgW = Math.floor((total - drumW - gap * (drumW ? 2 : 1)) * 0.55);
     const hireW = total - drumW - upgW - gap * (drumW ? 2 : 1);
-    this.upgBtn = mk({ w: upgW, h: 20, label: 'UPGRADES', onTap: () => this.ctx.openUpgrades(this.groups) }, x0, btnY);
+    this.upgBtn = mk({ w: upgW, h: 20, label: 'UPGRADES', onTap: () => {
+          this.ctx.markSeen('m.sheet');
+          this.ctx.openUpgrades(this.groups);
+        },
+      }, x0, btnY);
     this.hireBtn = mk({ w: hireW, h: 20, label: 'HIRE', sub: '', color: 0x5a9ad8, shade: 0x2a5a8a, onTap: () => this.quickHire() }, x0 + upgW + gap, btnY);
     this.drumBtn = mk(
       { w: Math.max(1, drumW), h: 20, label: 'DRUM', sub: 'ON', color: 0xc05a3a, shade: 0x7a2a1a, textColor: C.ink, onTap: () => this.toggleDrum() },
@@ -253,8 +348,8 @@ export class MinesScene implements DeptScene {
     for (let i = 0; i < M.DRUMMERS_MAX; i++) {
       const g = new Graphics(drummerArt(0));
       const side = i % 2 === 0 ? -1 : 1;
-      const k = Math.floor(i / 2);
-      g.position.set(cx + side * (20 + k * 14), this.ledgeY);
+      const kk = Math.floor(i / 2);
+      g.position.set(cx + side * (20 + kk * 14), this.ledgeY);
       if (side > 0) g.scale.x = -1;
       g.visible = false;
       this.drummers.push(g);
@@ -268,6 +363,25 @@ export class MinesScene implements DeptScene {
       this.torches.push(t);
       this.root.addChildAt(t, this.root.getChildIndex(this.drum));
     }
+  }
+
+  private placeTiles(): void {
+    for (const t of this.wall.tiles) {
+      const v = this.views[t.i];
+      v.cont.position.set(this.tx(t) + 1, this.ty(t) + 1);
+      v.shownKey = '';
+      v.overKey = '';
+    }
+  }
+
+  private tx(t: Tile): number {
+    return this.wallX + t.col * this.T;
+  }
+  private ty(t: Tile): number {
+    return this.wallY + t.row * this.T;
+  }
+  private view(t: Tile): TileView {
+    return this.views[t.i];
   }
 
   private drawBackground(): void {
@@ -288,9 +402,9 @@ export class MinesScene implements DeptScene {
     // Stalactites along the top.
     for (let x = 0; x < L.w; x += 7 + Math.floor(r() * 9)) {
       const h = 3 + Math.floor(r() * 9);
-      for (let k = 0; k < h; k++) {
-        const w = Math.max(1, Math.round(4 * (1 - k / h)));
-        g.rect(x + Math.floor((4 - w) / 2), c.y + k, w, 1).fill(pal.bgDark);
+      for (let kk = 0; kk < h; kk++) {
+        const w = Math.max(1, Math.round(4 * (1 - kk / h)));
+        g.rect(x + Math.floor((4 - w) / 2), c.y + kk, w, 1).fill(pal.bgDark);
       }
     }
     this.drawScenery(g, r, pal);
@@ -298,9 +412,9 @@ export class MinesScene implements DeptScene {
     const W = this.T * M.GRID;
     g.rect(this.wallX - 3, this.wallY - 3, W + 6, W + 6).fill(OUTLINE);
     g.rect(this.wallX - 2, this.wallY - 2, W + 4, W + 4).fill(pal.bgDark);
-    for (const t of this.tiles) {
-      g.rect(t.x + 3, t.y + 3, this.T - 6, this.T - 6).fill(0x08040a);
-      g.rect(t.x + 4, t.y + this.T - 5, this.T - 8, 1).fill(pal.bg);
+    for (const t of this.wall.tiles) {
+      g.rect(this.tx(t) + 3, this.ty(t) + 3, this.T - 6, this.T - 6).fill(0x08040a);
+      g.rect(this.tx(t) + 4, this.ty(t) + this.T - 5, this.T - 8, 1).fill(pal.bg);
     }
     const wood = 0x6a4428;
     const woodL = 0x8a5a34;
@@ -359,7 +473,6 @@ export class MinesScene implements DeptScene {
       g.rect(x - 2, ly + 1, 5, 7).fill(0x3a3440);
       g.rect(x - 1, ly + 2, 3, 5).fill(0xf0a030);
       g.rect(x, ly + 3, 1, 2).fill(0xfff0a0);
-      // soft glow
       g.circle(x, ly + 4, 14).fill({ color: 0xf0a030, alpha: 0.06 });
       g.circle(x, ly + 4, 8).fill({ color: 0xf0a030, alpha: 0.08 });
     }
@@ -384,236 +497,155 @@ export class MinesScene implements DeptScene {
     }
   }
 
-  // ---------- wall ----------
+  // ---------- wall events (juice) ----------
 
-  private buildWall(first: boolean): void {
-    if (!this.tiles.length) {
-      for (let i = 0; i < M.TILES; i++) {
-        const col = i % M.GRID;
-        const row = Math.floor(i / M.GRID);
-        const cont = new Container();
-        const body = new Graphics();
-        const crack = new Graphics();
-        const flash = new Graphics();
-        flash.visible = false;
-        cont.addChild(body, crack, flash);
-        this.wallLayer.addChild(cont);
-        this.tiles.push({
-          i,
-          col,
-          row,
-          x: 0,
-          y: 0,
-          kind: null,
-          hp: 0,
-          maxHp: 0,
-          regrow: 0,
-          variant: (i * 7 + row) % 3,
-          stage: 0,
-          cont,
-          body,
-          crack,
-          flash,
-          flashT: 0,
-          squashT: 0,
-          fuse: -1,
-          kegAge: 0,
-          sparkle: rand(),
-          shownKey: '',
-        });
-      }
-    }
-    for (const t of this.tiles) {
-      t.x = this.wallX + t.col * this.T;
-      t.y = this.wallY + t.row * this.T;
-      t.cont.position.set(t.x + 1, t.y + 1);
-      if (first) this.spawnRock(t, true);
-      else {
-        t.kind = null;
-        t.regrow = 0.05 + rand() * 0.35;
-      }
-      t.shownKey = '';
-    }
-    this.shownDepth = this.run.depth;
-    this.drawBackground();
+  private vol(): number {
+    return this.ctx.game.save.meta.settings.sfx ?? 0.6;
   }
 
-  private spawnRock(t: Tile, initial = false): void {
-    const d = this.run.depth;
-    let kind: M.RockKind = 'common';
-    const r = rand();
-    const kp = initial ? 0 : M.kegP(this.per.powder);
-    if (r < kp) kind = 'keg';
-    else if (r < kp + M.GEODE_P) kind = 'geode';
-    else if (r < kp + M.GEODE_P + M.VEIN_P) kind = 'vein';
-    // Onboarding: once a goblin is hired, make sure a vein shows up to teach "shiny first".
-    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !this.tiles.some((o) => o.kind === 'vein')) kind = 'vein';
-    t.kind = kind;
-    t.maxHp = kind === 'keg' ? 1 : M.H(d) * M.KIND_HP[kind];
-    t.hp = t.maxHp;
-    t.fuse = -1;
-    t.kegAge = 0;
-    t.variant = Math.floor(rand() * 3);
-    t.stage = 0;
-    t.squashT = 0.08;
-    if (kind === 'keg' && this.ctx.seen('ob.smash') && !this.ctx.seen('m.kegLesson')) {
-      this.ctx.markSeen('m.kegLesson');
-      this.ctx.say('kegLesson', { milestone: true });
-    }
+  private forceKind(): M.RockKind | null {
+    // Onboarding beat 4: once a goblin is hired, make sure a vein shows up to teach "shiny first".
+    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !this.wall.tiles.some((o) => o.kind === 'vein' || o.next === 'vein')) return 'vein';
+    return null;
   }
 
-  private alive(t: Tile): boolean {
-    return t.kind !== null;
+  private onHit(t: Tile, _dmg: number, _by: By): void {
+    const v = this.view(t);
+    v.flashT = 0.05;
+    v.squashT = 0.06;
   }
 
-  private mineable(t: Tile): boolean {
-    return t.kind !== null && t.kind !== 'keg';
-  }
-
-  private refreshTile(t: Tile): void {
-    const st = M.stratumOf(this.run.depth);
-    let key: string;
-    if (t.kind === null) {
-      key = t.regrow < 0.3 ? `sprout.${st}.${t.variant}` : 'empty';
-    } else {
-      const frac = t.hp / t.maxHp;
-      t.stage = t.kind === 'keg' || t.kind === 'rubble' ? 0 : frac <= 0.34 ? 2 : frac <= 0.67 ? 1 : 0;
-      key = `${t.kind}.${st}.${t.variant}.${t.stage}`;
-    }
-    if (key === t.shownKey) return;
-    t.shownKey = key;
-    if (t.kind === null) {
-      t.crack.visible = false;
-      if (key === 'empty') t.body.visible = false;
-      else {
-        t.body.visible = true;
-        t.body.context = rockArt('sprout', st, t.variant, this.s);
-      }
+  private onBreak(t: Tile, kind: M.RockKind, by: By, got: number, gems: number): void {
+    const cx = this.tx(t) + this.T / 2;
+    const cy = this.ty(t) + this.T / 2;
+    const pal = STRATA_PAL[M.stratumOf(this.run.depth)];
+    this.view(t).flashT = 0;
+    if (kind === 'rubble') {
+      this.burst(cx, cy, 4, 0x6a6a74);
+      this.ctx.markSeen('m.raked');
       return;
     }
-    t.body.visible = true;
-    t.body.context = rockArt(t.kind, st, t.variant, this.s);
-    t.crack.visible = t.stage > 0;
-    if (t.stage > 0) t.crack.context = crackArt(t.stage, t.variant, this.s);
-    t.flash.context = flashArt(t.variant, this.s);
-  }
-
-  // ---------- goblins ----------
-
-  private syncGoblins(initial: boolean): void {
-    const want = M.crewSize(this.run, this.ctx.save.imports?.bones ?? 0);
-    while (this.gobs.length < want) {
-      const i = this.gobs.length;
-      const sapper = M.isSapperSlot(this.run, i);
-      const g = new Graphics(goblinArt(0, sapper));
-      const side = i % 2 === 0 ? -1 : 1;
-      const x = side < 0 ? this.wallX - 8 : this.wallX + this.T * M.GRID + 8;
-      const y = this.wallY + this.T * M.GRID;
-      const gob: Gob = { g, sapper, tile: -1, x, y, hop: null, swing: rand(), frame: 0, face: side < 0 ? 1 : -1, plant: SAPPER_PLANT * rand(), cheer: 0 };
-      if (initial) {
-        const t = this.tiles[Math.floor(rand() * M.TILES)];
-        gob.x = t.x + 6;
-        gob.y = t.y + this.T - 2;
-      }
-      this.gobs.push(gob);
-      this.gobLayer.addChild(g);
-      if (!initial) {
-        const hired = M.goblins(this.run);
-        if (hired === 1 && !this.ctx.seen('m.firstGoblin')) {
-          this.ctx.markSeen('m.firstGoblin');
-          this.ctx.say('firstGoblin', { milestone: true });
-        } else if (hired === 4 && !this.ctx.seen('m.fourGoblins')) {
-          this.ctx.markSeen('m.fourGoblins');
-          this.ctx.say('fourGoblins', { milestone: true });
-        }
-      }
+    if (kind === 'bedrock') {
+      this.burst(cx, cy, 10, 0x4a4458);
+      if (gems) {
+        this.ctx.float(`+${gems}{gem}`, cx, cy - 10, '#d090ff');
+        sfx.gem(this.vol());
+        this.ctx.saveSoon();
+      } else this.ctx.float('CRACK!', cx, cy - 10, '#8a8494');
+      return;
     }
-    // Crew order can shift (a Sapper hired after Bone Miners arrived): re-label every slot.
-    this.gobs.forEach((g, k) => {
-      g.sapper = M.isSapperSlot(this.run, k);
-      g.g.tint = M.isBoneSlot(this.run, k) ? 0xd8d0b8 : 0xffffff;
-    });
-  }
-
-  private standPos(t: Tile, gi: number): { x: number; y: number; face: number } {
-    const left = gi % 2 === 0;
-    return { x: t.x + (left ? 7 : this.T - 7), y: t.y + this.T - 2, face: left ? 1 : -1 };
-  }
-
-  private pickTarget(g: Gob, gi: number): number {
-    let best = -1;
-    let bestScore = Infinity;
-    for (const t of this.tiles) {
-      if (!this.mineable(t)) continue;
-      let crowd = 0;
-      for (const o of this.gobs) if (o !== g && o.tile === t.i) crowd++;
-      const p = this.standPos(t, gi);
-      const score = Math.hypot(p.x - g.x, p.y - g.y) + crowd * 60;
-      if (score < bestScore) {
-        bestScore = score;
-        best = t.i;
-      }
+    const big = kind === 'vein' || kind === 'mother';
+    this.ctx.float(`+${formatNum(got, this.notation())}`, cx, cy - (big ? 8 : 6), big ? '#ffe060' : by === 'gob' ? '#c8a050' : '#e8c04a');
+    if (kind === 'vein' && rand() < 0.2) this.ctx.say('vein');
+    if (kind === 'mother') {
+      this.ctx.float(`+${M.MOTHER_INGOTS}{ingot} MOTHERLODE!`, cx, cy - 18, '#ffe060');
+      this.shake(3, 0.2);
+      this.ctx.haptic(30);
+      this.ctx.say('mother', { type: 'mechanic_unlocked', key: 'mother' });
+      for (const gv of this.gobViews) gv.cheer = 1;
     }
-    return best;
+    if (gems) {
+      this.ctx.float(`+${gems}{gem}`, cx, cy - 16, '#d090ff');
+      this.ctx.say('gem');
+      sfx.gem(this.vol());
+      this.ctx.saveSoon();
+    }
+    this.burst(cx, cy, by === 'gob' ? 6 : big ? 14 : 10, kind === 'mother' ? GOLD : pal.chip);
+    this.nuggets(cx, cy, kind === 'mother' ? 10 : kind === 'vein' ? 5 : 2);
+    if (by !== 'gob') {
+      this.shake(1, 0.06);
+      this.ctx.haptic(8);
+      sfx.break(this.vol());
+    }
   }
 
-  private updateGoblins(dt: number): void {
-    const frenzy = this.frenzyT > 0 ? M.FRENZY_GOBLIN_MULT : 1;
-    this.gobs.forEach((g, gi) => {
-      if (g.cheer > 0) g.cheer -= dt;
-      if (g.hop) {
-        g.hop.t += dt;
-        const k = Math.min(1, g.hop.t / g.hop.dur);
-        g.x = g.hop.fx + (g.hop.tx - g.hop.fx) * k;
-        g.y = g.hop.fy + (g.hop.ty - g.hop.fy) * k - Math.sin(k * Math.PI) * 9;
-        if (k >= 1) g.hop = null;
-        g.frame = 2;
-      } else {
-        const t = g.tile >= 0 ? this.tiles[g.tile] : null;
-        if (!t || !this.mineable(t)) {
-          g.tile = this.pickTarget(g, gi);
-          if (g.tile >= 0) {
-            const p = this.standPos(this.tiles[g.tile], gi);
-            const dist = Math.hypot(p.x - g.x, p.y - g.y);
-            g.hop = { fx: g.x, fy: g.y, tx: p.x, ty: p.y, t: 0, dur: Math.min(0.5, 0.18 + dist / 400) };
-            g.face = p.x >= g.x ? 1 : -1;
-            if (Math.abs(p.x - g.x) < 4) g.face = p.face;
-          } else g.frame = g.cheer > 0 ? 2 : 0;
-        } else {
-          g.face = this.standPos(t, gi).face;
-          const dps = M.goblinDps(g.sapper ? M.SAPPER_DPS : M.GRUNT_DPS, this.run, this.per) * frenzy;
-          g.swing += dt * (frenzy > 1 ? 1.6 : 1);
-          const ph = g.swing % 0.5;
-          const frame = ph < 0.32 ? 0 : 1;
-          if (frame === 1 && g.frame !== 1) {
-            t.squashT = 0.05;
-            this.chips(t.x + this.T / 2 + (g.face > 0 ? -6 : 6), t.y + this.T - 8, 1);
-          }
-          g.frame = frame;
-          this.damage(t, dps * dt, 'gob');
-        }
-      }
-      if (g.sapper && M.goblins(this.run) > 0) {
-        g.plant -= dt;
-        if (g.plant <= 0) {
-          g.plant = SAPPER_PLANT;
-          const commons = this.tiles.filter((t) => t.kind === 'common');
-          const t = commons[Math.floor(rand() * commons.length)];
-          if (t) {
-            t.kind = 'keg';
-            t.maxHp = 1;
-            t.hp = 1;
-            t.fuse = -1;
-            t.kegAge = 0;
-            t.squashT = 0.1;
-          }
-        }
-      }
-      const art = goblinArt(g.cheer > 0 && !g.hop ? 2 : g.frame, g.sapper);
-      if (g.g.context !== art) g.g.context = art;
-      g.g.scale.x = g.face;
-      g.g.position.set(Math.round(g.x), Math.round(g.y - (g.cheer > 0 && !g.hop ? 2 : 0)));
-    });
+  private onShell(t: Tile, got: number): void {
+    const cx = this.tx(t) + this.T / 2;
+    const cy = this.ty(t) + this.T / 2;
+    this.burst(cx, cy, 8, STRATA_PAL[M.stratumOf(this.run.depth)].speck);
+    this.ctx.float(`+${formatNum(got, this.notation())}`, cx, cy - 6, '#c8a050');
+    this.view(t).squashT = 0.1;
+  }
+
+  private onBlast(t: Tile, auto: boolean): void {
+    const cx = this.tx(t) + this.T / 2;
+    const cy = this.ty(t) + this.T / 2;
+    this.pushFx({ kind: 'blast', t: 0, max: 0.25, x: this.tx(t) - this.T, y: this.ty(t) - this.T, w: this.T * 3 });
+    this.burst(cx, cy, 16, 0xff9a30);
+    this.shake(3, 0.18);
+    this.ctx.haptic(35);
+    sfx.blast(this.vol());
+    for (const g of this.gobViews) g.cheer = 0.8;
+    if (auto && !this.ctx.seen('m.kegLit') && !this.ctx.seen('m.kegAuto')) {
+      this.ctx.markSeen('m.kegAuto');
+      this.ctx.say('kegAuto', { type: 'hazard_first', key: 'kegAuto' });
+    }
+  }
+
+  private onZap(path: number[], by: 'tap' | 'shock' | 'thunder'): void {
+    const pts: number[] = [];
+    for (const i of path) {
+      const t = this.wall.tiles[i];
+      pts.push(this.tx(t) + this.T / 2, this.ty(t) + this.T / 2);
+      if (i !== path[0]) this.view(t).flashT = 0.08;
+    }
+    this.pushFx({ kind: 'zap', t: 0, max: by === 'thunder' ? 0.25 : 0.15, pts, color: by === 'thunder' ? 0xffe060 : 0x7af0ff });
+    sfx.zap(this.vol());
+  }
+
+  private onCaveIn(ts: Tile[]): void {
+    for (const t of ts) {
+      this.view(t).squashT = 0.1;
+      this.burst(this.tx(t) + this.T / 2, this.ty(t) + 4, 3, 0x6a6a74);
+    }
+    this.shake(3, 0.25);
+    this.ctx.haptic(30);
+    // hazard_first (02 §18): the rake micro-lesson lands while the Rubble is still there (R4-13).
+    if (!this.ctx.seen('m.caveIn')) {
+      this.ctx.markSeen('m.caveIn');
+      if (!this.ctx.lesson('caveIn')) this.ctx.say('caveIn', { type: 'hazard_first', key: 'caveIn' });
+    }
+  }
+
+  private onGas(t: Tile): void {
+    this.burst(this.tx(t) + this.T / 2, this.ty(t) + this.T / 2, 6, 0x9ad050);
+    if (!this.ctx.seen('m.gas')) {
+      this.ctx.markSeen('m.gas');
+      if (!this.ctx.lesson('gas')) this.ctx.say('gas', { type: 'hazard_first', key: 'gas' });
+    }
+  }
+
+  private onSpawn(t: Tile): void {
+    const v = this.view(t);
+    v.squashT = 0.08;
+    v.variant = Math.floor(rand() * 3);
+    if (t.kind === 'keg' && this.ctx.seen('ob.smash') && !this.ctx.seen('m.kegLesson')) {
+      this.ctx.markSeen('m.kegLesson');
+      this.ctx.lesson('keg');
+    }
+    if (t.kind === 'bedrock' && !this.ctx.seen('m.bedrock')) {
+      this.ctx.markSeen('m.bedrock');
+      this.ctx.say('bedrock', { type: 'hazard_first', key: 'bedrock' });
+    }
+  }
+
+  private onClink(t: Tile): void {
+    sfx.clink(this.vol());
+    this.view(t).squashT = 0.04;
+    this.ctx.float('CLINK', this.tx(t) + this.T / 2, this.ty(t) + 4, '#8a8494');
+  }
+
+  private onFrenzy(start: boolean): void {
+    if (start) {
+      this.shake(2, 0.2);
+      this.ctx.haptic(40);
+      const c = this.ctx.content();
+      this.ctx.float('FRENZY!', c.x + c.w / 2, this.wallY + 40, '#ff6040');
+    } else if (!this.ctx.seen('m.firstFrenzy')) {
+      // Written in the past tense: it lands once the Frenzy has calmed (00 §5.4.4).
+      this.ctx.markSeen('m.firstFrenzy');
+      this.ctx.say('firstFrenzy', { type: 'mechanic_unlocked', key: 'frenzy' });
+    }
   }
 
   // ---------- input ----------
@@ -631,295 +663,92 @@ export class MinesScene implements DeptScene {
   private onDown(e: FederatedPointerEvent): void {
     const p = this.root.toLocal(e.global);
     const ti = this.tileAt(p.x, p.y);
-    this.pointers.set(e.pointerId, { tile: ti, raked: 0 });
-    if (ti >= 0) this.tap(this.tiles[ti], p.x, p.y);
+    this.pointers.set(e.pointerId, { tile: ti, raked: 0, hold: 0, auto: 0 });
+    if (ti < 0) return;
+    if (this.calib) {
+      this.calibTap();
+      return;
+    }
+    if (this.ritual && this.ritual.lit < 0 && this.ritual.kegs.includes(ti)) {
+      this.lightRitual(this.ritual.kegs.indexOf(ti));
+      return;
+    }
+    this.playerTap(ti, p.x, p.y, false);
   }
 
   private onMove(e: FederatedPointerEvent): void {
     const ptr = this.pointers.get(e.pointerId);
-    if (!ptr) return;
+    if (!ptr || this.calib) return;
     const p = this.root.toLocal(e.global);
     const ti = this.tileAt(p.x, p.y);
     if (ti < 0 || ti === ptr.tile) return;
     ptr.tile = ti;
+    ptr.hold = 0;
     if (ptr.raked >= RAKE_MAX) return;
     ptr.raked++;
-    this.rake(this.tiles[ti]);
-  }
-
-  /** Seconds on the beat clock right now, including time since the last frame. */
-  private beatNow(): number {
-    return this.beatClock + (performance.now() - this.frameWall) / 1000;
+    const t = this.wall.tiles[ti];
+    if (this.wall.rake(ti)) {
+      this.chips(this.tx(t) + this.T / 2, this.ty(t) + this.T / 2, 2);
+      this.view(t).squashT = 0.04;
+    }
   }
 
   private drumActive(): boolean {
     return this.per.drum && this.per.drumOn;
   }
 
-  private tap(t: Tile, px: number, py: number): void {
+  /** Seconds on the beat clock right now, including time since the last frame. */
+  private beatNow(): number {
+    return this.wall.clock + (performance.now() - this.frameWall) / 1000;
+  }
+
+  /** One player hit on tile ti: a tap (judged by the drum) or a hold auto-hit (never judged). */
+  private playerTap(ti: number, px: number, py: number, auto: boolean): void {
     const now = performance.now();
-    this.tapTimes = this.tapTimes.filter((x) => now - x < 1000);
+    while (this.tapTimes.length && now - this.tapTimes[0] >= 1000) this.tapTimes.shift();
     if (this.tapTimes.length >= HARD_CAP) return;
     this.tapTimes.push(now);
     const soft = this.tapTimes.length > SOFT_CAP ? 0.5 : 1;
-    this.recentTaps++;
-    this.run.stats.taps++;
-    this.showFist(px, py, false);
-
-    // Beat judgement: one judged tap per beat, from the previous beat's midpoint (02 §6E, R4-01).
-    let beatHit = false;
-    if (this.drumActive()) {
-      const p = M.beatPeriod(this.run.depth);
-      const tb = this.beatNow() - BEAT_LATENCY;
+    let beat = null;
+    if (this.drumActive() && !auto) {
+      const p = this.wall.period;
+      const tb = this.beatNow() - this.per.latency;
       const k = Math.round(tb / p);
-      if (k !== this.lastJudged) {
-        this.lastJudged = k;
-        if (Math.abs(tb - k * p) <= M.beatWindow(this.run.wide)) beatHit = true;
-        else this.streak = 0;
-      }
+      beat = { k, inWindow: Math.abs(tb - k * p) <= this.wall.window };
     }
-
-    if (t.kind === null) return;
-    if (t.kind === 'keg') {
-      if (t.fuse < 0) {
-        t.fuse = KEG_FUSE;
-        t.squashT = 0.08;
-        this.ctx.markSeen('m.kegLit');
-      }
-      return;
-    }
-    if (t.kind === 'rubble') {
-      this.breakRock(t, 'tap');
-      return;
-    }
-
-    let dmg = M.fistDamage(this.run) * soft;
-    const crit = rand() < M.critChance(this.run.critC) || M.stewCrit(this.ctx.save.imports?.potions ?? 0, this.run.stats.taps);
-    if (crit) dmg *= M.critMult(this.run.critP);
-    if (beatHit) {
-      this.streak++;
-      this.run.stats.beatHits++;
-      this.run.stats.bestStreak = Math.max(this.run.stats.bestStreak, this.streak);
-      dmg *= M.beatMult(this.run.drumhead) * M.streakBonus(this.streak);
-      this.onBeatHit();
-    }
-    if (this.frenzyT > 0) dmg *= M.frenzyTapMult(this.run.frenzy);
-
-    const cx = t.x + this.T / 2;
-    if (crit) {
-      this.run.stats.crits++;
+    const t = this.wall.tiles[ti];
+    const kind = t.kind;
+    if (t.gas > 0) this.ctx.markSeen('m.wafted');
+    const res = this.wall.tap(ti, beat, { soft });
+    if (kind === 'keg' && res.hit) this.ctx.markSeen('m.kegLit');
+    if (!res.hit) return;
+    this.showFist(px, py, res.crit);
+    const v = this.vol();
+    const cx = this.tx(t) + this.T / 2;
+    if (res.crit) {
       this.hitStop = 0.05;
       this.shake(2, 0.08);
       this.ctx.haptic(15);
-      this.ctx.float('CRUNCH!', cx, t.y - 2, '#ffe060');
-      this.showFist(px, py, true);
+      this.ctx.float('CRUNCH!', cx, this.ty(t) - 2, '#ffe060');
+      sfx.crunch(v);
+    } else sfx.tock(v, kind === 'vein' || kind === 'mother' || kind === 'geode');
+    if (res.beatHit) {
+      this.lastBeatHitK = beat!.k;
+      const st = this.wall.streak;
+      this.ctx.float(st > 1 ? `!X${st}` : '!', cx + 9, this.ty(t) + 2, '#e8c04a');
+      sfx.beatHit(v, st);
+      if (res.thunder) this.ctx.float('THUNDER!', cx, this.ty(t) - 10, '#ffe060');
+    } else if (!res.judged && beat && beat.k === this.lastBeatHitK) {
+      // A follow-up after a boom: a plain chip, nothing lost (drum lesson beat 3, "BOOM-ta-ta").
+      this.ctx.markSeen('m.followup');
     }
-    if (beatHit) this.ctx.float(this.streak > 1 ? `!X${this.streak}` : '!', cx + 9, t.y + 2, '#e8c04a');
-    t.flashT = 0.05;
-    t.squashT = 0.06;
-    this.chips(px, py, crit ? 6 : 3);
-
-    // Chain Lightning: any tap can proc it; Beat Hits proc at double chance.
-    const chance = M.chainChance(this.per.chain) * (beatHit ? 2 : 1);
-    if (chance > 0 && rand() < chance) this.chain(t, dmg * 0.5);
-
-    this.damage(t, dmg, 'tap');
-  }
-
-  private rake(t: Tile): void {
-    if (t.kind === null || t.kind === 'keg') return;
-    if (t.kind === 'rubble') {
-      this.breakRock(t, 'tap');
-      return;
-    }
-    this.chips(t.x + this.T / 2, t.y + this.T / 2, 2);
-    t.squashT = 0.04;
-    this.damage(t, M.fistDamage(this.run) * 0.25, 'tap');
-  }
-
-  private onBeatHit(): void {
-    this.pipDecay = 0;
-    if (this.run.frenzy > 0) {
-      if (this.frenzyT > 0) this.frenzyT = Math.min(M.frenzyCap(this.run.fuse), this.frenzyT + 0.25);
-      else {
-        this.pips++;
-        if (this.pips >= M.frenzyPips(this.run.frenzy)) this.startFrenzy();
-      }
-    }
-    if (this.ctx.seen('m.drumBought') && !this.ctx.seen('m.drumLesson')) {
-      this.lessonHits++;
-      if (this.lessonHits >= 4) {
-        this.ctx.markSeen('m.drumLesson');
-        this.ctx.say('drumLesson', { milestone: true });
-      }
-    }
-  }
-
-  private startFrenzy(): void {
-    this.pips = 0;
-    this.frenzyT = M.frenzyBase(this.run.fuse);
-    this.run.stats.frenzies++;
-    this.shake(2, 0.2);
-    this.ctx.haptic(40);
-    const c = this.ctx.content();
-    this.ctx.float('FRENZY!', c.x + c.w / 2, this.wallY + 40, '#ff6040');
-  }
-
-  // ---------- damage, breaks, effects ----------
-
-  private damage(t: Tile, amount: number, by: 'tap' | 'gob' | 'blast' | 'zap'): void {
-    if (!this.mineable(t) || amount <= 0) return;
-    t.hp -= amount;
-    if (t.hp <= 0) this.breakRock(t, by);
-  }
-
-  private breakRock(t: Tile, by: 'tap' | 'gob' | 'blast' | 'zap'): void {
-    const kind = t.kind;
-    if (kind === null) return;
-    const cx = t.x + this.T / 2;
-    const cy = t.y + this.T / 2;
-    const pal = STRATA_PAL[M.stratumOf(this.run.depth)];
-    t.kind = null;
-    t.regrow = M.regrowTime(this.run.regrow);
-    t.flashT = 0;
-    for (const g of this.gobs) if (g.tile === t.i) g.tile = -1;
-    if (kind === 'rubble') {
-      this.burst(cx, cy, 4, 0x6a6a74);
-      return;
-    }
-    let reward = M.R(this.run.depth) * M.KIND_REWARD[kind] * M.oreMult(this.run);
-    if (by === 'tap' && (kind === 'vein' || kind === 'geode')) reward *= 1 + 0.1 * this.run.keen;
-    const got = this.ctx.earn(reward);
-    const st = this.run.stats;
-    st.rocks++;
-    if (kind === 'vein') {
-      st.veins++;
-      this.ctx.float(`+${formatNum(got)}`, cx, cy - 8, '#ffe060');
-      if (rand() < 0.2) this.ctx.say('vein');
-    } else this.ctx.float(`+${formatNum(got)}`, cx, cy - 6, by === 'gob' ? '#c8a050' : '#e8c04a');
-    let gems = 0;
-    if (kind === 'geode') {
-      gems++;
-      st.geodes++;
-    }
-    if (this.per.lucky > 0 && rand() < 0.001 * this.per.lucky) gems++;
-    if (gems) {
-      this.per.gems += gems;
-      this.per.gemsEver += gems;
-      this.ctx.float(`+${gems}{gem}`, cx, cy - 16, '#d090ff');
-      this.ctx.say('gem');
-      this.ctx.saveSoon();
-    }
-    // Infamy skill gate: 50 rocks at a depth, on screen (this scene only runs on screen).
-    const key = String(this.run.depth);
-    const n = (this.run.gate[key] = (this.run.gate[key] ?? 0) + 1);
-    if (n >= M.GATE_ROCKS) this.ctx.raiseSkill(this.run.depth);
-
-    this.burst(cx, cy, by === 'gob' ? 6 : 10, pal.chip);
-    this.nuggets(cx, cy, kind === 'vein' ? 5 : 2);
-    if (by !== 'gob') {
-      this.shake(1, 0.06);
-      this.ctx.haptic(8);
-    }
-    if (rand() < M.caveInChance(this.run)) this.caveIn();
-  }
-
-  private caveIn(): void {
-    const n = 3 + Math.floor(rand() * 3);
-    const cands = this.tiles.filter((t) => t.kind !== 'keg');
-    for (let k = 0; k < n && cands.length; k++) {
-      const t = cands.splice(Math.floor(rand() * cands.length), 1)[0];
-      t.kind = 'rubble';
-      t.maxHp = 1;
-      t.hp = 1;
-      t.squashT = 0.1;
-      this.burst(t.x + this.T / 2, t.y + 4, 3, 0x6a6a74);
-      for (const g of this.gobs) if (g.tile === t.i) g.tile = -1;
-    }
-    this.shake(3, 0.25);
-    this.ctx.haptic(30);
-    if (!this.ctx.seen('m.caveIn')) {
-      this.ctx.markSeen('m.caveIn');
-      this.ctx.say('caveIn', { milestone: true });
-    }
-  }
-
-  private explode(t: Tile, auto: boolean): void {
-    const cx = t.x + this.T / 2;
-    const cy = t.y + this.T / 2;
-    t.kind = null;
-    t.regrow = M.regrowTime(this.run.regrow);
-    t.fuse = -1;
-    this.run.stats.kegs++;
-    const dmg = M.fistDamage(this.run) * M.blastMult(this.per.powder) * (auto ? 0.5 : 1);
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) {
-        const c = t.col + dx;
-        const r = t.row + dy;
-        if (c < 0 || r < 0 || c >= M.GRID || r >= M.GRID) continue;
-        const o = this.tiles[r * M.GRID + c];
-        if (o === t) continue;
-        if (o.kind === 'keg') {
-          if (o.fuse < 0 || o.fuse > 0.15) o.fuse = 0.15;
-        } else if (o.kind === 'rubble') this.breakRock(o, 'blast');
-        else this.damage(o, dmg, 'blast');
-      }
-    this.fx.push({ kind: 'blast', t: 0, max: 0.25, x: t.x - this.T, y: t.y - this.T, w: this.T * 3 });
-    this.burst(cx, cy, 16, 0xff9a30);
-    this.shake(3, 0.18);
-    this.ctx.haptic(35);
-    for (const g of this.gobs) g.cheer = 0.8;
-    if (auto && !this.ctx.seen('m.kegLit') && !this.ctx.seen('m.kegAuto')) {
-      this.ctx.markSeen('m.kegAuto');
-      this.ctx.say('kegAuto', { milestone: true });
-    }
-  }
-
-  private chain(from: Tile, dmg: number): void {
-    const jumps = M.chainJumps(this.per.chain);
-    const pts = [from.x + this.T / 2, from.y + this.T / 2];
-    const hitSet = new Set([from.i]);
-    let cur = from;
-    for (let j = 0; j < jumps; j++) {
-      let best: Tile | null = null;
-      let bd = Infinity;
-      for (const t of this.tiles) {
-        if (hitSet.has(t.i) || !this.mineable(t)) continue;
-        const d = Math.abs(t.col - cur.col) + Math.abs(t.row - cur.row) + rand() * 0.5;
-        if (d < bd) {
-          bd = d;
-          best = t;
-        }
-      }
-      if (!best) break;
-      hitSet.add(best.i);
-      pts.push(best.x + this.T / 2, best.y + this.T / 2);
-      best.flashT = 0.08;
-      this.damage(best, dmg, 'zap');
-      cur = best;
-    }
-    if (pts.length > 2) {
-      this.run.stats.lightning++;
-      this.fx.push({ kind: 'zap', t: 0, max: 0.15, pts });
-    }
-  }
-
-  private showFist(x: number, y: number, heavy: boolean): void {
-    this.fist.context = gauntletArt(heavy);
-    this.fist.visible = true;
-    this.fist.position.set(Math.round(x), Math.round(y - 6));
-    this.fistT = heavy ? 0.14 : 0.09;
-  }
-
-  private shake(mag: number, t: number): void {
-    this.shakeMag = Math.max(this.shakeMag, mag);
-    this.shakeT = Math.max(this.shakeT, t);
+    if (kind !== 'keg' && kind !== 'rubble') this.chips(px, py, res.crit ? 6 : 3);
   }
 
   // ---------- particles ----------
 
-  private spawn(x: number, y: number, color: number, size: number, vx: number, vy: number, life: number, grav: number, home = false): void {
-    if (this.parts.length >= MAX_PARTICLES) {
+  private spawnPart(x: number, y: number, color: number, size: number, vx: number, vy: number, life: number, grav: number, home = false): void {
+    if (this.parts.length >= this.maxParts) {
       const old = this.parts.shift()!;
       old.s.visible = false;
       this.pool.push(old.s);
@@ -939,19 +768,19 @@ export class MinesScene implements DeptScene {
 
   private chips(x: number, y: number, n: number): void {
     const pal = STRATA_PAL[M.stratumOf(this.run.depth)];
-    for (let i = 0; i < n; i++) this.spawn(x, y, i % 2 ? pal.light : pal.chip, 1 + (i % 2), (rand() - 0.5) * 70, -30 - rand() * 50, 0.35 + rand() * 0.2, 260);
+    for (let i = 0; i < n; i++) this.spawnPart(x, y, i % 2 ? pal.light : pal.chip, 1 + (i % 2), (rand() - 0.5) * 70, -30 - rand() * 50, 0.35 + rand() * 0.2, 260);
   }
 
   private burst(x: number, y: number, n: number, color: number): void {
     for (let i = 0; i < n; i++) {
       const a = rand() * Math.PI * 2;
       const v = 30 + rand() * 70;
-      this.spawn(x + (rand() - 0.5) * 12, y + (rand() - 0.5) * 12, i % 3 === 0 ? 0x2a1a20 : color, 2 + (i % 2), Math.cos(a) * v, Math.sin(a) * v - 40, 0.5 + rand() * 0.3, 300);
+      this.spawnPart(x + (rand() - 0.5) * 12, y + (rand() - 0.5) * 12, i % 3 === 0 ? 0x2a1a20 : color, 2 + (i % 2), Math.cos(a) * v, Math.sin(a) * v - 40, 0.5 + rand() * 0.3, 300);
     }
   }
 
   private nuggets(x: number, y: number, n: number): void {
-    for (let i = 0; i < n; i++) this.spawn(x, y, i % 2 ? GOLD : 0xfff0a0, 2, (rand() - 0.5) * 60, -60 - rand() * 40, 0.8, 0, true);
+    for (let i = 0; i < n; i++) this.spawnPart(x, y, i % 2 ? GOLD : 0xfff0a0, 2, (rand() - 0.5) * 60, -60 - rand() * 40, 0.8, 0, true);
   }
 
   private updateParticles(dt: number): void {
@@ -963,9 +792,9 @@ export class MinesScene implements DeptScene {
       p.life -= dt;
       if (p.home) {
         // Arc toward the HUD bank counter.
-        const k = Math.min(1, dt * 5);
-        p.vx += (tx - p.x) * k * 2.2;
-        p.vy += (ty - p.y) * k * 2.2;
+        const kk = Math.min(1, dt * 5);
+        p.vx += (tx - p.x) * kk * 2.2;
+        p.vy += (ty - p.y) * kk * 2.2;
         p.vx *= 0.9;
         p.vy *= 0.9;
         if (p.y < L.safe.t + 20) p.life = 0;
@@ -983,7 +812,28 @@ export class MinesScene implements DeptScene {
     }
   }
 
+  private pushFx(f: Fx): void {
+    if (this.fx.length >= MAX_FX) this.fx.shift();
+    this.fx.push(f);
+  }
+
+  private showFist(x: number, y: number, heavy: boolean): void {
+    this.fist.context = gauntletArt(heavy, Math.floor(this.run.tap / 25));
+    this.fist.visible = true;
+    this.fist.position.set(Math.round(x), Math.round(y - 6));
+    this.fistT = heavy ? 0.14 : 0.09;
+  }
+
+  private shake(mag: number, t: number): void {
+    this.shakeMag = Math.max(this.shakeMag, mag);
+    this.shakeT = Math.max(this.shakeT, t);
+  }
+
   // ---------- upgrades and controls ----------
+
+  private notation() {
+    return this.ctx.game.save.meta.settings.notation;
+  }
 
   private setDepth(d: number): void {
     const nd = Math.max(1, Math.min(this.run.maxDepth, d));
@@ -991,12 +841,21 @@ export class MinesScene implements DeptScene {
     this.run.depth = nd;
   }
 
+  private entry(id: string) {
+    for (const g of this.groups) for (const e of g.entries) if (e.id === id) return e;
+    return null;
+  }
+
   private buyDig(): void {
-    const e = this.groups[2].entries[0];
-    if (e.canAfford() && e.level() < e.max) {
-      e.buy();
-      this.ctx.saveSoon();
-    }
+    const e = this.entry('dig');
+    if (!e) return;
+    // The quick DIG button always opens one depth, whatever the sheet's buy mode.
+    const cost = M.digCost(this.run.maxDepth);
+    if (this.run.maxDepth >= M.MAX_DEPTH || !this.ctx.spend(cost)) return;
+    this.run.maxDepth++;
+    this.run.depth = this.run.maxDepth;
+    this.onDig();
+    this.ctx.saveSoon();
   }
 
   /** Goblins on the wall, Bone Miners included (they take crew slots). */
@@ -1005,35 +864,65 @@ export class MinesScene implements DeptScene {
   }
 
   private quickHire(): void {
-    const crew = this.groups[1].entries;
-    const e = this.crewNow() < M.MAX_GOBLINS ? crew[0] : crew[2];
-    if (e.canAfford() && e.level() < e.max) {
-      e.buy();
-      this.ctx.saveSoon();
-    }
+    const r = this.run;
+    if (this.crewNow() < M.MAX_GOBLINS) {
+      if (!this.ctx.spend(M.hireCost(r))) return;
+      r.grunts++;
+      this.onBuy('hire');
+    } else if (r.picks < M.PICKS_MAX) {
+      if (!this.ctx.spend(M.picksCost(r.picks))) return;
+      r.picks++;
+    } else return;
+    this.ctx.saveSoon();
   }
 
   private toggleDrum(): void {
     this.per.drumOn = !this.per.drumOn;
-    this.streak = 0;
+    this.wall.streak = 0;
     this.ctx.saveSoon();
   }
 
+  private onBuy(id: string): void {
+    const r = this.run;
+    if (id === 'critC') this.ctx.say('critBuy', { type: 'first_upgrade', key: 'critC' });
+    else if (id === 'chain') this.ctx.lesson('chain');
+    else if (id === 'hire' || id === 'sapper' || id === 'shocker' || id === 'prospector') {
+      const n = M.goblins(r);
+      if (n >= 1) this.ctx.say('firstGoblin', { type: 'first_helper', key: 'g1' });
+      if (n >= 4) this.ctx.say('fourGoblins', { type: 'first_helper', key: 'g4' });
+      if (id === 'shocker') this.ctx.say('shocker', { type: 'first_helper', key: 'shocker' });
+      if (id === 'prospector') this.ctx.say('prospector', { type: 'first_helper', key: 'prospector' });
+    } else if (id === 'drummers') this.ctx.say('drummer', { type: 'first_helper', key: 'drummer' });
+  }
+
   private onDig(): void {
+    const before = this.ctx.save.lifetime.best.maxDepth ?? 1;
     this.updateMaxDepthEver();
-    const ever = this.ctx.save.lifetime.best.maxDepth;
-    if (ever % 10 === 5 && !this.ctx.seen(`m.dial.${ever}`)) {
-      this.ctx.markSeen(`m.dial.${ever}`);
-      this.ctx.say('dialRaised', { milestone: true });
+    const ever = this.ctx.save.lifetime.best.maxDepth ?? 1;
+    if (ever <= before) return; // re-buying a depth after a Fall is silent (R4-09)
+    for (let d = before + 1; d <= ever; d++) {
+      // Stratum entries belong to tier_reached; the mid-stratum depths 5, 15, 25... to dial_raised.
+      if (d > 1 && (d - 1) % 10 === 0) {
+        const st = M.stratumOf(d);
+        this.ctx.say('stratum', { type: 'tier_reached', key: `st${st}`, vars: { name: M.STRATA[st] } });
+      } else if (d % 10 === 5) this.ctx.say('dialRaised', { type: 'dial_raised', key: `d${d}` });
+    }
+    if (ever >= 2 && !this.ctx.seen('m.drumWink') && !this.per.drum) {
+      this.ctx.markSeen('m.drumWink');
+      this.ctx.say('drumWink');
     }
   }
 
   private onDrumBought(): void {
     this.ctx.markSeen('m.drumBought');
-    this.lessonHits = 0;
-    this.ctx.say('drumBought', { milestone: true });
+    // mechanic_unlocked with a lesson runs the Doom Drum micro-lesson (02 §18).
+    this.ctx.say('drum', { type: 'mechanic_unlocked', key: 'drum' });
     this.shake(3, 0.3);
     this.ctx.haptic(50);
+    sfx.boom(this.vol(), 0, true);
+    this.wall.clock = 0;
+    this.lastBeatIdx = -1;
+    this.schedBeat = -1;
     // Rebuild the controls so the DRUM toggle appears.
     this.buildLayout();
     this.drawBackground();
@@ -1044,45 +933,55 @@ export class MinesScene implements DeptScene {
     b.maxDepth = Math.max(b.maxDepth ?? 1, this.run.maxDepth);
   }
 
-  private obStep(): string | null {
-    const seen = this.ctx.save.seen;
-    if (seen.onboardingDone) return null;
-    for (const id of ['smash', 'tap', 'hire', 'vein', 'dig']) if (!seen[`ob.${id}`]) return id;
-    return null;
+  /** Offline Gems (02 §3: gemRate = rocksPerSec x gemChance), credited on entry for the time
+   * since the wall was last on screen, at the suite's offline factor and cap. */
+  private creditOfflineGems(): void {
+    const p = this.per;
+    const now = Date.now();
+    if (p.gemAt > 0 && now > p.gemAt) {
+      const root = this.ctx.game.save;
+      const away = Math.min(offlineCapSeconds(root), (now - p.gemAt) / 1000);
+      const g = (p.gemFrac || 0) + M.offlineGems(this.run, p, this.ctx.save.imports?.bones ?? 0, offlineFactor(root, 'mines'), away);
+      const whole = Math.floor(Math.max(0, g));
+      p.gemFrac = Math.max(0, g - whole);
+      if (whole > 0) {
+        p.gems += whole;
+        p.gemsEver += whole;
+        const c = this.ctx.content();
+        this.ctx.float(`+${whole}{gem} WHILE AWAY`, c.x + c.w / 2, this.wallY - 10, '#d090ff');
+        this.ctx.saveSoon();
+      }
+    }
+    p.gemAt = now;
   }
 
   // ---------- frame ----------
 
-  update(dtIn: number): void {
-    const dt = dtIn;
+  update(dt: number): void {
     this.frameWall = performance.now();
     this.time += dt;
-    if (this.drumActive()) this.beatClock += dt;
+    // Frame-time guard: drop the particle cap when frames run long (02 §13).
+    this.slowFrames = dt > 0.02 ? Math.min(60, this.slowFrames + 1) : Math.max(0, this.slowFrames - 1);
+    this.maxParts = this.slowFrames > 30 ? 120 : 160;
 
     if (this.run.depth !== this.shownDepth) {
       const newStratum = M.stratumOf(this.run.depth) !== M.stratumOf(this.shownDepth);
-      this.buildWall(false);
+      this.shownDepth = this.run.depth;
       if (newStratum) this.drawBackground();
-      const st = M.stratumOf(this.run.depth);
-      if (st > 0 && !this.ctx.seen(`m.stratum.${st}`)) {
-        this.ctx.markSeen(`m.stratum.${st}`);
-        this.ctx.say('stratum', { milestone: true, vars: { name: M.STRATA[st] } });
-      }
     }
-    if (M.crewSize(this.run, this.ctx.save.imports?.bones ?? 0) !== this.gobs.length) this.syncGoblins(false);
 
     const frozen = this.hitStop > 0;
     if (frozen) this.hitStop -= dt;
-    else {
-      this.updateTiles(dt);
-      this.updateGoblins(dt);
-      this.updateFrenzy(dt);
-    }
+    else if (!this.calib) this.wall.step(dt);
+    this.stepHolds(dt);
+    this.updateGoblins(dt);
     this.updateParticles(dt);
     this.updateFx(dt);
     this.updateDrum(dt);
-    this.renderTiles();
-    this.updateUi(dt);
+    this.renderTiles(dt);
+    this.updateRitual(dt);
+    this.updateCalib(dt);
+    this.updateUi();
 
     // Shake by offsetting the whole scene (integer px).
     if (this.shakeT > 0) {
@@ -1107,63 +1006,126 @@ export class MinesScene implements DeptScene {
     }
   }
 
-  private updateTiles(dt: number): void {
-    for (const t of this.tiles) {
-      if (t.flashT > 0) t.flashT -= dt;
-      if (t.squashT > 0) t.squashT -= dt;
-      if (t.kind === null) {
-        t.regrow -= dt;
-        if (t.regrow <= 0) this.spawnRock(t);
-      } else if (t.kind === 'keg') {
-        if (t.fuse >= 0) {
-          t.fuse -= dt;
-          if (rand() < 0.6) this.spawn(t.x + this.T / 2 + 1, t.y + 6, rand() < 0.5 ? 0xffe060 : 0xff6020, 1, (rand() - 0.5) * 40, -30 - rand() * 30, 0.25, 100);
-          if (t.fuse <= 0) this.explode(t, false);
+  /** Hold to auto-hit (02 §10): a finger resting on one rock hits it 4x a second, off-beat. */
+  private stepHolds(dt: number): void {
+    if (!this.per.holdAuto || this.calib || !this.pointers.size) return;
+    for (const ptr of this.pointers.values()) {
+      if (ptr.tile < 0) continue;
+      ptr.hold += dt;
+      if (ptr.hold < HOLD_DELAY) continue;
+      ptr.auto += dt * M.HOLD_RATE;
+      while (ptr.auto >= 1) {
+        ptr.auto -= 1;
+        const t = this.wall.tiles[ptr.tile];
+        if (this.ritual && this.ritual.lit < 0 && this.ritual.kegs.includes(ptr.tile)) continue;
+        this.playerTap(ptr.tile, this.tx(t) + this.T / 2 + (rand() - 0.5) * 8, this.ty(t) + this.T / 2 + (rand() - 0.5) * 8, true);
+      }
+    }
+  }
+
+  private updateGoblins(dt: number): void {
+    const gobs = this.wall.gobs;
+    while (this.gobViews.length < gobs.length) {
+      const g = new Graphics(goblinArt(0, 'grunt'));
+      this.gobLayer.addChild(g);
+      this.gobViews.push({ g, cheer: 0, frame: 0 });
+    }
+    while (this.gobViews.length > gobs.length) this.gobViews.pop()!.g.destroy();
+    const pick = Math.floor(this.run.picks / 10);
+    const k = this.k;
+    gobs.forEach((g, i) => {
+      const v = this.gobViews[i];
+      if (v.cheer > 0) v.cheer -= dt;
+      let frame = 0;
+      let lift = 0;
+      if (g.hop) {
+        frame = 2;
+        const kk = Math.min(1, g.hop.t / g.hop.dur);
+        lift = Math.sin(kk * Math.PI) * 9;
+      } else if (g.tile >= 0) {
+        const ph = g.swing % 0.5;
+        frame = ph < 0.32 ? 0 : 1;
+        if (frame === 1 && v.frame !== 1) {
+          const t = this.wall.tiles[g.tile];
+          this.view(t).squashT = 0.05;
+          this.chips(this.tx(t) + this.T / 2 + (g.face > 0 ? -6 : 6), this.ty(t) + this.T - 8, 1);
+        }
+      } else frame = v.cheer > 0 ? 2 : 0;
+      v.frame = frame;
+      const cheer = v.cheer > 0 && !g.hop;
+      const art = goblinArt(cheer ? 2 : frame, g.kind, pick);
+      if (v.g.context !== art) v.g.context = art;
+      v.g.tint = g.kind === 'bone' ? 0xd8d0b8 : 0xffffff;
+      v.g.scale.x = g.face;
+      v.g.position.set(Math.round(this.wallX + g.x * k), Math.round(this.wallY + g.y * k - lift - (cheer ? 2 : 0)));
+    });
+  }
+
+  private renderTiles(dt: number): void {
+    const st = M.stratumOf(this.run.depth);
+    const keen = this.run.keen > 0;
+    for (const t of this.wall.tiles) {
+      const v = this.view(t);
+      if (v.flashT > 0) v.flashT -= dt;
+      if (v.squashT > 0) v.squashT -= dt;
+      // Body.
+      let key: string;
+      let stage = 0;
+      if (t.kind === null) key = t.regrow < 0.3 ? `sprout.${st}.${v.variant}` : 'empty';
+      else {
+        const frac = t.hp / t.maxHp;
+        stage = t.kind === 'keg' || t.kind === 'rubble' || t.kind === 'bedrock' ? 0 : frac <= 0.34 ? 2 : frac <= 0.67 ? 1 : 0;
+        const art = t.kind === 'hollow' && t.shell <= 1 ? 'hollowCore' : t.kind;
+        key = `${art}.${st}.${v.variant}.${stage}`;
+      }
+      if (key !== v.shownKey) {
+        v.shownKey = key;
+        if (t.kind === null) {
+          v.crack.visible = false;
+          v.body.visible = key !== 'empty';
+          if (v.body.visible) v.body.context = rockArt('sprout', st, v.variant, this.s);
         } else {
-          t.kegAge += dt;
-          if (t.kegAge >= KEG_AUTO) this.explode(t, true);
-        }
-      } else if (t.kind === 'vein') {
-        t.sparkle += dt;
-        if (t.sparkle > 1) {
-          t.sparkle = rand() * 0.3;
-          this.spawn(t.x + 6 + rand() * (this.T - 12), t.y + 6 + rand() * (this.T - 12), 0xfff0a0, 1, 0, -6, 0.4, 0);
+          const art: ArtKind = t.kind === 'hollow' && t.shell <= 1 ? 'hollowCore' : t.kind;
+          v.body.visible = true;
+          v.body.context = rockArt(art, st, v.variant, this.s);
+          v.crack.visible = stage > 0;
+          if (stage > 0) v.crack.context = crackArt(stage, v.variant, this.s);
+          v.flash.context = flashArt(v.variant, this.s);
         }
       }
-    }
-  }
-
-  private renderTiles(): void {
-    for (const t of this.tiles) {
-      this.refreshTile(t);
-      t.flash.visible = t.flashT > 0 && t.kind !== null;
-      let oy = t.squashT > 0 ? 1 : 0;
+      // Flash: white on a hit; blinking for a lit or ageing keg; an orange flicker while burning.
+      let flash = v.flashT > 0 && t.kind !== null;
+      let tint = 0xffffff;
+      let oy = v.squashT > 0 ? 1 : 0;
       if (t.kind === 'keg' && t.fuse >= 0) {
-        t.flash.visible = Math.floor(this.time * 16) % 2 === 0;
+        flash = Math.floor(this.time * 16) % 2 === 0;
         oy = 0;
-      } else if (t.kind === 'keg' && t.kegAge > KEG_AUTO - 2) {
-        t.flash.visible = Math.floor(this.time * 8) % 2 === 0;
+        if (rand() < 0.6) this.spawnPart(this.tx(t) + this.T / 2 + 1, this.ty(t) + 6, rand() < 0.5 ? 0xffe060 : 0xff6020, 1, (rand() - 0.5) * 40, -30 - rand() * 30, 0.25, 100);
+      } else if (t.kind === 'keg' && t.kegAge > 6) flash = Math.floor(this.time * 8) % 2 === 0;
+      else if (!flash && t.burnT > 0 && t.kind !== null && Math.floor(this.time * 10 + t.i) % 3 === 0) {
+        flash = true;
+        tint = 0xff7a2a;
       }
-      t.cont.position.set(t.x + 1, t.y + 1 + oy);
-    }
-  }
-
-  private updateFrenzy(dt: number): void {
-    if (this.frenzyT > 0) {
-      this.frenzyT -= dt;
-      if (this.frenzyT <= 0) {
-        this.frenzyT = 0;
-        if (!this.ctx.seen('m.firstFrenzy')) {
-          this.ctx.markSeen('m.firstFrenzy');
-          this.ctx.say('firstFrenzy', { milestone: true });
-        }
+      v.flash.visible = flash;
+      v.flash.tint = tint;
+      v.flash.alpha = tint === 0xffffff ? 1 : 0.45;
+      // Sparkles on veins and Motherlodes.
+      if ((t.kind === 'vein' || t.kind === 'mother') && rand() < (t.kind === 'mother' ? 0.12 : 0.03)) {
+        this.spawnPart(this.tx(t) + 6 + rand() * (this.T - 12), this.ty(t) + 6 + rand() * (this.T - 12), 0xfff0a0, 1, 0, -6, 0.4, 0);
       }
-    } else if (this.pips > 0) {
-      this.pipDecay += dt;
-      if (this.pipDecay >= 3) {
-        this.pipDecay = 0;
-        this.pips--;
+      // Overlay: a gas cloud, or Keen Eye's glint on a shiny rock about to regrow.
+      let over = '';
+      if (t.gas > 0) over = `gas.${Math.floor(this.time * 3) % 2}`;
+      else if (keen && t.kind === null && (t.next === 'vein' || t.next === 'geode' || t.next === 'mother')) over = `glint.${Math.floor(this.time * 6) % 2}.${t.next === 'geode'}`;
+      if (over !== v.overKey) {
+        v.overKey = over;
+        v.over.visible = !!over;
+        if (over.startsWith('gas')) v.over.context = gasArt(this.s, Number(over.split('.')[1]));
+        else if (over) v.over.context = glintArt(this.s, Number(over.split('.')[1]), over.endsWith('true'));
       }
+      if (t.gas > 0) v.over.alpha = Math.min(1, t.gas / 2);
+      else v.over.alpha = 1;
+      v.cont.position.set(this.tx(t) + 1, this.ty(t) + 1 + oy);
     }
   }
 
@@ -1178,27 +1140,25 @@ export class MinesScene implements DeptScene {
       }
       if (f.kind === 'zap' && f.pts) {
         const pts = f.pts;
-        for (let k = 0; k + 3 < pts.length; k += 2) {
+        for (let kk = 0; kk + 3 < pts.length; kk += 2) {
           // Jagged 1px polyline in a few segments.
-          let x = pts[k];
-          let y = pts[k + 1];
+          let x = pts[kk];
+          let y = pts[kk + 1];
           const steps = 5;
           for (let s = 1; s <= steps; s++) {
-            const nx = pts[k] + ((pts[k + 2] - pts[k]) * s) / steps + (s < steps ? (rand() - 0.5) * 8 : 0);
-            const ny = pts[k + 1] + ((pts[k + 3] - pts[k + 1]) * s) / steps + (s < steps ? (rand() - 0.5) * 8 : 0);
+            const nx = pts[kk] + ((pts[kk + 2] - pts[kk]) * s) / steps + (s < steps ? (rand() - 0.5) * 8 : 0);
+            const ny = pts[kk + 1] + ((pts[kk + 3] - pts[kk + 1]) * s) / steps + (s < steps ? (rand() - 0.5) * 8 : 0);
             g.moveTo(Math.round(x) + 0.5, Math.round(y) + 0.5).lineTo(Math.round(nx) + 0.5, Math.round(ny) + 0.5);
             x = nx;
             y = ny;
           }
         }
-        g.stroke({ width: 1, color: 0x7af0ff });
+        g.stroke({ width: 1, color: f.color ?? 0x7af0ff });
       } else if (f.kind === 'blast') {
-        const k = f.t / f.max;
-        const inset = Math.round(k * 10);
+        const kk = f.t / f.max;
+        const inset = Math.round(kk * 10);
         const w = f.w! - inset * 2;
-        if (w > 0) {
-          g.rect(f.x! + inset, f.y! + inset, w, w).fill({ color: k < 0.3 ? 0xfff0a0 : 0xff8a30, alpha: 0.55 * (1 - k) });
-        }
+        if (w > 0) g.rect(f.x! + inset, f.y! + inset, w, w).fill({ color: kk < 0.3 ? 0xfff0a0 : 0xff8a30, alpha: 0.55 * (1 - kk) });
       }
     }
   }
@@ -1206,14 +1166,21 @@ export class MinesScene implements DeptScene {
   private updateDrum(dt: number): void {
     const owned = this.per.drum;
     const active = this.drumActive();
-    const p = M.beatPeriod(this.run.depth);
+    const p = this.wall.period;
     let onBeat = false;
     if (active) {
-      const k = Math.floor(this.beatClock / p);
-      if (k !== this.lastBeatIdx) {
-        this.lastBeatIdx = k;
+      const kk = Math.floor(this.wall.clock / p);
+      if (kk !== this.lastBeatIdx) {
+        this.lastBeatIdx = kk;
         this.beatPulse = 0.12;
-        for (const d of this.drummers) if (d.visible) d.y = this.ledgeY;
+      }
+      // Schedule the boom slightly ahead on the audio clock so it lands on the beat.
+      const an = audioNow();
+      const next = kk + 1;
+      const toNext = next * p - this.wall.clock;
+      if (an !== null && next > this.schedBeat && toNext < 0.1) {
+        this.schedBeat = next;
+        sfx.boom(this.vol() * 0.8, an + toNext, this.per.thunder > 0 && next % M.THUNDER_EVERY === 0);
       }
     }
     if (this.beatPulse > 0) {
@@ -1229,75 +1196,93 @@ export class MinesScene implements DeptScene {
       const a = drummerArt(onBeat ? 1 : 0);
       if (d.context !== a) d.context = a;
     });
-    const big = this.frenzyT > 0;
+    const big = this.wall.frenzyT > 0;
     const tf = Math.floor(this.time * (big ? 12 : 6)) % 2;
     for (const t of this.torches) {
       const a = torchArt(tf, big);
       if (t.context !== a) t.context = a;
     }
 
-    // Contracting beat rings on every rock.
     const g = this.ringG.clear();
-    if (this.frenzyT > 0) {
-      // Frenzy: a pulsing hot frame around the whole wall.
-      const W = this.T * M.GRID;
+    const W = this.T * M.GRID;
+    if (this.wall.frenzyT > 0 || this.wall.encoreT > 0) {
+      // Frenzy: a pulsing hot frame around the whole wall (Encore: a dimmer one).
       const m = onBeat ? 3 : 2;
       g.rect(this.wallX - m - 1, this.wallY - m - 1, W + 2 * m + 2, m).rect(this.wallX - m - 1, this.wallY + W + 1, W + 2 * m + 2, m);
       g.rect(this.wallX - m - 1, this.wallY - 1, m, W + 2).rect(this.wallX + W + 1, this.wallY - 1, m, W + 2);
-      g.fill({ color: Math.floor(this.time * 8) % 2 ? 0xff6040 : 0xffb030, alpha: 0.9 });
+      const hot = this.wall.frenzyT > 0;
+      g.fill({ color: Math.floor(this.time * 8) % 2 ? 0xff6040 : 0xffb030, alpha: hot ? 0.9 : 0.4 });
     }
-    if (!active) return;
-    const tb = this.beatClock;
-    const k = Math.round(tb / p);
-    const off = tb - k * p; // signed distance to the nearest beat
-    const inWindow = Math.abs(off) <= M.beatWindow(this.run.wide);
+    // Steady Drum: a screen-edge pulse on every beat (02 §6E accessibility).
+    const e = this.edgeG.clear();
+    if (active && this.per.steady && onBeat) {
+      const L = this.ctx.layout;
+      const c = this.ctx.content();
+      e.rect(0, c.y, 2, c.h).rect(L.w - 2, c.y, 2, c.h).fill({ color: 0xffe060, alpha: 0.8 });
+    }
+    if (!active || this.calib) return;
+    // Contracting beat rings on every rock: corner brackets that close on the beat.
+    const tb = this.wall.clock;
+    const kk = Math.round(tb / p);
+    const off = tb - kk * p; // signed distance to the nearest beat
+    const inWindow = Math.abs(off) <= this.wall.window;
     const toNext = ((p - (tb % p)) % p) / p; // 1 just after a beat -> 0 at the next
     if (!inWindow && toNext > 0.7) return;
+    const nextK = inWindow ? kk : Math.floor(tb / p) + 1;
+    const thunder = this.per.thunder > 0 && nextK % M.THUNDER_EVERY === 0;
     const gap = inWindow ? 0 : Math.round(toNext * 9);
-    const color = inWindow ? 0xffe060 : 0xe8c04a;
+    const color = thunder ? 0xffd040 : inWindow ? 0xffe060 : 0xe8c04a;
     const alpha = inWindow ? 1 : 0.25 + 0.6 * (1 - toNext / 0.7);
-    for (const t of this.tiles) {
-      if (!this.alive(t) || t.kind === 'rubble') continue;
-      const x = t.x + 1 - gap;
-      const y = t.y + 1 - gap;
+    for (const t of this.wall.tiles) {
+      if (t.kind === null || t.kind === 'rubble' || t.kind === 'bedrock') continue;
+      const x = this.tx(t) + 1 - gap;
+      const y = this.ty(t) + 1 - gap;
       const w = this.s + gap * 2;
-      // Corner brackets (a full square would merge into a lattice with the neighbours).
-      const a = inWindow ? 8 : 5;
+      const a = thunder ? 10 : inWindow ? 8 : 5;
       g.rect(x, y, a, 1).rect(x, y + 1, 1, a - 1);
       g.rect(x + w - a, y, a, 1).rect(x + w - 1, y + 1, 1, a - 1);
       g.rect(x, y + w - 1, a, 1).rect(x, y + w - a, 1, a - 1);
       g.rect(x + w - a, y + w - 1, a, 1).rect(x + w - 1, y + w - a, 1, a - 1);
+      if (thunder) g.rect(x - 1, y - 1, 2, 2).rect(x + w - 1, y + w - 1, 2, 2);
     }
     g.fill({ color, alpha });
   }
 
-  private updateUi(_dt: number): void {
+  private label(b: Button, label: string, sub: string | undefined, enabled: boolean): void {
+    const key = `${label}|${sub ?? ''}|${enabled}`;
+    if (this.btnCache.get(b) === key) return;
+    this.btnCache.set(b, key);
+    b.setLabel(label, sub).setEnabled(enabled);
+  }
+
+  private updateUi(): void {
     const r = this.run;
-    const notation = this.ctx.game.save.meta.settings.notation;
-    const fm = (n: number) => formatNum(n, notation);
+    const fm = (n: number) => formatNum(n, this.notation());
     const c = this.ctx.content();
     const g = this.uiG.clear();
+    const w = this.wall;
 
-    // Status line: crit / zap / gems, or Frenzy pips once Goblin Frenzy is owned.
-    const streak = this.drumActive() && this.streak > 1 ? `X${this.streak} ` : '';
+    // Status line: crit / zap / crew, or Frenzy pips once Goblin Frenzy is owned.
+    const streak = this.drumActive() && w.streak > 1 ? `X${w.streak} ` : '';
     const gemsTxt = `${streak}${fm(this.per.gems)} GEM${this.per.gems === 1 ? '' : 'S'}`;
     this.statusR.set(gemsTxt, '#d090ff');
     this.statusR.position.set(c.x + c.w - 4 - measure(gemsTxt).w, this.statusY);
     if (this.drumActive() && r.frenzy > 0) {
       const need = M.frenzyPips(r.frenzy);
-      if (this.frenzyT > 0) {
-        this.status.set(`FRENZY ${this.frenzyT.toFixed(1)}S`, Math.floor(this.time * 8) % 2 ? '#ff6040' : '#ffe060');
+      if (w.frenzyT > 0) {
+        this.status.set(`FRENZY ${w.frenzyT.toFixed(1)}S`, Math.floor(this.time * 8) % 2 ? '#ff6040' : '#ffe060');
       } else {
-        this.status.set('FRENZY', C.inkDim);
-        for (let i = 0; i < need; i++) {
-          const x = c.x + 30 + i * 6;
-          g.rect(x, this.statusY, 5, 5).fill(OUTLINE);
-          g.rect(x + 1, this.statusY + 1, 3, 3).fill(i < this.pips ? 0xff6040 : 0x3a2a3a);
-        }
+        this.status.set(w.encoreT > 0 ? `ENCORE ${w.encoreT.toFixed(0)}S` : 'FRENZY', w.encoreT > 0 ? '#ffb030' : C.inkDim);
+        if (w.encoreT <= 0)
+          for (let i = 0; i < need; i++) {
+            const x = c.x + 30 + i * 6;
+            g.rect(x, this.statusY, 5, 5).fill(OUTLINE);
+            g.rect(x + 1, this.statusY + 1, 3, 3).fill(i < w.pips ? 0xff6040 : 0x3a2a3a);
+          }
       }
     } else {
-      const zap = this.per.chain > 0 ? `  ZAP ${Math.round(M.chainChance(this.per.chain) * 100)}%` : '';
-      this.status.set(`CRIT ${Math.round(M.critChance(r.critC) * 100)}% X${M.critMult(r.critP)}${zap}  CREW ${this.crewNow()}/${M.MAX_GOBLINS}`, C.inkDim);
+      const zap = this.per.chain > 0 ? ` ZAP ${Math.round(M.chainChance(this.per.chain) * 100)}%` : '';
+      this.status.set(`CRIT ${Math.round(M.critChance(r.critC) * 100)}%${zap} CREW ${this.crewNow()}/${M.MAX_GOBLINS}`, C.inkDim);
     }
 
     // Depth row.
@@ -1314,12 +1299,12 @@ export class MinesScene implements DeptScene {
       if (M.overdepth(r) < 1 && Math.floor(this.time * 1.5) % 2 === 0) this.hintText.set('CREW SLOW', C.redText);
       else this.hintText.set(`${tpr > 99 ? '99+' : tpr} TAP${tpr === 1 ? '' : 'S'}`, C.inkDim);
     }
-    if (r.maxDepth >= M.MAX_DEPTH) this.digBtn.setLabel('DIG', 'MAX').setEnabled(false);
+    if (r.maxDepth >= M.MAX_DEPTH) this.label(this.digBtn, 'DIG', 'MAX', false);
     else {
       const cost = M.digCost(r.maxDepth);
-      this.digBtn.setLabel(`DIG D${r.maxDepth + 1}`, fm(cost)).setEnabled(r.bank >= cost);
+      this.label(this.digBtn, `DIG D${r.maxDepth + 1}`, fm(cost), r.bank >= cost);
     }
-    // Beat lamp: a small square left of the DIG button.
+    // Beat lamp: a small square left of the DIG button (gold on the beat).
     if (this.drumActive()) {
       const lx = this.digBtn.x - 8;
       const ly = this.digBtn.y + 5;
@@ -1330,22 +1315,12 @@ export class MinesScene implements DeptScene {
     // Buttons.
     if (this.crewNow() < M.MAX_GOBLINS) {
       const cost = M.hireCost(r);
-      this.hireBtn.setLabel('HIRE GOBLIN', fm(cost)).setEnabled(r.bank >= cost);
+      this.label(this.hireBtn, 'HIRE GOBLIN', fm(cost), r.bank >= cost);
     } else if (r.picks < M.PICKS_MAX) {
       const cost = M.picksCost(r.picks);
-      this.hireBtn.setLabel('SHARPER PICKS', fm(cost)).setEnabled(r.bank >= cost);
-    } else this.hireBtn.setLabel('CREW MAXED').setEnabled(false);
-    if (this.per.drum) this.drumBtn.setLabel('DRUM', this.per.drumOn ? 'ON' : 'OFF');
-
-    // "!" badge on UPGRADES when something is affordable (checked on the slow tick).
-    // Onboarding glow on the button the current step needs.
-    if (this.glowTarget && Math.floor(this.time * 3) % 2 === 0) {
-      const b = this.glowTarget;
-      const bw = b.width;
-      const bh = b.height;
-      g.rect(b.x - 2, b.y - 2, bw + 4, 1).rect(b.x - 2, b.y + bh + 1, bw + 4, 1).rect(b.x - 2, b.y - 1, 1, bh + 2).rect(b.x + bw + 1, b.y - 1, 1, bh + 2);
-      g.fill(0xfff0a0);
-    }
+      this.label(this.hireBtn, 'SHARPER PICKS', fm(cost), r.bank >= cost);
+    } else this.label(this.hireBtn, 'CREW MAXED', undefined, false);
+    if (this.per.drum) this.label(this.drumBtn, 'DRUM', this.per.drumOn ? 'ON' : 'OFF', true);
   }
 
   private slowChecks(): void {
@@ -1357,30 +1332,283 @@ export class MinesScene implements DeptScene {
       b.rect(4, 2, 1, 3).fill(0xffffff);
       b.rect(4, 6, 1, 1).fill(0xffffff);
     }
-    // Onboarding glow.
-    const step = this.obStep();
-    this.glowTarget = step === 'tap' ? this.upgBtn : step === 'hire' ? this.hireBtn : step === 'dig' ? this.digBtn : null;
-    // Drum ready.
-    if (!this.per.drum && this.per.gems >= M.DRUM_GEMS && maxDepthEver(this.ctx) >= M.DRUM_DEPTH && !this.ctx.seen('m.drumReady')) {
-      this.ctx.markSeen('m.drumReady');
-      this.ctx.say('drumReady', { milestone: true });
+    // Drum ready (mechanic_unlocked: affordable).
+    if (!this.per.drum && this.per.gems >= M.DRUM_GEMS && maxDepthEver(this.ctx) >= M.DRUM_DEPTH) {
+      this.ctx.say('drumReady', { type: 'mechanic_unlocked', key: 'drumReady' });
     }
-    // Ambient flavour (the core rate-limits non-milestone lines).
-    this.flavorT -= 0.5;
-    const intense = this.frenzyT > 0 || this.recentTaps >= 3 || this.tiles.some((t) => t.kind === 'keg' && t.fuse >= 0);
-    this.recentTaps = 0;
-    if (this.flavorT <= 0 && !intense) {
-      this.flavorT = 40;
-      this.ctx.say(this.per.drum && this.per.drumOn ? (rand() < 0.5 ? 'flavor' : 'flavorDrum') : 'flavor');
+    // Calibration waits for the upgrade sheet to close.
+    if (this.calibPending && this.ctx.game.modalLayer.children.length === 0 && !this.ritual) {
+      this.calibPending = false;
+      this.startCalib();
+    }
+    // The gas lesson never waits on a cloud that has already blown away.
+    if (this.ctx.seen('m.gas') && !this.ctx.seen('m.wafted') && !this.wall.tiles.some((t) => t.gas > 0)) this.ctx.markSeen('m.wafted');
+    this.per.gemAt = Date.now();
+  }
+
+  // ---------- return ritual: the keg pile (02 §12, 00 §5.3) ----------
+
+  returnRitual(_haul: number): Promise<number> {
+    if (this.ritual) return Promise.resolve(0);
+    return new Promise<number>((resolve) => {
+      const row = 2;
+      const kegs: number[] = [];
+      for (let c = 0; c < M.GRID; c++) kegs.push(row * M.GRID + c);
+      this.ritual = { t: 0, kegs, lit: -1, next: [], chainT: 0, score: 0, resolve, doneT: -1 };
+      this.ritualLayer.visible = true;
+      kegs.forEach((ti, i) => {
+        const t = this.wall.tiles[ti];
+        const g = this.kegViews[i];
+        g.context = rockArt('keg', 0, 0, this.s);
+        g.position.set(this.tx(t) + 1, this.ty(t) + 1);
+        g.visible = true;
+      });
+      this.ctx.say('ritual');
+    });
+  }
+
+  private lightRitual(i: number): void {
+    const rt = this.ritual;
+    if (!rt || rt.lit >= 0) return;
+    rt.lit = i;
+    // Faster is better: a full score inside 3 s, easing to 0.6 by the end of the wait.
+    rt.score = rt.t <= 3 ? 1 : Math.max(0.6, 1 - ((rt.t - 3) / (RITUAL_WAIT - 3)) * 0.4);
+    // Blast order: outward from the lit keg.
+    const order: number[] = [i];
+    for (let d = 1; d < M.GRID; d++) {
+      if (i - d >= 0) order.push(i - d);
+      if (i + d < M.GRID) order.push(i + d);
+    }
+    rt.next = order;
+    rt.chainT = 0;
+    this.ctx.haptic(20);
+  }
+
+  private updateRitual(dt: number): void {
+    const rt = this.ritual;
+    if (!rt) return;
+    rt.t += dt;
+    const g = this.ritualG.clear();
+    if (rt.lit < 0) {
+      // Waiting: a fuse line along the pile and a pulsing prompt.
+      const t0 = this.wall.tiles[rt.kegs[0]];
+      const y = this.ty(t0) + 4;
+      g.rect(this.wallX + 4, y, this.T * M.GRID - 8, 1).fill(0x3a2a20);
+      const on = Math.floor(rt.t * 4) % 2 === 0;
+      this.ritualText.set(on ? 'TAP THE KEGS!' : 'KEG PILE!', on ? '#ffe060' : '#ff9a30');
+      this.ritualText.position.set(this.wallX + Math.floor((this.T * M.GRID - measure('TAP THE KEGS!').w) / 2), this.ty(t0) - 9);
+      if (rt.t >= RITUAL_WAIT) {
+        // Nobody lit it: the goblins do, for a small share (gentle, never a loss).
+        this.lightRitual(Math.floor(M.GRID / 2));
+        rt.score = 0.3;
+      }
+      return;
+    }
+    this.ritualText.set('');
+    if (rt.next.length) {
+      rt.chainT -= dt;
+      if (rt.chainT <= 0) {
+        rt.chainT = 0.12;
+        const i = rt.next.shift()!;
+        const ti = rt.kegs[i];
+        const t = this.wall.tiles[ti];
+        this.kegViews[i].visible = false;
+        // Each keg blasts its 3x3 for a tap-lit keg's damage.
+        const dmg = M.fistDamage(this.run) * M.blastMult(this.per.powder);
+        for (const o of this.wall.around(t, true)) {
+          if (o.kind === 'keg') continue;
+          if (o.kind === 'rubble' || o.kind === 'bedrock') this.wall.breakRock(o, 'blast');
+          else this.wall.damage(o, dmg, 'blast');
+        }
+        this.onBlast(t, false);
+      }
+      return;
+    }
+    if (rt.doneT < 0) {
+      rt.doneT = 0.4;
+      return;
+    }
+    rt.doneT -= dt;
+    if (rt.doneT <= 0) this.endRitual(rt.score);
+  }
+
+  private endRitual(score: number): void {
+    const rt = this.ritual;
+    if (!rt) return;
+    this.ritual = null;
+    this.ritualLayer.visible = false;
+    for (const g of this.kegViews) g.visible = false;
+    try {
+      rt.resolve(Math.max(0, Math.min(1, score)));
+    } catch {
+      /* the core handles its own errors */
+    }
+  }
+
+  // ---------- drum calibration (02 §13: "Tap with the boom x8") ----------
+
+  private startCalib(): void {
+    if (!this.per.drum) return;
+    this.calib = { t: 0, period: 0.7, offsets: [], lastBeat: -1, sched: -1 };
+    this.calibLayer.visible = true;
+    this.pointers.clear();
+  }
+
+  private calibTap(): void {
+    const c = this.calib;
+    if (!c) return;
+    const tnow = c.t + (performance.now() - this.frameWall) / 1000 - 1; // beats start after a 1 s lead-in
+    if (tnow < -c.period / 2) return;
+    const kk = Math.round(tnow / c.period);
+    const off = tnow - kk * c.period;
+    if (Math.abs(off) < c.period * 0.4) c.offsets.push(off);
+    this.ctx.haptic(6);
+    if (c.offsets.length >= CALIB_TAPS) this.endCalib(true);
+  }
+
+  private updateCalib(dt: number): void {
+    const c = this.calib;
+    if (!c) return;
+    c.t += dt;
+    const tb = c.t - 1;
+    const kk = Math.floor(tb / c.period);
+    const an = audioNow();
+    const next = kk + 1;
+    const toNext = next * c.period - tb;
+    if (an !== null && next > c.sched && toNext < 0.1 && next >= 0) {
+      c.sched = next;
+      sfx.boom(this.vol(), an + toNext);
+    }
+    const pulse = tb >= 0 && tb - kk * c.period < 0.1;
+    const W = this.T * M.GRID;
+    const g = this.calibG.clear();
+    g.rect(this.wallX, this.wallY, W, W).fill({ color: 0x0a0410, alpha: 0.75 });
+    const cx = this.wallX + W / 2;
+    const cy = this.wallY + W / 2;
+    const ph = tb < 0 ? 1 : ((c.period - (tb % c.period)) % c.period) / c.period;
+    const rad = 10 + Math.round(ph * 30);
+    g.rect(cx - rad, cy - rad, rad * 2, 1).rect(cx - rad, cy + rad, rad * 2, 1).rect(cx - rad, cy - rad, 1, rad * 2).rect(cx + rad, cy - rad, 1, rad * 2 + 1);
+    g.fill({ color: 0xe8c04a, alpha: 0.8 });
+    g.rect(cx - 8, cy - 8, 16, 16).fill(pulse ? 0xffe060 : 0x5a3a20);
+    const txt = `TAP WITH THE BOOM ${c.offsets.length}/${CALIB_TAPS}`;
+    this.calibText.set(txt, '#ffe060');
+    this.calibText.position.set(Math.round(cx - measure(txt).w / 2), this.wallY + 12);
+    if (c.t > 25) this.endCalib(false);
+  }
+
+  private endCalib(ok: boolean): void {
+    const c = this.calib;
+    this.calib = null;
+    this.calibLayer.visible = false;
+    this.calibG.clear();
+    if (!c || !ok || c.offsets.length < 4) return;
+    const s = [...c.offsets].sort((a, b) => a - b);
+    const med = s[Math.floor(s.length / 2)];
+    this.per.latency = Math.max(0, Math.min(M.LATENCY_MAX, med));
+    this.per.calibrated = true;
+    const cc = this.ctx.content();
+    this.ctx.float(`LATENCY ${Math.round(this.per.latency * 1000)}MS`, cc.x + cc.w / 2, this.wallY + 20, '#ffe060');
+    this.ctx.saveSoon();
+  }
+
+  // ---------- manager hooks ----------
+
+  /** Intense moments (02 §18): Frenzy, a lit keg, >= 5 taps in the last second (and the ritual or
+   * calibration). A cave-in is deliberately not intense, so its tip lands while the Rubble is there. */
+  isIntense(): boolean {
+    if (this.wall.frenzyT > 0 || this.ritual || this.calib) return true;
+    const now = performance.now();
+    let n = 0;
+    for (let i = this.tapTimes.length - 1; i >= 0 && now - this.tapTimes[i] < 1000; i--) n++;
+    return n >= 5 || this.wall.kegLit();
+  }
+
+  private tileRect(t: Tile | undefined | null): Rect | null {
+    return t ? { x: this.tx(t), y: this.ty(t), w: this.T, h: this.T } : null;
+  }
+
+  private btnRect(b: Button | undefined): Rect | null {
+    if (!b || !b.visible || b.destroyed) return null;
+    return { x: b.x, y: b.y, w: b.width, h: b.height };
+  }
+
+  targetRect(id: string): Rect | null {
+    const tiles = this.wall.tiles;
+    const alive = (t: Tile) => t.kind !== null && t.kind !== 'keg' && t.kind !== 'rubble' && t.kind !== 'bedrock';
+    const centre = () => {
+      let best: Tile | null = null;
+      let bd = Infinity;
+      for (const t of tiles) {
+        if (!alive(t)) continue;
+        const d = Math.abs(t.col - 2) + Math.abs(t.row - 2);
+        if (d < bd) {
+          bd = d;
+          best = t;
+        }
+      }
+      return best;
+    };
+    switch (id) {
+      case 'rock.cracked': {
+        const t = tiles[this.obTile];
+        return this.tileRect(alive(t) ? t : centre());
+      }
+      case 'rock':
+      case 'rock.any':
+        return this.tileRect(centre());
+      case 'rock.vein':
+        return this.tileRect(tiles.find((t) => t.kind === 'vein'));
+      case 'keg':
+        return this.tileRect(tiles.find((t) => t.kind === 'keg'));
+      case 'gas':
+        return this.tileRect(tiles.find((t) => t.gas > 0));
+      case 'rubble': {
+        const rs = tiles.filter((t) => t.kind === 'rubble');
+        if (!rs.length) return null;
+        let x0 = Infinity;
+        let y0 = Infinity;
+        let x1 = -Infinity;
+        let y1 = -Infinity;
+        for (const t of rs) {
+          x0 = Math.min(x0, this.tx(t));
+          y0 = Math.min(y0, this.ty(t));
+          x1 = Math.max(x1, this.tx(t) + this.T);
+          y1 = Math.max(y1, this.ty(t) + this.T);
+        }
+        return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      }
+      case 'wall':
+        return { x: this.wallX, y: this.wallY, w: this.T * M.GRID, h: this.T * M.GRID };
+      case 'btn.upgrades':
+        return this.btnRect(this.upgBtn);
+      case 'btn.hire':
+        return this.btnRect(this.hireBtn);
+      case 'btn.dig':
+        return this.btnRect(this.digBtn);
+      case 'btn.drum':
+        return this.btnRect(this.drumBtn);
+      case 'lever': {
+        const a = this.btnRect(this.downBtn);
+        const b = this.btnRect(this.upBtn);
+        return a && b ? { x: a.x, y: a.y, w: b.x + b.w - a.x, h: a.h } : null;
+      }
+      default:
+        return null;
     }
   }
 
   resize(_layout: Layout): void {
     this.buildLayout();
-    this.buildWall(false);
+    this.placeTiles();
+    this.drawBackground();
+    for (const g of this.gobViews) g.g.destroy();
+    this.gobViews = [];
   }
 
   destroy(): void {
+    this.per.gemAt = Date.now();
+    if (this.ritual) this.endRitual(0);
+    this.calib = null;
     this.hit.removeAllListeners();
     this.root.destroy({ children: true });
   }
