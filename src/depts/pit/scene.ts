@@ -201,6 +201,9 @@ export class PitScene implements DeptScene {
   private w = 0;
   private h = 0;
   private xL = 0;
+  /** Left-handed mode (suite setting): the line mirrors (front = right slot) and so does the
+   * action row (FIGHT / SKIP under the left thumb), 07 §20 / W-25. */
+  private lh = false;
   private T = 12;
   private yRival = 0;
   private yLine = 0;
@@ -357,6 +360,7 @@ export class PitScene implements DeptScene {
     this.w = c.w;
     this.h = c.h;
     this.xL = c.x + Math.max(0, Math.floor((c.w - W178) / 2));
+    this.lh = this.ctx.leftHanded();
     this.T = Math.max(12, Math.min(44, c.h - 258));
     const gx = Math.max(0, Math.min(64, c.h - (this.T + 245)));
     this.yRival = c.y + this.T + 9;
@@ -367,9 +371,9 @@ export class PitScene implements DeptScene {
     this.yAct = this.yFood + 53;
     const xL = this.xL;
     for (let i = 0; i < 5; i++) {
-      this.rivalCards[i].bx = xL + i * STEP;
+      this.rivalCards[i].bx = this.slotX(i);
       this.rivalCards[i].by = this.yRival;
-      this.lineCards[i].bx = xL + i * STEP;
+      this.lineCards[i].bx = this.slotX(i);
       this.lineCards[i].by = this.yLine;
     }
     for (let i = 0; i < 6; i++) {
@@ -396,11 +400,13 @@ export class PitScene implements DeptScene {
     this.chowText.position.set(xL + 88, this.yFood + 3);
     this.brandBtn.position.set(xL + 74, this.yFood + 13);
     this.pauseBtn.position.set(xL + 128, this.yFood + 13);
-    this.rollBtn.position.set(xL, this.yAct);
-    this.sellBtn.position.set(xL + 56, this.yAct);
-    this.fightBtn.position.set(xL + W178 - 74, this.yAct);
-    this.speedBtn.position.set(xL, this.yAct);
-    this.skipBtn.position.set(xL + W178 - 74, this.yAct);
+    // Mirrored in left-handed mode: x -> the same distance from the right edge.
+    const mx = (x: number, w: number) => (this.lh ? xL + W178 - (x - xL) - w : x);
+    this.rollBtn.position.set(mx(xL, 52), this.yAct);
+    this.sellBtn.position.set(mx(xL + 56, 46), this.yAct);
+    this.fightBtn.position.set(mx(xL + W178 - 74, 74), this.yAct);
+    this.speedBtn.position.set(mx(xL, 52), this.yAct);
+    this.skipBtn.position.set(mx(xL + W178 - 74, 74), this.yAct);
     // Home panel.
     const ys = this.yShop;
     this.stakesText.position.set(xL + 2, ys + 4);
@@ -1089,7 +1095,7 @@ export class PitScene implements DeptScene {
     if (!quiet) {
       for (const [uid, old] of p.prev) {
         if (!now.has(uid)) {
-          const x = this.xL + old.j * STEP + 17;
+          const x = this.slotX(old.j) + 17;
           this.burst(x, ys[old.side] + 18, 0xc8b8a0, 12);
           if (!p.home) sfx.faint(v);
         }
@@ -1105,7 +1111,7 @@ export class PitScene implements DeptScene {
         }
         const old = p.prev.get(s.u);
         if (!quiet) {
-          if (old && old.j !== j) card.offX = (old.j - j) * STEP;
+          if (old && old.j !== j) card.offX = this.slotX(old.j) - this.slotX(j);
           if (!old && p.i > 0) {
             card.pop = 1;
             card.offX = 0;
@@ -1113,7 +1119,7 @@ export class PitScene implements DeptScene {
           if (old && !p.home) {
             const dh = s.h - old.s.h;
             const da = s.a - old.s.a;
-            const x = this.xL + j * STEP + 17;
+            const x = this.slotX(j) + 17;
             if (dh < 0) this.ctx.float(`${dh}`, x, ys[side] + 10, '#ff6a5a');
             else if (dh > 0) this.ctx.float(`+${dh}`, x, ys[side] + 10, '#8fd14f');
             if (da > 0) this.ctx.float(`+${da}A`, x, ys[side] - 2, '#f0a040');
@@ -1818,8 +1824,14 @@ export class PitScene implements DeptScene {
   /** The line slot under (x, y), with a little slack, or -1. */
   private slotAt(x: number, y: number): number {
     if (y < this.yLine - 6 || y > this.yLine + CH + 6) return -1;
-    const j = Math.floor((x - this.xL + 1) / STEP);
-    return j >= 0 && j < 5 ? j : -1;
+    const k = Math.floor((x - this.xL + 1) / STEP);
+    if (k < 0 || k >= 5) return -1;
+    return this.lh ? 4 - k : k;
+  }
+
+  /** Left x of line / rival slot j (slot 0 = the front: left, or right when left-handed). */
+  private slotX(j: number): number {
+    return this.xL + (this.lh ? 4 - j : j) * STEP;
   }
 
   private overSell(x: number, y: number): boolean {

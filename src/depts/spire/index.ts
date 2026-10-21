@@ -6,6 +6,7 @@ import { spireEcon } from './def';
 import { lessons, onboarding, sorcerer } from './sorcerer';
 import { spireLastStand } from './laststand';
 import { SpireScene } from './scene';
+import type { SpireRun } from './def';
 
 export const spire: DeptDef = {
   ...spireEcon,
@@ -14,6 +15,8 @@ export const spire: DeptDef = {
   currencyColor: '#c070ff',
   doorColor: 0x4a2a7a,
   manager: sorcerer,
+  // Head Start grants Volatility levels without the first purchase that runs the lesson.
+  dialLessons: { volatility: (s) => (s.run as SpireRun)?.volBought ?? 0 },
   onboarding,
   lessons,
   lastStand: spireLastStand,

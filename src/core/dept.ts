@@ -28,12 +28,48 @@ export type Gesture = 'tap' | 'hold' | 'drag';
  */
 export type TargetRef = string | ((scene: DeptScene) => Rect | null);
 
+/** Where a shown manager line came from (ManagerDef.voice). */
+export type VoiceSource = 'core' | 'dept' | 'beat' | 'tip' | 'report' | 'fall';
+
+export interface VoiceInfo {
+  /** The line's trigger key ('intro', 'legend', a beat id ...). */
+  key: string;
+  source: VoiceSource;
+  /** The suite SFX volume (0-1); the core only calls voice() when it is > 0. */
+  vol: number;
+  game: Game;
+}
+
 export interface ManagerDef {
   name: string;
   title: string; // "Head Cook"
-  /** 12x12 portrait rows; each char indexes `palette` ('.' = transparent). Two frames: idle, talking. */
-  portrait: [string[], string[]];
+  /**
+   * 12x12 portrait rows; each char indexes `palette` ('.' = transparent). Frame 0 is idle; frames
+   * 1..n are talking frames, cycled with the idle frame while a line is new (two frames, as every
+   * department has, alternate idle / talking exactly as before).
+   */
+  portrait: [string[], string[], ...string[][]];
   palette: Record<string, string>;
+  /**
+   * Named expressions (optional): each is [idle] or [idle, talking, ...] with the same palette.
+   * The director shows one while a line whose key is in `moods` (or a say() with
+   * `opts.expression`) is up, then returns to `portrait`.
+   */
+  expressions?: Record<string, string[][]>;
+  /** Line key -> expression name, e.g. { legend: 'worried', firstUpgrade: 'grin' }. */
+  moods?: Record<string, string>;
+  /**
+   * Voice blips for a line the director actually shows (not for queued lines that never show).
+   * `info.source` says who fired it: departments that already blip their own say() calls should
+   * voice only `source !== 'dept'` (intro, Legend, returns, beats, the report and the Fall card).
+   * Must not throw (errors are swallowed) and must stay cheap.
+   */
+  voice?(line: string, info: VoiceInfo): void;
+  /**
+   * Core-fired line keys this department handles itself, e.g. ['firstUpgrade'] when it fires its
+   * own first-purchase line. The core then never fires them.
+   */
+  coreSkip?: string[];
   /**
    * Trigger -> lines (variants picked at random). Core-fired keys: intro, firstUpgrade, legend,
    * infamy50, infamy100, fall, returnFall, returnLong (and returnLong3d for >= 3 days away),
@@ -63,6 +99,11 @@ export interface OnboardingStep {
   /** Returns true once the player has done the thing; the next step then shows. */
   done(save: DeptSave): boolean;
   target?: TargetRef;
+  /**
+   * While the shared upgrade sheet is open, highlight this entry id inside it instead (or the tab
+   * holding it, when another tab is showing). The line then shows as a caption by the highlight.
+   */
+  sheetTarget?: string;
   gesture?: Gesture;
   dragTo?: TargetRef;
   waitFor?(save: DeptSave): boolean;
@@ -132,6 +173,34 @@ export interface DeptEcon {
    * Departments without one show "Coming soon" at the Altar.
    */
   signature?: { name: string; desc: string; apply(save: DeptSave): void };
+  /**
+   * Offline extras (optional): called by the core's offline accounting (Gobbo's report) once per
+   * absence, after the bank was credited. `elapsedSeconds` is already capped by the offline cap;
+   * `factor` is the department's offline factor. `info.now` / `info.capSeconds` let a department
+   * measure its own clock (e.g. "since the wall was last on screen"). Must not throw.
+   */
+  onOffline?(save: DeptSave, elapsedSeconds: number, factor: number, info: { now: number; capSeconds: number }): void;
+}
+
+/**
+ * A per-department player setting shown in Settings -> <department> (00 §9). Values live in
+ * `meta.settings.depts[deptId][key]`; read them with `ctx.setting(key)` (or core/settings.ts).
+ *  - toggle: an on/off checkbox (`default` boolean).
+ *  - action: a button; the core closes Settings, opens the department and calls
+ *    `DeptScene.onSettingAction(key)` (e.g. a calibration run).
+ *  - value: no control; a stored value (e.g. a calibrated latency) shown via `hint`.
+ */
+export interface DeptSettingDef {
+  key: string;
+  label: string;
+  kind: 'toggle' | 'action' | 'value';
+  default?: boolean | number | string;
+  /** Small text under the control (gets the department's current values). */
+  hint?(values: Record<string, unknown>, d: DeptSave): string;
+  /** Hidden while false (e.g. until the Doom Drum is owned). */
+  visible?(d: DeptSave): boolean;
+  /** A `persistent` field older saves kept this value in: copied here once on load. */
+  legacy?: string;
 }
 
 /** What a department's interactive Last Stand mini-scene gets (00 §2.3). */
@@ -167,6 +236,14 @@ export interface DeptDef extends DeptEcon {
    * bonus in [0, 0.25] (clamped by the core). A rejection or a throw falls back to the Crush bar.
    */
   lastStand?(ctx: LastStandCtx): Promise<number>;
+  /** Player settings for this department (Settings screen section); see DeptSettingDef. */
+  settings?: DeptSettingDef[];
+  /**
+   * Dial lessons: lesson id -> the dial's current level. On entry the core queues each lesson
+   * whose dial is already >= 1 but was never taught (Head Start grants dial levels without the
+   * first purchase that normally fires it). Runs after the intro / onboarding, once per save.
+   */
+  dialLessons?: Record<string, (save: DeptSave) => number>;
 }
 
 export interface DeptScene {
@@ -190,6 +267,20 @@ export interface DeptScene {
    * required: resolving 0 (or never being called) only skips the bonus.
    */
   returnRitual?(haul: number): Promise<number>;
+  /**
+   * Screen rects of important controls that transient overlays (Commendation and other toasts,
+   * the intro line on short screens) must not cover. Called a few times a second: keep it cheap.
+   */
+  avoidRects?(): Rect[];
+  /** Preferred toast top y (logical px), tried first; the core still dodges `avoidRects`. */
+  toastAnchor?(): { y: number } | null;
+  /**
+   * Dock the manager bubble near the manager's in-scene sprite (06 §18): the bubble's bottom edge
+   * sits at `y` (clamped below the HUD). Return null to use the default strip under the HUD.
+   */
+  bubbleAnchor?(): { y: number } | null;
+  /** A DeptSettingDef action was chosen in Settings (the scene is open). */
+  onSettingAction?(key: string): void;
 }
 
 export interface SayOpts {
@@ -202,6 +293,8 @@ export interface SayOpts {
   key?: string;
   /** A struggle offer: the bubble shows a ✓ chip that runs this. */
   offer?: () => void;
+  /** A ManagerDef.expressions name shown while this line is up (overrides `moods`). */
+  expression?: string;
 }
 
 export interface DeptCtx {
@@ -241,6 +334,11 @@ export interface DeptCtx {
   saveSoon(): void;
   /** Open the shared upgrade sheet. */
   openUpgrades(groups: UpgradeGroup[]): void;
+  /** A per-department setting (DeptDef.settings), default-filled. */
+  setting<T = unknown>(key: string): T;
+  setSetting(key: string, value: unknown): void;
+  /** The suite's left-handed setting: mirror the thumb zone where the department supports it. */
+  leftHanded(): boolean;
 }
 
 export interface UpgradeEntry {
@@ -267,6 +365,23 @@ export interface UpgradeEntry {
   maxLabel?: string;
   /** Button sub-label instead of the formatted cost (e.g. 'ON' / '25%'). */
   costText?(): string;
+
+  // ----- bulk buying (Buy x1 / x10 / MAX, sheet-wide mode) -----
+  /**
+   * Whether the sheet's x10 / MAX mode applies. Default: plain levelled rows (max > 1, no
+   * header / costText / buyLabel / levelText). Set false for toggles and one-at-a-time buys.
+   */
+  bulk?: boolean;
+  /** Total price of the next n levels (n already clamped to max - level). Enables exact x10 /
+   * MAX prices; without it the sheet buys repeatedly and shows the next price. */
+  costFor?(n: number): number;
+  /** Buys up to n levels at once; returns how many were bought. Default: buy() n times. */
+  buyMany?(n: number): number;
+  /** Effect text for buying n levels (default: desc()). */
+  descFor?(n: number): string;
+  /** Funds this row spends from, for MAX / x10 affordability (default: the department bank; rows
+   * priced in another currency without it fall back to repeated buys). */
+  wallet?(): number;
 }
 
 export interface UpgradeGroup {

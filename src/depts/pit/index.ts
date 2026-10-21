@@ -6,6 +6,8 @@ import { pitEcon } from './def';
 import { lessons, onboarding, snarl } from './snarl';
 import { pitLastStand } from './laststand';
 import { PitScene } from './scene';
+import { sfx } from './sfx';
+import type { PitRun } from './def';
 
 export const pit: DeptDef = {
   ...pitEcon,
@@ -13,7 +15,10 @@ export const pit: DeptDef = {
   currency: 'Teeth',
   currencyColor: '#f4ecd8',
   doorColor: 0x6a2a1a,
-  manager: snarl,
+  // The scene blips its own say() calls; Snarl voices the core's lines (intro, Legend, beats ...).
+  manager: { ...snarl, voice: (_line, i) => i.source !== 'dept' && sfx.snarl(i.vol, 2 + Math.floor(Math.random() * 2)) },
+  // Head Start grants Stakes levels without the first purchase that runs the lesson.
+  dialLessons: { stakes: (s) => (s.run as PitRun)?.stakesBought ?? 0 },
   onboarding,
   lessons,
   lastStand: pitLastStand,

@@ -38,6 +38,13 @@ const GLYPHS: Record<string, string> = {
   '\u0014': '010101111111111', // {captive}
   '\u0015': '100110111110100', // {play}
   '\u0016': '000001101010000', // {check}
+  // Department icons (bridge, mines, pit).
+  '\u0017': '111111111101101', // {tooth}
+  '\u0018': '000111101111000', // {eye}
+  '\u0019': '111010111111010', // {mask}
+  '\u001a': '010111101111010', // {barrel}
+  '\u001b': '010111101111101', // {goon}
+  '\u001c': '010111101111111', // {poster}
 };
 
 const ICONS: Record<string, string> = {
@@ -45,7 +52,11 @@ const ICONS: Record<string, string> = {
   uarr: '\u0006', darr: '\u0007', dread: '\u0008',
   potion: '\u000e', ingot: '\u000f', bone: '\u0010', crate: '\u0011', soul: '\u0012', essence: '\u0013', captive: '\u0014',
   play: '\u0015', check: '\u0016',
+  tooth: '\u0017', eye: '\u0018', mask: '\u0019', barrel: '\u001a', goon: '\u001b', poster: '\u001c',
 };
+
+/** Icon token names usable as {name} in any PixelText. */
+export const ICON_NAMES = Object.keys(ICONS);
 
 export const LINE_H = 7; // 5px glyph + 2px leading
 export const ADV = 4; // 3px glyph + 1px spacing

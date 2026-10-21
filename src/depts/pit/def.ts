@@ -541,7 +541,10 @@ export const pitEcon: DeptEcon = {
   },
 
   // Infamy skill gate (07 §7, 00 §2.2): PIT_CROWNS Pit Crowns (Triumphs) at Stakes >= target.
-  skillTarget: (n) => Math.min(4 + 2 * n, TARGET_CAP),
+  // SIM-TUNED (sim/README.md "Pass 6"): +1.5 Stakes per Fall (rounded down), was +2. Late cycles
+  // hang on one Triumph at the target, and with ~1 Run a day the reference player's weeks 2-4
+  // cycles read 3.1-3.4 days (band 1.5-3) with 5-5.7 day stalls at targets 12-16.
+  skillTarget: (n) => Math.min(4 + Math.floor(1.5 * n), TARGET_CAP),
   skillLabel: (t) => `${PIT_CROWNS} CROWN${PIT_CROWNS > 1 ? 'S' : ''} AT STAKES ${t}+`,
 
   // SEEDS (the Pit unlocks ~day 6-8, 00 §6), from scripts/pit-bot.ts (greedy drafter, Stakes

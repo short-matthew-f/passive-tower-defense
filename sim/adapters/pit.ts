@@ -300,6 +300,8 @@ export const createPit = (opts: PitOpts = {}): AdapterFactory => (seed) => {
       }
       if (pick) {
         r.garrison = pick.map((x) => ({ ...x }));
+        // scene.ts station(): Old Guard (Signature) keeps the last stationed warband.
+        (save.persistent as { guard?: unknown }).guard = pick.map((x) => ({ ...x }));
         r.stats.stations++;
         counters.stations++;
       }

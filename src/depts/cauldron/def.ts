@@ -62,7 +62,10 @@ export const cauldronEcon: DeptEcon = {
     count: (save) => (stats(save).batches ?? 0) + (stats(save).drops ?? 0) / 3000,
   },
   // Infamy skill gate (05 §7, 00 §2.2): 5 Batches at Malice >= min(4 + N, 10).
-  skillTarget: (n) => Math.min(4 + n, 10),
+  // SIM-TUNED (sim/README.md "Pass 6"): min(5 + N, 10) from the second cycle on (the first stays
+  // Malice 4). The starter Fell 6 times in week 1 (cycle 1 lasted ~13 h, overnight) and took ~45%
+  // of the day-7 Dread (cap 35% at 7 departments); weeks 2-4 hit the Malice 10 cap either way.
+  skillTarget: (n) => (n === 0 ? 4 : Math.min(5 + n, 10)),
   skillLabel: (t) => `5 BATCHES AT MALICE ${t}`,
   // SIM-TUNED (sim/README.md "Tuning log"). Idle rate runs ~1.5/s at start, ~8K/s after 10 min on
   // screen and ~3.5e5/s at the first 100% Infamy (gold pegs now counted, econ.ts expectedMult).

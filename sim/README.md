@@ -1,5 +1,18 @@
 # Balance simulation (`sim/`)
 
+> **Balance state after Pass 6 (final), all seven departments, Goods, long nodes and the new rules
+> (Edicts, Trophy Hall, Legend's Bane, Swift Rebuild, Goods Caravan, Steward, Head Start,
+> Signatures, return rituals).** Every hard band passes in week 1 except one seed's Spire
+> active:offline (2.99x on 20 baseline minutes; median 4.4x). Unlocks (Mines 5 min, Dungeon 45 min,
+> Bridge 90 min, Styx day 2, Spire day 4 18:00, Pit day 6) and first Falls (Cauldron day 1 evening,
+> Mines day 3, Dungeon day 4, Bridge day 5, Styx day 5, Spire day 7, Pit day 9-10) sit on the 00 §6
+> arc; day-7 Dread 373 (band 145-439); the Cauldron's day-7 Dread share is back to ~34% (cap 35%).
+> In 30-day runs every department's weeks 2-4 cycles average 1.9-2.9 days with no cycle over
+> 4.0 days (3 seeds), and something is affordable on every return. The Steward never spent below
+> its reserve or bought a dial in 1,469 purchases. Still open: 30-day active:offline drift (Mines
+> up to ~5.2x, Dungeon ~2.4x, Pit and Spire lumpy), the Cauldron's week-1 cycles (~1.2 days) and
+> the arc-vs-AE first-Fall conflict. Details: "Pass 6" at the end.
+
 The headless balance harness from specs/00 §8.1. It runs the reference player through simulated
 days on **the game's own pure modules**, so "the sim matches the game" holds because both run the
 same code. Nothing here imports Pixi or the DOM.
@@ -12,9 +25,17 @@ npm run sim -- --fall-at 150    # Fall policy: push to 150% Infamy before lettin
 npm run sim -- --skill expert   # bot skill: novice | reference | expert
 npm run sim -- --live           # Cauldron and Spire: live physics every second (no activeRate table)
 npm run sim -- --floor-growth 3     # experiment: economy floor growth per Fall (shipped x2.5)
-npm test                        # includes tests/balance.test.ts, the fast CI tier (~11 s)
-BALANCE_LONG=1 npx vitest run tests/balance.test.ts   # + the 30-day weeks 2-4 tier (~35 s)
+npm run sim -- --out /tmp/a     # write report.{md,json} to /tmp/a instead of sim/out (parallel runs)
+npm run sim -- --ref-only --days 30 --seeds 1 --seed 2   # one 30-day seed, no side profiles
+npm run sim -- --profile steward    # the main table for another profile
+npm run sim -- --off edicts,rituals # attribution: new rules off (edicts,rituals,extras,wings,later)
+npm test                        # includes tests/balance.test.ts, the fast CI tier (~20 s)
+BALANCE_LONG=1 npx vitest run tests/balance.test.ts   # + the 30-day weeks 2-4 tier (~70 s)
 ```
+
+`npm run sim` takes ~110 s (three 7-day seeds plus the side profiles: idle-only, steward, phantom
+Seals, single-department mains, calibration probes). Three 30-day seeds run in parallel in ~2 min:
+`for k in 1 2 3; do npm run sim -- --ref-only --days 30 --seeds 1 --seed $k --out /tmp/s$k & done`.
 
 `npm run sim` uses Vite's module runner (`sim/cli.mjs`), so it needs no extra dependency.
 
@@ -122,17 +143,43 @@ Two layers, as in 00 §8.1:
    - **On screen**: one 1 s `econTick` per second. Off-screen departments accrue
      `idleRate x coreMult`, Tribute accrues with the x1.5 on-screen bonus, and `checkProgress`
      handles peakRank, Legends and Commendations.
-   - **Between sessions**: one closed-form `applyOffline` jump (offlineFactor, offline cap,
-     Tribute cap).
+   - **Between sessions**: one closed-form `applyOffline` jump (per-department offlineFactor, so
+     Iron Discipline counts for that department's income and Tribute; offline cap, Tribute cap).
    - **Shared rules**: `completeFall` and `buySeal` follow the same rules as the game, all through
-     `src/core/economy.ts` and `src/core/meta.ts`.
-   - **Throne Room bot**: buys Seals, then Dark Banners, Curfew Bells and Treasury, then Dread
-     perks, by value per cost.
+     `src/core/economy.ts`, `src/core/meta.ts` and `src/core/perks.ts` (Pass 6):
+     - `credit()` adds `amount x econGateMult` to the economy gate (Fear Itself), the bank gets the
+       plain amount;
+     - a Fall pays `dreadPayout(..., legendsBane)`, then applies Head Start and the Signature
+       (game.ts `applyCyclePerks`); a Signature also applies when bought, as the Altar does;
+     - Rebuild Rush length (Swift Rebuild), Trophy Hall and Dark Tithe (in `tributeRate`) and the
+       Goods Caravan (in `roadsMult`) come through the core functions automatically;
+     - the Steward (`stewardShare` / `stewardSpend`) accrues its allowance off screen every tick,
+       spends every 5 s and once per offline jump, exactly like game.ts `stewardPass`; the sim
+       audits every pass (never below the reserve floor, never past the pool, the dial never
+       moves);
+     - return rituals: the haul of each absence >= 60 s waits for the department's next played
+       entry, which credits `ritualBonus(haul, score)` (profile score: reference 0.7) before a
+       waiting Legend is let in. Collect-All visits skip it.
+     - Prices are rounded up like the Throne and Altar sheets (`Math.ceil(cost(L))`).
+   - **Throne Room bot**: buys Seals, then by value per Tribute Dark Banners, Curfew Bells,
+     Treasury, Imperial Roads, the Black Market, the Trophy Hall (+1% Tribute per Legend incl. the
+     next week's) and the Edict Board (worth a standing Dark Tithe); Tribute boosts count half. It
+     then buys Dread perks by value per Dread: Iron Fist, Tithe, Long Reach, Idle Hands, Ruinborn,
+     Swift Rebuild (~15 extra Rush minutes per cycle, at half value), Goods Caravan (as a Roads
+     level), Head Start (+10% x 0.6^L of the department), Signature (+15% of the department), and
+     Legend's Bane only when a week of its extra Dread buys more than its price would now. The
+     reference player never buys Gobbo's Satchel (quality of life) or cosmetics.
+   - **Edicts** (with the Edict Board): Dark Tithe while the next Seal's Dread is met but its
+     Tribute is short; else Fear Itself on the department whose economy gate most lags its skill
+     gate; else Iron Discipline on the department with the oldest cycle. `setEdict` enforces the
+     hourly switch.
    - **Fall policy**: Fall at 100% Infamy (`--fall-at` pushes further).
    - **Profiles**: `reference` (day 1: 45 + 15 + 30 min; then 10 + 10 + 10 + 20 min),
-     `idle-only`, `grinder`, `solo`. Inside a session the player plays 5-min slices: a freshly
-     unlocked department first, then one with a Legend waiting, then the department visited
-     longest ago (a round robin across sessions and days).
+     `steward` (the same schedule, Satchel L3 and the Steward on everywhere at the UI's 25%
+     reserve), `idle-only`, `grinder`, `solo`. Inside a session the player plays 5-min slices: a
+     freshly unlocked department first, then one with a Legend waiting, then (Pass 6) one whose
+     economy gate has been full for 12 h while its skill gate isn't (once per session), then the
+     department visited longest ago (a round robin across sessions and days).
    - **Single-department main** for departments 5-7 starts from the reference player's meta state
      at that department's unlock (00 §8.1, W-23), since they need lifetime Dread from elsewhere.
 
@@ -214,26 +261,26 @@ Bands derived for a partial suite (see `metrics.ts`):
 
 ## Current results (reference, 7 days, 3 seeds; `sim/out/report.md` has the full table)
 
-105 pass, 34 warn, 0 fail after the fifth pass (all seven departments; Pass 5 below). All hard
-bands pass in every seed. The remaining warnings are soft:
+107 pass, 34 warn, 1 fail, 48 info after the final pass (Pass 6 below; the counts include the side
+profiles). The one FAIL is a single seed's Spire active : offline (2.99x on 20 baseline minutes of
+a lumpy payout; median 4.41x). The remaining warnings are soft:
 
 - **First Fall wall clock vs AE hours.** In the reference profile every night and day gap adds
   ~2-4 h active-equivalent. The Cauldron's hard "3-4 h AE ± 1 h" band puts its first Fall in the
-  day-1 evening session (19:14, 3.1 h AE) instead of "early day 2". The later departments are
-  held to their arc day instead: Mines day 3 08:00 (~12 h AE), Dungeon day 4 08:00 (~19 h AE),
-  Bridge day 5 08:05 (~21 h AE), Styx day 5 12:30 (~17 h AE), Spire day 7 08:05 (~19 h AE). The
-  War Pit opens on day 6 18:00 - day 7 08:00, so its first Fall (~3 days later) is outside a 7-day
-  run.
+  day-1 evening session (19:00, 3.4 h AE) instead of "early day 2". The later departments are
+  held to their arc day instead: Mines day 3 08:00 (~10 h AE), Dungeon day 4 08:00 (~19 h AE),
+  Bridge day 5 08:00 (~18 h AE), Styx day 5 18:00 (~21 h AE), Spire day 7 08:00 (~19 h AE; one
+  seed in three day 8 12:35). The War Pit opens on day 6 12:30-18:00, its first Fall on day 9-10.
 - **Economy gate ≈ 2.5 h AE**: the same conflict.
-- **Cauldron week-1 cycles** average 1.2 days (the 1.5-3 day band is for weeks 2-4), so it takes
-  32-35% of the day-7 Dread (cap 35% for 7 departments). See Pass 5.
-- **Bridge and Spire on-screen ratios** 2.36x and 2.33x (bands 2.3-3.2x and 2.4-3.2x) on 25-40
-  baseline minutes; their hard active : offline bands pass in every seed.
-- **Dial step cost**: Cauldron median 15 min, Mines 2 min, Dungeon 8 min, Bridge 23 min, Styx
-  12 min, Spire 1 min. Low dial levels are bought during the rebuild ramp.
+- **Cauldron week-1 cycles** average 1.2 days (the 1.5-3 day band is for weeks 2-4); its day-7
+  Dread share is 32-34% (one seed 40%; cap 35%).
+- **Spire on-screen ratio** 3.15x median, 2.1-3.5x across seeds on 15-20 baseline minutes (band
+  2.4-3.2x).
+- **Dial step cost**: low dial levels are bought during the rebuild ramp (minutes, not 25-60).
 
-30-day runs (`--days 30`): every department's weeks 2-4 cycles now average 1.5-3 days (Pass 5).
-The active : offline drift over 30 days is listed under Pass 5, "Still open".
+30-day runs (3 seeds): weeks 2-4 cycles 1.9 / 2.4 / 2.6 / 2.7 / 2.5 / 2.9 / 2.9 days (Cauldron,
+Mines, Dungeon, Bridge, Styx, Spire, Pit), longest cycle 4.0 days, no stalls. The 30-day
+active : offline drift is listed under Pass 6, "Still open".
 
 ## Tuning log
 
@@ -751,3 +798,124 @@ Still open after pass 5:
   levels in the Pit) and Tribute; Seals and Banners absorb it so far (lifetime Tribute day 7
   7.9M vs 7.1M).
 - **Cauldron week-1 Dread share** 32-35% (cap 35%): not gated.
+
+### Pass 6 (final): the new rules mirrored, the last tuning
+
+All seven departments, Goods, long nodes, and the core rules added since Pass 5. "Before" for week 1
+is the report at the start of this pass (current department numbers, the old mirror); "after" is
+the current tree. Everything below is a 3-seed median unless marked.
+
+#### Harness changes
+
+1. **Mirrored rules** (`sim/meta.ts`, all through the real core functions; see "How it works"):
+   Fear Itself in `credit()` (`econGateMult`), per-department `offlineFactor(s, id)` for offline
+   income, that department's Tribute and the ratio metrics (Iron Discipline), `dreadPayout` with
+   Legend's Bane, Head Start and the Signature at each cycle start (and the Signature on purchase),
+   the Steward (`stewardShare` / `stewardSpend`, same pool, floor and 5 s cadence as game.ts),
+   return rituals (`ritualBonus`, score 0.7), purchase policies for `LATER_PERKS`, the wing perks,
+   `THRONE_EXTRAS` and Edicts, and prices rounded up like the sheets. Swift Rebuild, Trophy Hall,
+   Dark Tithe and Goods Caravan act through `tempMult`, `tributeRate` and `roadsMult`.
+2. **Adapters**: the War Pit stores the stationed warband in `persistent.guard` (scene.ts
+   `station()`, Old Guard), and the Dungeon runs `masonRebuild` on entry when Master Mason is owned.
+3. **`steward` profile** and its rows: a hard audit (never below the reserve, never past the pool,
+   no dial move; 0 violations in 1,469 buys over 7 days), what it bought, its pace against the
+   reference, and its hard bands (all pass). The CI test runs it for 3 days.
+4. **Slice picker**: after fresh and Legend-waiting departments, one whose economy gate has been
+   full for 12 h while the skill gate isn't, once per session (the HUD shows that bar). It only
+   fires on real stalls; week 1 is unchanged.
+5. **CLI**: `--out <dir>`, `--seed N`, `--profile P`, `--ref-only`, `--off <rules>`. New INFO rows:
+   when the new perks are first bought, the Dread share they take, Edict time, rituals.
+6. **CI** (`tests/balance.test.ts`): the determinism test has a 20 s timeout (it timed out at 5 s
+   under load); a 3-day Steward test; new gates `firstFallDay|mines`, `cycleAvg|dungeon`,
+   `cycleMax|pit`, and `dreadShare|cauldron` in the seven-department suite set. `npx vitest run`
+   ~22 s; the 30-day tier ~70 s.
+
+**A bug the mirror found (fixed in the sim, worth knowing for the game).** The first ritual mirror
+credited the bonus after letting a waiting Legend in, so 3.5% of a big overnight haul landed in a
+fresh cycle's economy gate. That broke the 30-day runs: Cauldron cycles of 3 minutes, Spire stalls
+of 11 days, Mines 10x on screen. The game avoids it because `completeFall` re-enters the department
+and a ritual whose scene closes forfeits its bonus, so the bonus can only pay the old cycle. The sim
+now plays the ritual before the Fall. If the game ever lets a ritual finish across a Fall (or pay
+after it), the same exploit appears.
+
+#### Tuning changes (each commented SIM-TUNED where it lives)
+
+| Change | Where | Why |
+|---|---|---|
+| Spire Seal 900,000 -> 1,200,000 Tribute | `src/core/meta.ts` `SEAL_COST` | Trophy Hall + Dark Tithe make Tribute ~10% richer by day 4: the Spire opened day 4 08:00 and Fell day 6 18:00 (arc 6.25-7.25 d). Now it opens day 4 18:00 and Falls day 7. |
+| Cauldron skill target `min(4 + n, 10)` -> `n = 0 ? 4 : min(5 + n, 10)` | `src/depts/cauldron/def.ts` | Week 1 had 6 Cauldron Falls (cycle 1 ~13 h overnight) and ~45% of the day-7 Dread (cap 35%). The first Fall is unchanged; from Fall #6 on the cap is the same. |
+| Spire `IDLE_TUNE` 8 -> 6.5 (econBase 1.8e10 kept) | `src/depts/spire/def.ts` | 30-day on-screen ratio 2.0-2.3x (active : offline 2.3-2.8x, hard 3-5x); the slower idle also holds the earliest seed's first Fall to day 7. |
+| War Pit skill target `min(4 + 2n, 20)` -> `min(4 + floor(1.5n), 20)` | `src/depts/pit/def.ts` (+ `tests/pit.test.ts`) | Weeks 2-4 cycles 3.1-3.3 d with 5.0-5.7 d stalls at targets 12-16 on ~1 Run a day. |
+
+Tried and reverted: Mines `FIST_TIER` 1.8 -> 1.7 (the 5.2x Mines reading came from the ritual bug
+above; with the fix 1.8 reads 2.68x on screen, 1.7 read 2.16x).
+
+#### Before -> after, week 1 (7 days, 3 seeds, medians)
+
+| Metric (band) | Before (pass start) | After |
+|---|---|---|
+| Report (incl. side profiles) | 105 pass / 34 warn / 1 fail | 107 pass / 34 warn / 1 fail (+ steward rows) |
+| Active : offline C / M / D / B / S / Sp (3-5x) | 3.71 / 4.05 / 3.29 / 3.57 / 4.15 / 3.22 (one seed 2.78, FAIL) | 3.56 / 4.15 / 3.30 / 3.62 / 4.20 / 4.41 (one seed 2.99, FAIL) |
+| On-screen ratio C / M (drum) / D / B / S / Sp | 2.36 / 2.63 / 2.12 / 2.36 / 2.75 / 2.25 | 2.33 / 2.68 / 2.13 / 2.35 / 2.78 / 3.15 |
+| First upgrade (< 60 s) | 0-12 s | 0-12 s |
+| Unlocks Mines / Dungeon / Bridge (active min) | 5 / 45 / 90 | 5 / 45 / 90 |
+| Unlocks Styx / Spire / Pit (days) | 1.52 / 3.52 / 6.33 | 1.52 / 3.75 / 5.75 |
+| First Falls C / M / D / B / S / Sp | d1 19:00 / d3 08:00 / d4 08:00 / d5 08:05 / d5 18:00 / d7 08:05 | d1 19:00 / d3 08:00 / d4 08:00 / d5 08:00 / d5 18:00 / d7 08:00 (one seed d8 12:35) |
+| Cauldron cycles after the first Fall | 1.19 d, 6 Falls | 1.18 d, 5 Falls |
+| Dread share by day 7, Cauldron (<= 35%) | 41.0% | 33.5% [32-40%] |
+| Lifetime Dread day 7 (145-439) | 402 [390-417] | 373 [313-392] |
+| Tribute shares day 7 (<= 35%) | 13-19% (Pit 0.3%) | 14-19% (Pit 1%) |
+| Lifetime Tribute day 7 | 7.8M | 8.5M |
+| Something affordable on returns | 100% | 100% |
+| Steward profile (rules / hard bands) | not simulated | 0 violations / all pass; +1 Fall in Cauldron, Mines, Bridge by day 7 |
+
+#### Before -> after, weeks 2-4 (30 days, 3 seeds)
+
+"Pass 5" is that pass's x2.5 column; "mirrored" is this pass's mirror before the Pit and slice
+changes (Spire already tuned).
+
+| Metric (band) | Pass 5 | Mirrored, before Pit tuning | After |
+|---|---|---|---|
+| Weeks 2-4 cycle C / M / D / B / S / Sp / Pit (1.5-3 d) | 2.26 / 2.15 / 2.82 / 2.73 / 2.92 / 2.60 / 3.08 | Pit 3.09 / 3.10 / 3.30 (seeds) | 1.90 / 2.43 / 2.59 / 2.67 / 2.51 / 2.88 / 2.86 |
+| Longest cycle (<= 5 d) | 2.6 / 2.6 / 3.2 / 3.9 / 4.0 / 3.4 / 4.4 (one seed Pit 8.6) | Pit 5.66 and 5.00 (2 of 3 seeds) | 2.4 / 4.0 / 3.2 / 3.5 / 3.6 / 4.0 / 3.7 (max 4.0) |
+| Falls in 30 days | 15 / 13 / 10 / 10 / 9 / 10 / 7 | | 17 / 12 / 11 / 10 / 10 / 9 / 8 |
+| Lifetime Dread day 7 / 14 / 30 | 372 / 1,233 / 5,704 | | 373 / 1,456 / 6,338 |
+| Dread share day 30, highest (<= 35% at 7) | Cauldron 25% | | Cauldron 35% [33-39%] |
+| Tribute share day 30, highest | Styx 22% | | Bridge 22% |
+| Active : offline C / M / D / B / S / Sp / Pit (not gated) | M ~5, D ~2.1, Pit 2-5, Sp 2.7-3.8 | | 4.5 / 5.2 / 2.4 / 3.3 / 3.7 / 3.1 [2.6-4.2] / 5.1 [2.3-5.3] |
+
+New-perk uptake (30 days, seed 1, 1-based days): Trophy Hall and Edict Board day 2 12:30; Legend's
+Bane (Cauldron) day 11; Swift Rebuild day 12 (L3 by day 30); Head Start L2 everywhere from day 15;
+the seven Signatures days 19-21; Legend's Bane in the Mines and Dungeon days 21-23. 12% of the Dread
+goes to the new perks. Goods Caravan is never worth a Dread over Iron Fist or Ruinborn. Edicts: Fear
+Itself ~85% of the time (mostly the Spire and the Mines), Dark Tithe ~10% (saving for Seals), Iron
+Discipline ~3%.
+
+#### What changes how the game feels
+
+- **The Cauldron's second to fifth Legends need one more Malice level** (5 Batches at Malice
+  6/7/8/9, was 5/6/7/8; Malice 10 from the sixth Legend, was the seventh). Week 1 has one Cauldron Fall
+  fewer; the starter no longer dominates the first Dread.
+- **The Spire opens half a day later** (Seal 1.2M Tribute, day 4 evening), and its apprentices pay
+  ~19% less idle, so the flask feels more worth playing (on screen ~2.6-3.2x idle).
+- **War Pit Legends ask for gentler Stakes** later on (4, 5, 7, 8, 10, 11, 13 ... 20 instead of
+  4, 6, 8 ... 20), so one tough Huntmaster no longer holds a cycle for 5 days.
+- **The new rules mostly add pace, not pressure**: rituals +3.5% of each haul, Fear Itself shortens
+  economy-gate waits, Trophy Hall and Dark Tithe add ~10% Tribute (absorbed by the Spire Seal and
+  Banners), and the wing perks arrive in weeks 2-3.
+
+#### Still open after Pass 6
+
+- **30-day active : offline drift** (not gated; the 7-day hard bands pass): the Mines rise to
+  ~5.2x (4.2x on screen: Tap Damage and the Gem nodes keep growing while the crew hits its regrowth
+  ceiling; the fix is a Mines curve change, e.g. Tap Damage cost growth, not a seed), the Dungeon
+  falls to ~2.4x (the buyer funds Hoard of Greed over defense), and the Pit and Spire swing by seed
+  (2.3-5.3x, 2.6-4.2x) on lumpy Run and Singularity payouts.
+- **Spire week-1 ratio and first Fall spread**: 15-20 baseline minutes in week 1, so one seed in
+  three reads under 3x active : offline or Falls just after day 7.
+- **Cauldron**: week-1 cycles ~1.2 days and a 33-39% Dread share at day 30 (cap 35%). Lengthening
+  them further needs the first Fall to move, which the hard AE band forbids (see "Current results").
+- **Tribute surplus**: Banners reach 16-17 per department by day 7. Only Seals and Banners absorb
+  Tribute in week 1; the Trophy Hall and Dark Tithe make that ~10% larger.
+- **Goods Caravan** is never bought by the reference bot (its +10% trickle is worth less than Iron
+  Fist or Ruinborn at any price the bot meets); a cheaper curve would make it a real choice.

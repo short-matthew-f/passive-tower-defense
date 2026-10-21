@@ -79,6 +79,7 @@ export class Button extends Container {
   }
 
   setLabel(label: string, sub?: string): this {
+    if (label === this.opts.label && sub === this.opts.sub) return this;
     this.opts.label = label;
     this.opts.sub = sub;
     this.redraw();

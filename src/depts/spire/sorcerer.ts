@@ -4,7 +4,8 @@
 // beat 3); later mechanics get 1-2 beat micro-lessons (00 §5.4.2).
 import type { ManagerDef, OnboardingStep } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
-import { SORC_PAL, SORC_PORTRAIT } from './art';
+import { SORC_IDLE_FRAME, SORC_PAL, SORC_PORTRAIT, type SorcMood } from './art';
+import { sfx } from './sfx';
 import { defaultStats, lvOf, UP, upCost, type SpireRun } from './def';
 
 const run = (s: DeptSave) => s.run as SpireRun;
@@ -26,11 +27,28 @@ function cleanDropsSince(s: DeptSave, key: string, n: number): boolean {
 
 const anyBought = (s: DeptSave) => Object.values(run(s).lv ?? {}).some((l) => l > 0);
 
+/** An expression's idle frame plus a talking frame (the mood's eyes, the talking mouth). */
+function expr(mood: SorcMood): string[][] {
+  const idle = SORC_IDLE_FRAME(mood);
+  const talk = SORC_PORTRAIT[1];
+  return [idle, idle.map((row, y) => (y >= 7 && y <= 9 ? talk[y] : row))];
+}
+
 export const sorcerer: ManagerDef = {
   name: 'Head Sorcerer',
   title: 'Head Sorcerer',
   portrait: SORC_PORTRAIT,
   palette: SORC_PAL,
+  // 04 §18 expressions on the strip portrait too (the scene passes its mood with each line).
+  expressions: {
+    scared: expr('scared'),
+    singed: expr('singed'),
+    lecture: [SORC_IDLE_FRAME('lecture')],
+    relieved: expr('relieved'),
+    happy: [SORC_PORTRAIT[1], SORC_PORTRAIT[0]],
+  },
+  moods: { legend: 'scared', infamy100: 'scared', fall: 'singed', returnFall: 'relieved', firstUpgrade: 'lecture' },
+  voice: (line, i) => sfx.mutter(i.vol, Math.min(4, 2 + Math.floor(line.length / 12))),
   lines: {
     // ----- core-fired -----
     intro: ['M-my lord! The Spire. It bites.', 'Welcome. Mind the g-glass.'],

@@ -8,6 +8,7 @@ import { bridgeEcon } from './def';
 import * as M from './model';
 import { bridgeLastStand } from './laststand';
 import { BridgeScene } from './scene';
+import { sfx } from './sfx';
 
 const run = (s: DeptSave) => s.run as M.BridgeRun;
 const st = (s: DeptSave) => run(s).stats ?? M.defaultStats();
@@ -21,6 +22,8 @@ const grumm: ManagerDef = {
   title: 'Bridge Troll',
   portrait: [GRUMM_IDLE, GRUMM_TALK],
   palette: GRUMM_PAL,
+  // Grumm rumbles for every strip line he shows (his in-scene icon bubbles have their own).
+  voice: (line, i) => sfx.grumm(i.vol, Math.min(4, 2 + Math.floor(line.length / 14))),
   lines: {
     intro: ['HRRM! GRUMM BRIDGE. YOU BOSS.'],
     firstUpgrade: ['OOH! SHINY! GRUMM LIKE. {coin}', 'NEW THING! GRUMM PROUD.'],

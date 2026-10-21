@@ -355,6 +355,8 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
   /** scene.ts on entry: last cycle's layout becomes ghosts, the kit adds 10% of its value. */
   function applyStarterKit(save: DeptSave): void {
     M.startCycle(run(save), per(save), save.cycle.n);
+    // Master Mason (Signature): scene.ts rebuilds affordable blueprints at L1 on entry.
+    if (per(save).mason) M.masonRebuild(run(save), per(save));
   }
 
   function startSession(save: DeptSave, env: SessionEnv): ActiveSession {

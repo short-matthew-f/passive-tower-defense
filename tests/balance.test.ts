@@ -22,7 +22,7 @@ const DAYS = 7;
  *    session; the arc's "early day 2" means ~5.5 h AE in the reference profile.
  *  - firstFallAE of the Mines, Dungeon and Bridge, econGateAE|*: the same AE-vs-arc conflict (each
  *    department's first Fall is held to its arc day instead).
- *  - cycleAvg|cauldron: week-1 Cauldron cycles run ~1.1 days (the 1.5-3 day band is for weeks 2-4).
+ *  - cycleAvg|cauldron: week-1 Cauldron cycles run ~1.2 days (the 1.5-3 day band is for weeks 2-4).
  *  - dialStep|*: dial levels bought during the post-Fall ramp always read as a few minutes.
  *  - ratioLocal.all|bridge: 2.1-2.9x across seeds on ~25-35 baseline minutes (band 2.3-3.2x);
  *    the hard active:offline band is gated instead.
@@ -38,6 +38,10 @@ const DAYS = 7;
  *    it. Its first Fall (~3 days after the Seal), cycles and active : offline (~5-30 baseline
  *    minutes here) are measured by `npm run sim -- --days 30` and the BALANCE_LONG tier, not here.
  *    firstUpgrade|pit is a CI-hard metric anyway.
+ *  - Pass 6 (final): ratioOffline|spire, ratioLocal.all|spire and firstFallDay|spire stay warnings
+ *    (15-20 baseline minutes in week 1; one seed in three Falls just after day 7);
+ *    ratioLocal.all|bridge reads 2.33-2.44x on a 2.3x floor. Added: firstFallDay|mines,
+ *    cycleAvg|dungeon, cycleMax|pit, and dreadShare|cauldron for the seven-department set.
  */
 const TUNED_GATES = [
   'firstFallAE|cauldron',
@@ -47,6 +51,7 @@ const TUNED_GATES = [
   'ratioLocal.all|cauldron',
   'returnAffordable|cauldron',
   'unlock|mines',
+  'firstFallDay|mines',
   'cycleMin|mines',
   'cycleMax|mines',
   'cycleAvg|mines',
@@ -55,6 +60,7 @@ const TUNED_GATES = [
   'returnAffordable|mines',
   'unlock|dungeon',
   'firstFallDay|dungeon',
+  'cycleAvg|dungeon',
   'cycleMin|dungeon',
   'cycleMax|dungeon',
   'ratioOffline|dungeon',
@@ -78,6 +84,7 @@ const TUNED_GATES = [
   'cycleMax|spire',
   'returnAffordable|spire',
   'unlockDay|pit',
+  'cycleMax|pit',
   'returnAffordable|pit',
 ];
 
@@ -119,10 +126,12 @@ const SUITE_GATES: Record<string, string[]> = {
     'dreadShare|spire',
     'dreadPacing|',
   ],
-  // Seven departments (pass 5). Shares cap at 35% (00 §8.1's own number at 7). dreadShare|cauldron
-  // stays a warning: 32-35% by day 7 across seeds (it was ~41% of six), too close to gate.
+  // Seven departments (pass 5). Shares cap at 35% (00 §8.1's own number at 7). Pass 6: the
+  // Cauldron's skill gate is one Malice level higher from its second cycle, which brought
+  // dreadShare|cauldron from ~45% to 32-34% (seed 3 still ~40%; seed 1 is gated here).
   'cauldron,mines,dungeon,bridge,styx,spire,pit': [
     'tributeShare|cauldron',
+    'dreadShare|cauldron',
     'tributeShare|mines',
     'tributeShare|dungeon',
     'tributeShare|bridge',
@@ -183,13 +192,25 @@ describe('balance simulation (fast tier)', () => {
     expect(result.problems).toEqual([]);
   });
 
-  it('is deterministic for a seed', () => {
+  // The second run costs ~2-4 s alone, but more on a loaded CI box (it once timed out at 5 s).
+  it('is deterministic for a seed', { timeout: 20_000 }, () => {
     // A second run of the same seed (1 day, fresh adapters) must replay day 1 of the 7-day run
     // event for event, including every department's first purchase and the Seal unlocks.
     const b = simulate({ ...DEFAULT_CONFIG, days: 1, seed: 1, profile: PROFILES.reference, adapters: allAdapters() });
     const day1 = (r: typeof result) => JSON.stringify(r.events.filter((e) => e.t < 86400));
     expect(b.events.length).toBeGreaterThan(5);
     expect(day1(b)).toEqual(day1(result));
+  });
+});
+
+describe('balance simulation (Steward)', () => {
+  it('never spends below the reserve, past its allowance, or on a dial', { timeout: 20_000 }, () => {
+    // The steward profile buys Gobbo's Satchel L2-L3 on day 1-2 and opts every department in at a
+    // 25% reserve; 3 days cover the Satchel, the first Falls and the first Steward-run nights.
+    const r = simulate({ ...DEFAULT_CONFIG, days: 3, seed: 1, profile: PROFILES.steward, adapters: allAdapters() });
+    expect(r.steward.violations).toEqual([]);
+    expect(r.steward.buys).toBeGreaterThan(0);
+    expect(r.problems).toEqual([]);
   });
 });
 

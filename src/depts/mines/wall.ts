@@ -83,6 +83,8 @@ export interface BeatJudge {
 
 export interface WallHooks {
   earn(base: number): number;
+  /** Steady Drum (a suite setting): the beat window doubles. Absent = off (the balance sim). */
+  steady?(): boolean;
   raiseSkill(level: number): void;
   rnd(): number;
   /** A kind the onboarding wants on the next spawn (scripted Ore Vein), or null. */
@@ -165,7 +167,7 @@ export class Wall {
     return M.beatPeriod(this.run.depth, this.tempo);
   }
   get window(): number {
-    return M.beatWindow(this.run.wide, this.tempo, this.per.steady);
+    return M.beatWindow(this.run.wide, this.tempo, !!this.h.steady?.());
   }
 
   mineable(t: Tile): boolean {

@@ -42,14 +42,17 @@ export const RUINBORN = { max: 20, cost: (l: number) => 4 * 1.5 ** l, desc: '+25
  * (12:30-21:00, 3.5-3.9 d; it opened on day 3 at 150K). War Pit 600,000 -> 3,000,000.
  * Pass 5 (War Pit built): 3,000,000 kept. Lifetime Dread 150 is met on day 4-5, so Tribute binds
  * again; the Pit opens on day 6 18:00 - day 7 08:00 (5.75-6.33 d, 00 §6 "day 6-8"), its first Fall
- * ~3 days later. */
+ * ~3 days later.
+ * Pass 6 (final, Trophy Hall + Dark Tithe Edict mirrored): Tribute runs ~10% richer by day 4, so
+ * the Spire opened on day 4 08:00 and Fell on day 6 18:00 (arc 6.25-7.25 d). Spire 900,000 ->
+ * 1,200,000 (opens day 4 12:30-18:00 again). */
 export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,
   dungeon: 2500,
   bridge: 60000,
   styx: 120000,
-  spire: 900000,
+  spire: 1200000,
   pit: 3000000,
 };
 export const SEAL_DREAD: Partial<Record<DeptId, number>> = { styx: 10, spire: 60, pit: 150 };

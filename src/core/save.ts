@@ -19,6 +19,10 @@ export function migrate(raw: any): SaveRoot | null {
   // Fill fields added without a schema bump.
   const base = newSave(s.savedAt ?? Date.now());
   s.meta = { ...base.meta, ...s.meta, settings: { ...base.meta.settings, ...(s.meta?.settings ?? {}) } };
+  const st = s.meta.settings;
+  st.leftHanded = st.leftHanded === true;
+  if (st.buyMode !== 0 && st.buyMode !== 1 && st.buyMode !== 2) st.buyMode = 0;
+  if (typeof st.depts !== 'object' || !st.depts || Array.isArray(st.depts)) st.depts = {};
   s.meta.goods = { ...base.meta.goods, ...(s.meta.goods ?? {}) };
   for (const k of Object.keys(s.meta.goods)) if (!Number.isFinite(s.meta.goods[k])) s.meta.goods[k] = 0;
   if (!s.meta.market || typeof s.meta.market.day !== 'number') s.meta.market = { ...base.meta.market };

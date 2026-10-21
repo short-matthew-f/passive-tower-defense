@@ -45,6 +45,14 @@ function tone(freq: number, dur: number, vol: number, type: OscillatorType, dela
 }
 
 export const sfx = {
+  /** The Head Sorcerer's voice: a nervous, stammering hum (2-4 wavering syllables). */
+  mutter(vol: number, words = 3): void {
+    for (let i = 0; i < words; i++) {
+      const f = 300 + Math.random() * 90;
+      tone(f, 0.07, 0.07 * vol, 'triangle', i * 0.12, i % 2 ? -40 : 40);
+      if (i === 0) tone(f, 0.04, 0.05 * vol, 'triangle', 0.05);
+    }
+  },
   /** Merge "bloop": one semitone up per tier and per cascade step (04 §13). */
   bloop(vol: number, tier: number, step: number): void {
     const f = 220 * 2 ** ((tier + Math.min(12, step)) / 12);

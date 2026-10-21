@@ -7,7 +7,7 @@
 // collapses the bubble to the portrait for the rest of that line. The only hit targets are the
 // small chips (Skip during a script, the ✓ of a struggle offer, Show me / Skip at chattiness Off).
 import { Container, Graphics, Rectangle } from 'pixi.js';
-import type { DeptDef, DeptScene, OnboardingStep, Rect, SayOpts, TargetRef } from '../core/dept';
+import type { DeptDef, DeptScene, OnboardingStep, Rect, SayOpts, TargetRef, VoiceSource } from '../core/dept';
 import type { Game } from '../core/game';
 import type { DeptSave } from '../core/types';
 import {
@@ -36,6 +36,11 @@ const GHOST_REPEAT_MS = 10_000;
 const SHRINK_MS = 30_000;
 const DEMO_MS = 5_000; // replayed beat whose action is unavailable: demonstrate, don't wait
 const TIP_CHECK_S = 1;
+/** Below this content height the intro line never spreads over the scene (it peeks instead). */
+const SHORT_CONTENT_H = 300;
+const AVOID_CHECK_S = 0.25;
+
+const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
 interface Script {
   kind: 'intro' | 'lesson';
@@ -51,6 +56,11 @@ interface Script {
 
 interface Showing {
   text: string;
+  key?: string;
+  /** The intro on a short screen / over a key control: portrait only, the line as a caption
+   * placed where it covers no avoidRects. */
+  peek?: boolean;
+  expression?: string;
   pinned: boolean; // a script beat: stays until done
   until: number; // ms
   collapsed: boolean;
@@ -98,7 +108,8 @@ export class ManagerDirector extends Container {
   private textSprite = new PixelText('', '#2a1a3a', null);
   private chips: { root: Container; bg: Graphics; text: PixelText; kind: Showing['chips'][number] | null }[] = [];
   private bubbleRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
-  // Guidance overlays (never interactive).
+  /** Guidance overlays (never interactive); the Game stacks this above the modal layer. */
+  readonly guide = new Container();
   private hl = new Graphics();
   private ghost = new Graphics();
   private caption = new Container();
@@ -109,6 +120,11 @@ export class ManagerDirector extends Container {
   private toastBg = new Graphics();
   private toastText = new PixelText('');
   private toastTimer = 0;
+  private toastW = 0;
+  private toastH = 0;
+  private avoidAcc = AVOID_CHECK_S;
+  private avoidCache: Rect[] = [];
+  private anchorY: number | null = null;
   private t = 0;
 
   constructor(game: Game) {
@@ -141,23 +157,39 @@ export class ManagerDirector extends Container {
     this.toastBox.addChild(this.toastBg, this.toastText);
     this.toastBox.visible = false;
     this.toastBox.eventMode = 'none';
-    this.addChild(this.hl, this.caption, this.bubble, this.ghost, this.toastBox);
+    this.guide.eventMode = 'none';
+    this.guide.addChild(this.hl, this.caption, this.ghost);
+    this.addChild(this.bubble, this.toastBox);
   }
 
   // ---------- lifecycle ----------
 
-  /** A department scene opened. */
-  attach(def: DeptDef, d: DeptSave, scene: DeptScene): void {
+  /** A department is opening (before its scene is built): lessons fired from the scene's
+   * constructor queue instead of being dropped. */
+  begin(def: DeptDef, d: DeptSave): void {
     this.clear();
     this.def = def;
     this.d = d;
-    this.scene = scene;
     this.enteredAt = Date.now();
     this.intenseAt = -Infinity;
+  }
+
+  /** A department scene opened. */
+  attach(def: DeptDef, d: DeptSave, scene: DeptScene): void {
+    if (this.def !== def || this.d !== d) this.begin(def, d);
+    this.scene = scene;
+    this.avoidAcc = AVOID_CHECK_S;
+    this.anchorY = null;
     this.startIntro();
-    // Lessons queued for replay from Settings -> Managers.
+    // Lessons queued for replay from Settings -> Managers (ahead of anything the scene queued).
+    const replays: typeof this.lessonQueue = [];
     for (const [id, steps] of Object.entries(def.lessons ?? {})) {
-      if (d.seen[`lsReplay.${id}`]) this.lessonQueue.push({ id, steps, replay: true });
+      if (d.seen[`lsReplay.${id}`]) replays.push({ id, steps, replay: true });
+    }
+    this.lessonQueue.unshift(...replays);
+    // Dial lessons whose dial is already up (Head Start grants levels without the first buy).
+    for (const [id, level] of Object.entries(def.dialLessons ?? {})) {
+      if (safe(() => level(d), 0) >= 1) this.lesson(def, d, id);
     }
   }
 
@@ -178,6 +210,7 @@ export class ManagerDirector extends Container {
     this.def = null;
     this.d = null;
     this.scene = null;
+    this.avoidCache = [];
   }
 
   /** True while an onboarding script or lesson is running (rituals wait for it). */
@@ -198,12 +231,13 @@ export class ManagerDirector extends Container {
       if (x >= b.x / k - 4 && x < (b.x + b.width) / k + 4 && y >= b.y / k - 4 && y < (b.y + b.height) / k + 4) return;
     }
     s.collapsed = true;
+    s.peek = false;
     this.layoutBubble();
   }
 
   // ---------- public API ----------
 
-  say(def: DeptDef, trigger: string, opts?: SayOpts): void {
+  say(def: DeptDef, trigger: string, opts?: SayOpts, source: VoiceSource = 'dept'): void {
     const d = this.d;
     if (!d || def !== this.def) return;
     const cls = classify(trigger, opts);
@@ -220,7 +254,7 @@ export class ManagerDirector extends Container {
     const text = pickLine(def, trigger, opts?.vars);
     if (!text) return;
     if (cls.enforceRepeat) recordRepeat(cls.rule.repeat, cls.kind, key, d.seen, d.cycle.n, now);
-    const line: QueuedLine = { key, kind: cls.kind, priority: cls.rule.priority, text, at: now, offer: opts?.offer };
+    const line: QueuedLine = { key, kind: cls.kind, priority: cls.rule.priority, text, at: now, offer: opts?.offer, source, expression: opts?.expression };
     this.queue = enqueue(this.queue, line).queue;
   }
 
@@ -249,17 +283,79 @@ export class ManagerDirector extends Container {
     const m = measure(wrapped);
     const g = this.toastBg.clear();
     drawPanel(g, 0, 0, w, m.h + 8, 0x1c1028, C.gold);
+    this.toastW = w;
+    this.toastH = m.h + 8;
     this.toastText.position.set(4, 4);
+    this.avoidAcc = AVOID_CHECK_S; // re-read the scene's controls now
+    this.refreshAvoid(0);
     this.toastBox.position.set(L.safe.l + 4, this.toastY());
     this.toastBox.visible = true;
     this.toastTimer = 3.5;
   }
 
-  /** Toasts sit at the top, under the HUD (and under a manager line if one is showing), never over controls. */
+  /**
+   * Toasts sit at the top, under the HUD (and under a manager line if one is showing), and dodge
+   * the open scene's important controls (DeptScene.avoidRects / toastAnchor).
+   */
   private toastY(): number {
     const L = this.game.layout;
     const base = L.safe.t + HUD_H + 2;
-    return this.bubble.visible ? this.bubbleRect.y + this.bubbleRect.h + 2 : base;
+    const top = this.bubble.visible ? this.bubbleRect.y + this.bubbleRect.h + 2 : base;
+    let anchor: number | null = null;
+    try {
+      anchor = this.scene?.toastAnchor?.()?.y ?? null;
+    } catch {
+      anchor = null;
+    }
+    const avoid = this.bubble.visible ? [...this.avoidCache, this.bubbleRect] : this.avoidCache;
+    return this.placeY(L.safe.l + 4, this.toastW, this.toastH, anchor !== null && Number.isFinite(anchor) ? [anchor, top] : [top], avoid, base);
+  }
+
+  /** Re-reads the scene's avoid rects a few times a second (they are cheap but not free). */
+  private refreshAvoid(dt: number): void {
+    this.avoidAcc += dt;
+    if (this.avoidAcc < AVOID_CHECK_S) return;
+    this.avoidAcc = 0;
+    try {
+      const r = this.scene?.avoidRects?.();
+      this.avoidCache = Array.isArray(r) ? r.filter((x) => x && Number.isFinite(x.y) && Number.isFinite(x.h)).slice(0, 16) : [];
+    } catch {
+      this.avoidCache = [];
+    }
+  }
+
+  /**
+   * A top y for a box (x, w, h) that covers none of `avoid`: the preferred ys first, then a scan
+   * down the content area in 4 px steps. With no free spot, the candidate with the least overlap.
+   */
+  private placeY(x: number, w: number, h: number, prefer: number[], avoid: Rect[], minY: number): number {
+    const L = this.game.layout;
+    const maxY = L.h - L.safe.b - h - 2;
+    const clamp = (y: number) => Math.round(Math.max(minY, Math.min(maxY, y)));
+    if (!avoid.length) return clamp(prefer[0]);
+    const cost = (y: number) => {
+      const box = { x, y, w, h };
+      let c = 0;
+      for (const r of avoid) {
+        if (!overlaps(box, r)) continue;
+        c += (Math.min(x + w, r.x + r.w) - Math.max(x, r.x)) * (Math.min(y + h, r.y + r.h) - Math.max(y, r.y));
+      }
+      return c;
+    };
+    let best = clamp(prefer[0]);
+    let bestCost = Infinity;
+    const tryY = (raw: number) => {
+      const y = clamp(raw);
+      const c = cost(y);
+      if (c < bestCost) {
+        best = y;
+        bestCost = c;
+      }
+      return c === 0;
+    };
+    for (const p of prefer) if (tryY(p)) return best;
+    for (let y = minY; y <= maxY; y += 4) if (tryY(y)) return best;
+    return best;
   }
 
   // ---------- scripts ----------
@@ -397,7 +493,12 @@ export class ManagerDirector extends Container {
     const L = this.game.layout;
     const stripBottom = L.safe.t + HUD_H + 2 + PW + 8;
     const under = !!target && target.y < stripBottom && target.y + target.h > L.safe.t + HUD_H;
-    this.show({ text: step.line, pinned: true, until: Infinity, collapsed: under, chips: ['skip'], target: step.target, started: now });
+    this.show({ text: step.line, key: step.id, pinned: true, until: Infinity, collapsed: under, chips: ['skip'], target: step.target, started: now });
+    this.voice(step.line, step.id, 'beat');
+  }
+
+  private voice(text: string, key: string, source: VoiceSource): void {
+    if (this.def && text) this.game.voice(this.def, text, key, source);
   }
 
   // ---------- frame ----------
@@ -405,6 +506,12 @@ export class ManagerDirector extends Container {
   update(dt: number): void {
     this.t += dt;
     const now = Date.now();
+    this.refreshAvoid(dt);
+    // Docked bubble (DeptScene.bubbleAnchor): follow the sprite when the scene re-lays out.
+    if (this.showing && this.bubble.visible) {
+      const ay = this.readAnchor();
+      if (ay !== this.anchorY) this.layoutBubble();
+    }
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastBox.visible = false;
@@ -432,7 +539,7 @@ export class ManagerDirector extends Container {
     if (legacyIdx >= 0 && (!this.showing || (this.showing.pinned && !this.script?.prompt))) {
       const [line] = this.queue.splice(legacyIdx, 1);
       this.showLine(line, now);
-    } else if (!this.script && this.lessonQueue.length && !(this.showing && !this.showing.pinned)) {
+    } else if (!this.script && this.lessonQueue.length && !(this.showing && !this.showing.pinned) && !this.introPending()) {
       const next = this.lessonQueue.shift()!;
       this.script = this.newScript('lesson', next.id, next.steps, next.replay);
       if (this.script.i < 0) this.finishScript();
@@ -461,6 +568,17 @@ export class ManagerDirector extends Container {
     }
 
     this.draw(now);
+  }
+
+  /** Micro-lessons wait until the intro line and the onboarding script have finished (a replay
+   * from Settings is the exception: the player asked for it). */
+  private introPending(): boolean {
+    const d = this.d;
+    const def = this.def;
+    if (!d || !def) return false;
+    if (this.lessonQueue[0]?.replay) return false;
+    if (this.queue.some((l) => l.key === 'intro') || this.showing?.key === 'intro') return true;
+    return def.onboarding.length > 0 && !d.seen.onboardingDone;
   }
 
   private clock(now: number): SpeakClock {
@@ -506,16 +624,44 @@ export class ManagerDirector extends Container {
       if (this.d) this.d.seen['mgr.last'] = now;
     }
     if (line.kind === 'ambient') this.game.save.meta.managerClock.lastAmbientAt = now;
+    const def = this.def;
+    const expression = line.expression ?? def?.manager.moods?.[line.key];
     this.show({
       text: line.text,
+      key: line.key,
       pinned: false,
       until: now + bubbleSeconds(line.text) * 1000,
       collapsed: false,
+      peek: line.key === 'intro' && !line.offer && this.introShouldPeek(),
+      expression,
       chips: line.offer ? ['offer'] : [],
       offer: line.offer,
       target,
       started: now,
     });
+    const source = (line.kind === 'tip' ? 'tip' : (line.source ?? 'dept')) as VoiceSource;
+    this.voice(line.text, line.key, source);
+  }
+
+  /** The intro line peeks (portrait + a dodging caption) on short screens, or when the full strip
+   * would cover one of the scene's key controls. */
+  private introShouldPeek(): boolean {
+    const L = this.game.layout;
+    const contentH = L.h - L.safe.t - L.safe.b - HUD_H;
+    if (contentH < SHORT_CONTENT_H) return true;
+    this.avoidAcc = AVOID_CHECK_S;
+    this.refreshAvoid(0);
+    const strip: Rect = { x: L.safe.l, y: L.safe.t + HUD_H, w: L.w - L.safe.l - L.safe.r, h: PW + 10 };
+    return this.avoidCache.some((r) => overlaps(strip, r));
+  }
+
+  private readAnchor(): number | null {
+    try {
+      const y = this.scene?.bubbleAnchor?.()?.y;
+      return typeof y === 'number' && Number.isFinite(y) ? Math.round(y) : null;
+    } catch {
+      return null;
+    }
   }
 
   // ---------- drawing ----------
@@ -543,7 +689,7 @@ export class ManagerDirector extends Container {
     const chipsW = chipW.reduce((a, b) => a + b + 2, 0);
     let bw: number;
     let bh: number;
-    if (s.collapsed) {
+    if (s.collapsed || s.peek) {
       bw = PW + 6 + (chipsW ? chipsW + 2 : 0);
       bh = PW + 6;
       this.textSprite.visible = false;
@@ -563,7 +709,10 @@ export class ManagerDirector extends Container {
     g.rect(2, 2, bw - 4, 1).fill(0xffffff);
     this.portrait.position.set(4, 3);
     const bx = L.safe.l + 2;
-    const by = L.safe.t + HUD_H + 2;
+    const top = L.safe.t + HUD_H + 2;
+    // Docked near the manager's sprite when the scene asks (pinned script beats keep the strip).
+    this.anchorY = this.readAnchor();
+    const by = this.anchorY !== null && !s.pinned ? Math.max(top, Math.min(L.h - L.safe.b - bh - 2, this.anchorY - bh)) : top;
     this.bubble.position.set(bx, by);
     this.bubbleRect = { x: bx, y: by, w: bw, h: bh };
     // Chips at the bottom-right corner.
@@ -591,10 +740,15 @@ export class ManagerDirector extends Container {
     const def = this.def;
     if (!def) return;
     const m = def.manager;
-    const frame = this.showing && this.talk < 1.5 && Math.floor(this.talk * 6) % 2 === 0 ? 1 : 0;
+    const expr = this.showing?.expression ? m.expressions?.[this.showing.expression] : undefined;
+    const frames: string[][] = expr?.length ? expr : m.portrait;
+    // Talking: cycle idle and the talking frames (1..n) for the first 1.5 s of a line.
+    const talking = frames.length > 1 && !!this.showing && this.talk < 1.5;
+    const step = Math.floor(this.talk * 6) % frames.length;
+    const frame = talking ? (frames.length === 2 ? (step === 0 ? 1 : 0) : step) : 0;
     const g = this.portrait.clear();
     g.rect(-1, -1, PW + 2, PW + 2).fill(C.outline);
-    drawSprite(g, m.portrait[frame], m.palette, 0, 0, PORTRAIT_PX);
+    drawSprite(g, frames[frame] ?? m.portrait[0], m.palette, 0, 0, PORTRAIT_PX);
   }
 
   /** Resolves a beat target to a screen rect (null when hidden). */
@@ -630,9 +784,27 @@ export class ManagerDirector extends Container {
     const hl = this.hl.clear();
     const gh = this.ghost.clear();
     this.caption.visible = false;
-    // Guidance is hidden while a sheet or modal covers the scene.
-    if (!s || !s.target || this.game.modalLayer.children.length > 0) return;
-    const r = this.resolve(s.target);
+    if (s?.peek && s.text && this.bubble.visible) {
+      this.drawPeek(s.text);
+      return;
+    }
+    // Guidance is hidden while a modal covers the scene, except a beat that points inside the
+    // open upgrade sheet (OnboardingStep.sheetTarget).
+    if (!s) return;
+    const modal = this.game.modalLayer.children.length > 0;
+    const sc0 = this.script;
+    const beat = s.pinned && sc0 ? sc0.steps[sc0.i] : null;
+    let r: Rect | null = null;
+    let inSheet = false;
+    if (modal) {
+      const sheet = this.game.sheet;
+      if (!beat?.sheetTarget || !sheet || this.game.modalLayer.children.length !== 1) return;
+      r = sheet.targetRect(beat.sheetTarget);
+      inSheet = true;
+    } else {
+      if (!s.target) return;
+      r = this.resolve(s.target);
+    }
     if (!r) return;
     // Pulsing 1 px outline (pixel-art pulse: two colours alternating, plus a corner blink).
     const on = Math.floor(this.t * 3) % 2 === 0;
@@ -643,28 +815,57 @@ export class ManagerDirector extends Container {
     const h = Math.round(r.h) + 2;
     hl.rect(x, y, w, 1).rect(x, y + h - 1, w, 1).rect(x, y, 1, h).rect(x + w - 1, y, 1, h).fill(col);
     if (on) hl.rect(x - 1, y - 1, 2, 2).rect(x + w - 1, y - 1, 2, 2).rect(x - 1, y + h - 1, 2, 2).rect(x + w - 1, y + h - 1, 2, 2).fill(col);
-    // Caption beside the highlight when the bubble is collapsed over it.
-    if (s.collapsed && s.pinned && s.text) this.drawCaption(s.text, r);
-    // Ghost finger.
+    // Caption beside the highlight when the bubble is collapsed over it (or dimmed by the sheet).
+    if ((s.collapsed || inSheet) && s.pinned && s.text) this.drawCaption(s.text, r, inSheet);
+    // Ghost finger (a tap inside the sheet).
     const sc = this.script;
     const step = s.pinned && sc ? sc.steps[sc.i] : null;
-    if (step?.gesture && sc) {
+    if (inSheet && step && sc) {
+      const p = (now - sc.ghostAt) / 1000;
+      if (p >= 0 && p < GHOST_S) this.drawGhost(gh, 'tap', r, null, p / GHOST_S);
+    } else if (step?.gesture && sc) {
       const p = (now - sc.ghostAt) / 1000;
       if (p >= 0 && p < GHOST_S) this.drawGhost(gh, step.gesture, r, this.resolve(step.dragTo), p / GHOST_S);
     }
   }
 
-  private drawCaption(text: string, r: Rect): void {
+  /** The peeking intro: a one-or-two-line caption beside the portrait, placed off the scene's
+   * key controls. */
+  private drawPeek(text: string): void {
+    const L = this.game.layout;
+    const x0 = this.bubbleRect.x + this.bubbleRect.w + 2;
+    const maxW = L.w - L.safe.r - 2 - x0;
+    const line = wrap(text, maxW - 6).split('\n').slice(0, 2).join('\n');
+    this.captionText.set(line);
+    const m = measure(line);
+    const cw = m.w + 6;
+    const ch = m.h + 5;
+    const cy = this.placeY(x0, cw, ch, [this.bubbleRect.y + 2], this.avoidCache, this.bubbleRect.y);
+    this.captionBg.clear().rect(0, 0, cw, ch).fill({ color: 0x0a0410, alpha: 0.85 }).rect(0, ch - 1, cw, 1).fill(C.gold);
+    this.captionText.position.set(3, 2);
+    this.caption.position.set(x0, cy);
+    this.caption.visible = true;
+  }
+
+  /** `side`: try beside the highlight first (inside the sheet, below would cover the next row). */
+  private drawCaption(text: string, r: Rect, side = false): void {
     const L = this.game.layout;
     const maxW = L.w - L.safe.l - L.safe.r - 8;
-    const line = wrap(text, maxW - 6).split('\n').slice(0, 2).join('\n');
+    const sideW = side ? Math.max(r.x - L.safe.l - 6, L.w - L.safe.r - (r.x + r.w) - 6) : 0;
+    const narrow = side && sideW >= 60;
+    const line = wrap(text, (narrow ? sideW : maxW) - 6).split('\n').slice(0, narrow ? 3 : 2).join('\n');
     this.captionText.set(line);
     const m = measure(line);
     const cw = m.w + 6;
     const ch = m.h + 5;
     let cy = r.y + r.h + 3;
     if (cy + ch > L.h - L.safe.b - 2) cy = r.y - ch - 3;
-    const cx = Math.max(L.safe.l + 2, Math.min(L.w - L.safe.r - cw - 2, Math.round(r.x + r.w / 2 - cw / 2)));
+    let cx = Math.max(L.safe.l + 2, Math.min(L.w - L.safe.r - cw - 2, Math.round(r.x + r.w / 2 - cw / 2)));
+    if (narrow) {
+      const leftRoom = r.x - L.safe.l - 6;
+      cx = leftRoom >= cw ? Math.round(r.x - cw - 3) : Math.round(r.x + r.w + 3);
+      cy = Math.max(L.safe.t, Math.min(L.h - L.safe.b - ch - 2, Math.round(r.y + r.h / 2 - ch / 2)));
+    }
     this.captionBg.clear().rect(0, 0, cw, ch).fill({ color: 0x0a0410, alpha: 0.85 }).rect(0, ch - 1, cw, 1).fill(C.gold);
     this.captionText.position.set(3, 2);
     this.caption.position.set(cx, Math.round(cy));

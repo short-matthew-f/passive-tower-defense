@@ -380,8 +380,11 @@ export function distillCeiling(run: SpireRun, per: SpirePersistent): number {
  * profile reads ~2.8x on screen and ~4.1x offline pooled over 6 seeds (04 §4 targets 2.8x / 4.0x),
  * and a long solo stretch drifts to ~2.1-2.6x late. Single 7-day seeds scatter (3.2-5.6x offline)
  * because the Spire only gets ~25 baseline minutes of a lumpy payout.
+ * SIM-TUNED 8 -> 6.5 (sim/README.md "Pass 6"): with seven departments, Goods and the long node the
+ * reference bot read ~2.0-2.3x on screen in 30-day runs (2.3-2.8x active:offline, below the hard
+ * 3x) and ~2.3x in week 1 (04 §4 band 2.4-3.2x).
  */
-export const IDLE_TUNE = 8;
+export const IDLE_TUNE = 6.5;
 
 /** On-screen idle Arcana/s before core multipliers (04 §4). Pure and cheap. */
 export function idleRateOf(run: SpireRun, per: SpirePersistent, fuel = 0): number {
@@ -538,6 +541,8 @@ export const spireEcon: DeptEcon = {
   //    opens in the day-4 evening session.
   //  - rankRef 100 -> 1,500 and rankTarget 2,000 -> 1e4: idle on the first visit is ~1.5-6e3/s and
   //    ~1e4/s at the first 100% Infamy, so the Spire sits at Rank ~40-55 like the others.
+  //    Pass 6: kept at 1.8e10; IDLE_TUNE 8 -> 6.5 (below) already slows the economy gate ~15%, which
+  //    moved the earliest seed's first Fall from day 6 21:00 to day 7.
   econBase: 1.8e10,
   rankRef: 1500,
   rankTarget: 1e4,

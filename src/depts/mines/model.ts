@@ -85,13 +85,12 @@ export interface MinesPersistent {
   tempo: Tempo; // the chosen tempo option
   drum: boolean; // the Doom Drum, kept through Falls
   drumOn: boolean; // its on/off switch, also kept (02 §6E)
-  // Player/device options. 02 §13 files these under suite settings (meta.settings); the core has
-  // no slot for them yet, so the department keeps them in `persistent` (never reset by a Fall).
-  holdAuto: boolean; // hold a rock to auto-hit at 4/s (02 §10; on from the start)
-  steady: boolean; // Steady Drum: window x2 and a screen-edge pulse (02 §6E)
-  latency: number; // touch-to-beat latency in seconds (calibration, 02 §13)
-  calibrated: boolean;
-  buyMode: number; // upgrade sheet: 0 = x1, 1 = x10, 2 = MAX
+  // Player/device options (hold-to-auto-hit, Steady Drum, drum latency) live in the suite settings
+  // now (meta.settings.depts.mines, see index.ts `settings`); older saves' fields here move there
+  // on load. `latency` stays as the headless default the balance sim reads.
+  latency: number; // default touch-to-beat latency in seconds (the live game reads settings)
+  /** Gems credited while away (DeptDef.onOffline) and not yet shown on the wall. */
+  gemAway: number;
   /** Fractional Gems earned while away (offline gemRate, 02 §3). */
   gemFrac: number;
   /** Last time (ms) the wall was on screen, for offline Gems. 0 = never. */
@@ -180,11 +179,8 @@ export function defaultPersistent(): MinesPersistent {
     tempo: 'march',
     drum: false,
     drumOn: true,
-    holdAuto: true,
-    steady: false,
     latency: BEAT_LATENCY,
-    calibrated: false,
-    buyMode: 0,
+    gemAway: 0,
     gemFrac: 0,
     gemAt: 0,
   };

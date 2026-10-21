@@ -90,8 +90,8 @@ describe('war pit shop and economy', () => {
     expect(heldCrownLevel({ 6: 2, 2: 5 })).toBe(6);
     expect(heldCrownLevel({ 4: 0 })).toBe(-1);
     expect(pitEcon.skillTarget(0)).toBe(4);
-    expect(pitEcon.skillTarget(3)).toBe(10);
-    expect(pitEcon.skillTarget(5)).toBe(14); // cap 20 with the cards 12/15/18 (07 §7)
+    expect(pitEcon.skillTarget(3)).toBe(8); // +1.5 per Fall, rounded down (sim-tuned, pass 6)
+    expect(pitEcon.skillTarget(5)).toBe(11); // cap 20 with the cards 12/15/18 (07 §7)
     expect(pitEcon.skillTarget(12)).toBe(20);
   });
 

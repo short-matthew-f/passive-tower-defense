@@ -7,6 +7,7 @@ import { minesEcon } from './def';
 import { minesLastStand } from './laststand';
 import * as M from './model';
 import { MinesScene } from './scene';
+import { sfx } from './sfx';
 
 const run = (s: DeptSave) => s.run as M.MinesRun;
 const st = (s: DeptSave) => run(s).stats ?? M.defaultStats();
@@ -42,6 +43,8 @@ export const mines: DeptDef = {
     title: 'Foreman',
     portrait: [GRITCH_IDLE, GRITCH_TALK],
     palette: GRITCH_PALETTE,
+    // The scene never blips its own lines, so Gritch voices every line he shows.
+    voice: (line, i) => sfx.gritch(i.vol, Math.min(4, 2 + Math.floor(line.length / 12))),
     lines: {
       intro: ['BOSS! You came DOWN! {coin}', 'BOSS! Crew is... THRILLED!'],
       firstUpgrade: ['Bigger fist! Rocks are SCARED!', 'Shiny upgrade! Do again!'],
@@ -92,6 +95,7 @@ export const mines: DeptDef = {
       id: 'tap',
       line: 'Bigger fist! Buy TAP DAMAGE!',
       target: 'btn.upgrades',
+      sheetTarget: 'tap',
       gesture: 'tap',
       waitFor: (s) => s.run.bank >= M.tapCost(0) || run(s).tap >= 1,
       done: (s) => run(s).tap >= 1,
@@ -119,6 +123,40 @@ export const mines: DeptDef = {
   legend: {
     name: 'Sir Augustin Drillwright',
     line: 'I HAVE BROUGHT A STEAM DRILL. YOUR GOBLINS BROUGHT PICKS. ADORABLE.',
+  },
+
+  // Player options (02 §13): suite settings, moved here from `persistent` (legacy keys migrate).
+  settings: [
+    { key: 'holdAuto', label: 'Hold a rock to auto-hit', kind: 'toggle', default: true, legacy: 'holdAuto', hint: () => '4 hits a second, off-beat' },
+    { key: 'steady', label: 'Steady Drum', kind: 'toggle', default: false, legacy: 'steady', hint: () => 'Beat window x2 and a screen-edge pulse', visible: (s) => !!(s.persistent as M.MinesPersistent).drum },
+    {
+      key: 'calibrate',
+      label: 'Calibrate drum',
+      kind: 'action',
+      visible: (s) => !!(s.persistent as M.MinesPersistent).drum,
+      hint: (v) => `Tap with the boom x8. Now ${Math.round(((v.latency as number) ?? M.BEAT_LATENCY) * 1000)} ms${v.calibrated ? '' : ' (default)'}`,
+    },
+    { key: 'latency', label: 'Drum latency', kind: 'value', default: M.BEAT_LATENCY, legacy: 'latency', visible: () => false },
+    { key: 'calibrated', label: 'Calibrated', kind: 'value', default: false, legacy: 'calibrated', visible: () => false },
+  ],
+
+  // Offline Gems (02 §3) for an absence: from when the wall was last on screen, at the offline
+  // factor and cap. The scene floats the haul (gemAway) and covers in-app time in other departments.
+  onOffline(save, _elapsed, factor, info) {
+    M.normalize(save.run, save.persistent);
+    const p = save.persistent as M.MinesPersistent;
+    if (p.gemAt > 0 && info.now > p.gemAt) {
+      const away = Math.min(info.capSeconds, (info.now - p.gemAt) / 1000);
+      const g = (p.gemFrac || 0) + M.offlineGems(run(save), p, save.imports?.bones ?? 0, factor, away);
+      const whole = Math.floor(Math.max(0, g));
+      p.gemFrac = Math.max(0, g - whole);
+      if (whole > 0) {
+        p.gems += whole;
+        p.gemsEver += whole;
+        p.gemAway = (p.gemAway || 0) + whole;
+      }
+    }
+    p.gemAt = info.now;
   },
 
   createScene: (ctx) => new MinesScene(ctx),

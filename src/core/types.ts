@@ -37,6 +37,13 @@ export interface Settings {
   haptics: boolean;
   sfx: number;
   chatter: 'full' | 'milestones' | 'off';
+  /** Left-handed layouts (00 §9): departments that support it mirror their thumb zone. */
+  leftHanded: boolean;
+  /** Upgrade sheet buy amount: 0 = x1, 1 = x10, 2 = MAX (02 §15, now suite-wide). */
+  buyMode: 0 | 1 | 2;
+  /** Per-department settings (DeptDef.settings), keyed by department then setting key. Values
+   * missing here read as the setting's default (core/settings.ts). */
+  depts: Partial<Record<DeptId, Record<string, unknown>>>;
 }
 
 export interface LegendRecord {
@@ -95,7 +102,7 @@ export function newSave(now: number): SaveRoot {
       commendations: {},
       trophies: [],
       seen: {},
-      settings: { notation: 'suffix', haptics: true, sfx: 0.6, chatter: 'full' },
+      settings: { notation: 'suffix', haptics: true, sfx: 0.6, chatter: 'full', leftHanded: false, buyMode: 0, depts: {} },
       steward: {},
       managerClock: { lastLineAt: 0, lastAmbientAt: 0, lastThroneCameoDay: '' },
     },

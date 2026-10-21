@@ -198,11 +198,11 @@ export class MinesScene implements DeptScene {
     this.groups = buildGroups(ctx, {
       onDig: () => this.onDig(),
       onDrum: () => this.onDrumBought(),
-      onCalibrate: () => (this.calibPending = true),
       onBuy: (id) => this.onBuy(id),
     });
     this.wall = new Wall(ctx.save, {
       earn: (b) => ctx.earn(b),
+      steady: () => this.opt('steady'),
       raiseSkill: (l) => ctx.raiseSkill(l),
       rnd: rand,
       forceKind: () => this.forceKind(),
@@ -268,6 +268,23 @@ export class MinesScene implements DeptScene {
       t.hp = t.maxHp * 0.3;
     }
     this.creditOfflineGems();
+    this.showGemAway();
+  }
+
+  /** Suite settings for the Mines (index.ts `settings`): hold-to-auto-hit, Steady Drum. */
+  private opt(key: 'holdAuto' | 'steady'): boolean {
+    return !!this.ctx.setting<boolean>(key);
+  }
+
+  /** Touch-to-beat latency in seconds (Settings -> Goblin Mines -> Calibrate). */
+  private latency(): number {
+    const v = this.ctx.setting<number>('latency');
+    return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(M.LATENCY_MAX, v)) : M.BEAT_LATENCY;
+  }
+
+  /** Settings -> Goblin Mines -> Calibrate: runs once any sheet is closed. */
+  onSettingAction(key: string): void {
+    if (key === 'calibrate' && this.per.drum) this.calibPending = true;
   }
 
   // ---------- layout ----------
@@ -712,7 +729,7 @@ export class MinesScene implements DeptScene {
     let beat = null;
     if (this.drumActive() && !auto) {
       const p = this.wall.period;
-      const tb = this.beatNow() - this.per.latency;
+      const tb = this.beatNow() - this.latency();
       const k = Math.round(tb / p);
       beat = { k, inWindow: Math.abs(tb - k * p) <= this.wall.window };
     }
@@ -933,8 +950,10 @@ export class MinesScene implements DeptScene {
     b.maxDepth = Math.max(b.maxDepth ?? 1, this.run.maxDepth);
   }
 
-  /** Offline Gems (02 §3: gemRate = rocksPerSec x gemChance), credited on entry for the time
-   * since the wall was last on screen, at the suite's offline factor and cap. */
+  /** Offline Gems (02 §3: gemRate = rocksPerSec x gemChance) for the time since the wall was last
+   * on screen, at the suite's offline factor and cap. App-closed time is credited by the core's
+   * offline hook (index.ts onOffline, which moves gemAt); this covers time spent in other
+   * departments with the app open. */
   private creditOfflineGems(): void {
     const p = this.per;
     const now = Date.now();
@@ -947,12 +966,20 @@ export class MinesScene implements DeptScene {
       if (whole > 0) {
         p.gems += whole;
         p.gemsEver += whole;
-        const c = this.ctx.content();
-        this.ctx.float(`+${whole}{gem} WHILE AWAY`, c.x + c.w / 2, this.wallY - 10, '#d090ff');
+        p.gemAway = (p.gemAway || 0) + whole;
         this.ctx.saveSoon();
       }
     }
     p.gemAt = now;
+  }
+
+  /** Floats the Gems credited while away (entry, or a return with the wall open). */
+  private showGemAway(): void {
+    const n = Math.floor(this.per.gemAway || 0);
+    if (n <= 0) return;
+    this.per.gemAway = 0;
+    const c = this.ctx.content();
+    this.ctx.float(`+${n}{gem} WHILE AWAY`, c.x + c.w / 2, this.wallY - 10, '#d090ff');
   }
 
   // ---------- frame ----------
@@ -1008,7 +1035,7 @@ export class MinesScene implements DeptScene {
 
   /** Hold to auto-hit (02 §10): a finger resting on one rock hits it 4x a second, off-beat. */
   private stepHolds(dt: number): void {
-    if (!this.per.holdAuto || this.calib || !this.pointers.size) return;
+    if (!this.opt('holdAuto') || this.calib || !this.pointers.size) return;
     for (const ptr of this.pointers.values()) {
       if (ptr.tile < 0) continue;
       ptr.hold += dt;
@@ -1215,7 +1242,7 @@ export class MinesScene implements DeptScene {
     }
     // Steady Drum: a screen-edge pulse on every beat (02 §6E accessibility).
     const e = this.edgeG.clear();
-    if (active && this.per.steady && onBeat) {
+    if (active && this.opt('steady') && onBeat) {
       const L = this.ctx.layout;
       const c = this.ctx.content();
       e.rect(0, c.y, 2, c.h).rect(L.w - 2, c.y, 2, c.h).fill({ color: 0xffe060, alpha: 0.8 });
@@ -1336,6 +1363,7 @@ export class MinesScene implements DeptScene {
     if (!this.per.drum && this.per.gems >= M.DRUM_GEMS && maxDepthEver(this.ctx) >= M.DRUM_DEPTH) {
       this.ctx.say('drumReady', { type: 'mechanic_unlocked', key: 'drumReady' });
     }
+    this.showGemAway();
     // Calibration waits for the upgrade sheet to close.
     if (this.calibPending && this.ctx.game.modalLayer.children.length === 0 && !this.ritual) {
       this.calibPending = false;
@@ -1504,10 +1532,11 @@ export class MinesScene implements DeptScene {
     if (!c || !ok || c.offsets.length < 4) return;
     const s = [...c.offsets].sort((a, b) => a - b);
     const med = s[Math.floor(s.length / 2)];
-    this.per.latency = Math.max(0, Math.min(M.LATENCY_MAX, med));
-    this.per.calibrated = true;
+    const lat = Math.max(0, Math.min(M.LATENCY_MAX, med));
+    this.ctx.setSetting('latency', lat);
+    this.ctx.setSetting('calibrated', true);
     const cc = this.ctx.content();
-    this.ctx.float(`LATENCY ${Math.round(this.per.latency * 1000)}MS`, cc.x + cc.w / 2, this.wallY + 20, '#ffe060');
+    this.ctx.float(`LATENCY ${Math.round(lat * 1000)}MS`, cc.x + cc.w / 2, this.wallY + 20, '#ffe060');
     this.ctx.saveSoon();
   }
 

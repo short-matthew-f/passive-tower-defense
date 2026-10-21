@@ -471,7 +471,8 @@ export class SpireScene implements DeptScene {
 
   /** A manager line plus the in-scene sprite's matching expression (04 §18). */
   private say(key: string, opts: SayOpts, mood?: SorcMood, t = 3): void {
-    this.ctx.say(key, opts);
+    // The strip portrait wears the same expression (ManagerDef.expressions, sorcerer.ts).
+    this.ctx.say(key, mood && mood !== 'calm' ? { ...opts, expression: mood } : opts);
     if (mood) this.mood(mood, t);
   }
 
@@ -1277,6 +1278,17 @@ export class SpireScene implements DeptScene {
   /** 04 §18: a cascade (a merge in the last 1.5 s), the brim filling, or the 0.6 s after a drop. */
   isIntense(): boolean {
     return this.core.intense;
+  }
+
+  /** The dropper rail and the next-orb queue: toasts and the intro line keep off them. */
+  avoidRects(): Rect[] {
+    const W = this.core.flask.w;
+    const left = this.cx - W / 2;
+    const railY = this.mouthY - DROP_ZONE;
+    const out: Rect[] = [{ x: left - 4, y: railY - 4, w: W + 8, h: DROP_ZONE + 6 }];
+    const q = this.targetRect('queue');
+    if (q) out.push(q);
+    return out;
   }
 
   /** Beat targets (logical px). 'aim' spans the dropper and the flask column, so a beat that

@@ -1780,6 +1780,16 @@ export class BridgeScene implements DeptScene {
     );
   }
 
+  /** The Poster board and the wallet stack: toasts and the intro line keep off them. */
+  avoidRects(): Rect[] {
+    const out: Rect[] = [];
+    const poster = this.targetRect('poster');
+    if (poster) out.push({ x: poster.x - 4, y: poster.y - 4, w: poster.w + 8, h: poster.h + 8 });
+    const stack = this.targetRect('stack');
+    if (stack) out.push(stack);
+    return out;
+  }
+
   targetRect(id: string): Rect | null {
     const c = this.cur;
     const btn = (b: Container, w: number, h: number): Rect => ({ x: b.x, y: b.y, w, h });

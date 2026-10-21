@@ -1,6 +1,7 @@
 // The Game: owns the save, the clock, offline accounting, Tribute, Infamy/Falls and scene switching.
 import { Application, Container } from 'pixi.js';
-import type { DeptCtx, DeptDef, DeptScene, SayOpts, UpgradeGroup } from './dept';
+import type { DeptCtx, DeptDef, DeptScene, SayOpts, UpgradeGroup, VoiceSource } from './dept';
+import { deptSetting, migrateDeptSettings, setDeptSetting } from './settings';
 import {
   coreMult,
   commendationReward,
@@ -94,7 +95,9 @@ export class Game {
     this.floatLayer = new FloatLayer();
     this.manager = new ManagerDirector(this);
     this.managerLayer.addChild(this.manager);
-    app.stage.addChild(this.sceneLayer, this.hudLayer, this.floatLayer, this.managerLayer, this.modalLayer);
+    // The manager's guidance overlay (highlight, ghost finger, caption) sits above the modal layer so
+    // a beat can point inside the open upgrade sheet.
+    app.stage.addChild(this.sceneLayer, this.hudLayer, this.floatLayer, this.managerLayer, this.modalLayer, this.manager.guide);
     app.stage.eventMode = 'static';
     // DOM capture: sees every touch, even ones a Pixi button stops (the manager strip is
     // pass-through and collapses when touched; 00 §5.4.5).
@@ -124,6 +127,7 @@ export class Game {
     this.readOnly = !hasLock;
     const now = Date.now();
     this.save = (await loadSave()) ?? newSave(now);
+    this.migrateSettings();
     if (!this.save.depts.cauldron && this.defs.cauldron) this.unlock('cauldron', now);
     const elapsed = this.clampElapsed(now);
     this.save.lastSeen = now;
@@ -135,6 +139,15 @@ export class Game {
     document.addEventListener('visibilitychange', () => this.onVisibility());
     window.addEventListener('pagehide', () => this.persistSync());
     if (this.readOnly) this.showReadOnly();
+  }
+
+  /** Per-department settings that older saves kept in `persistent` (DeptSettingDef.legacy). */
+  private migrateSettings(): void {
+    try {
+      migrateDeptSettings(this.save, this.defs);
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   // ---------- clock and offline ----------
@@ -178,6 +191,14 @@ export class Game {
       const rate = def.idleRate(d) * coreMult(s, id, this.defs, now);
       const amount = rate * factor * t;
       this.credit(d, amount, econGateMult(s, id));
+      // Department offline extras (Mines Gems ...): gentle, a throwing hook skips only itself.
+      if (def.onOffline) {
+        try {
+          def.onOffline(d, t, factor, { now, capSeconds: cap });
+        } catch (err) {
+          console.error(err);
+        }
+      }
       tribute += tributeRate(s, id, this.defs, false) * factor * Math.min(elapsed, tributeCapSeconds(s));
       // Return ritual (00 §5.3): the haul waits for the first entry after this absence.
       if (elapsed >= 60 && amount > 0) d.haul = (d.haul ?? 0) + amount;
@@ -198,6 +219,9 @@ export class Game {
     for (const [g, amt] of Object.entries(goods)) addGoods(s, g as GoodId, amt);
     if (elapsed >= 60) {
       showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute, goods }, () => maybeExportNag(this));
+      // The first manager with a report line speaks it in their own voice.
+      const first = lines.find((l) => l.flavor);
+      if (first?.flavor) this.voice(first.def, first.flavor, 'report', 'report');
     }
     this.checkProgress(now);
   }
@@ -469,6 +493,9 @@ export class Game {
     this.ctx = ctx;
     this.hud = new DeptHud(this, def, d);
     this.hudLayer.addChild(this.hud);
+    // The director knows the department before the scene is built, so a lesson fired from the
+    // scene's constructor is queued, not dropped.
+    this.manager.begin(def, d);
     const scene = def.createScene(ctx);
     this.scene = scene;
     this.sceneLayer.addChild(scene.root);
@@ -495,6 +522,19 @@ export class Game {
       this.managerSay(id, 'goodsLink', { type: 'goods_link', key: `line.${opened.key}`, vars: { good: GOODS[opened.good].name.toUpperCase() } });
     }
     this.startRitual(id, scene);
+  }
+
+  /** A DeptSettingDef action from Settings: open the department (if needed) and hand it over. */
+  runSettingAction(id: DeptId, key: string): void {
+    if (!this.defs[id] || !this.save.depts[id]) return;
+    if (this.current !== id) this.enter(id);
+    const scene = this.scene;
+    if (!scene || scene instanceof ThroneScene) return;
+    try {
+      scene.onSettingAction?.(key);
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   /** Return ritual (00 §5.3): once, on the first entry after an absence, if the scene has one and
@@ -567,7 +607,7 @@ export class Game {
         d.run.bank -= amount;
         if (!d.seen.firstUpgrade) {
           d.seen.firstUpgrade = 1;
-          game.managerSay(def.id, 'firstUpgrade', { type: 'first_upgrade' });
+          game.managerSay(def.id, 'firstUpgrade', { type: 'first_upgrade' }); // skipped via coreSkip
         }
         if (amount > d.run.bank * 0.1) game.saveSoon();
         return true;
@@ -576,7 +616,7 @@ export class Game {
         if (level > d.cycle.heldLevel) d.cycle.heldLevel = level;
       },
       say(trigger, opts) {
-        game.managerSay(def.id, trigger, opts);
+        game.managerSay(def.id, trigger, opts, 'dept');
       },
       lesson(id, beats) {
         return game.current === def.id && game.manager.lesson(def, d, id, beats);
@@ -599,29 +639,66 @@ export class Game {
       openUpgrades(groups: UpgradeGroup[]) {
         game.openSheet(def, groups);
       },
+      setting<T = unknown>(key: string): T {
+        return deptSetting<T>(game.save, def, key);
+      },
+      setSetting(key: string, value: unknown) {
+        setDeptSetting(game.save, def.id, key, value);
+        game.saveSoon();
+      },
+      leftHanded() {
+        return !!game.save.meta.settings.leftHanded;
+      },
     };
   }
 
   openSheet(def: DeptDef, groups: UpgradeGroup[]): void {
     const d = this.save.depts[def.id];
     const goods = goodsGroup(this, def.id);
-    this.openCustomSheet('UPGRADES', () => ({
-      text: `${formatNum(d?.run.bank ?? 0, this.save.meta.settings.notation)} ${def.currency}`,
-      color: def.currencyColor,
-    }), goods ? [...groups, goods] : groups);
+    this.openCustomSheet(
+      'UPGRADES',
+      () => ({
+        text: `${formatNum(d?.run.bank ?? 0, this.save.meta.settings.notation)} ${def.currency}`,
+        color: def.currencyColor,
+      }),
+      goods ? [...groups, goods] : groups,
+      () => this.save.depts[def.id]?.run.bank ?? 0,
+    );
   }
 
-  openCustomSheet(title: string, bank: () => { text: string; color: string }, groups: UpgradeGroup[]): void {
+  /** `wallet`: the funds bank-priced rows spend (x10 / MAX affordability); omit for none. */
+  openCustomSheet(title: string, bank: () => { text: string; color: string }, groups: UpgradeGroup[], wallet?: () => number): void {
     this.modalLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
-    const sheet = new UpgradeSheet(this, title, bank, groups, () => sheet.destroy({ children: true }));
+    const sheet = new UpgradeSheet(this, title, bank, groups, () => sheet.destroy({ children: true }), wallet);
     this.modalLayer.addChild(sheet);
+  }
+
+  /** The open upgrade sheet, if any (onboarding highlights inside it). */
+  get sheet(): UpgradeSheet | null {
+    for (const c of this.modalLayer.children) if (c instanceof UpgradeSheet && !c.destroyed) return c;
+    return null;
+  }
+
+  /** Plays a manager's voice blips for a line (ManagerDef.voice). Never throws. */
+  voice(def: DeptDef, text: string | null, key: string, source: VoiceSource): void {
+    const st = this.save.meta.settings;
+    const vol = st.sfx ?? 0.6;
+    if (!text || !def.manager.voice || !(vol > 0)) return;
+    if ((source === 'report' || source === 'fall') && st.chatter === 'off') return;
+    try {
+      def.manager.voice(text, { key, source, vol, game: this });
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   /** Routes a manager line to the director. Off screen, a high-priority typed line (legend_arrives,
    * infamy_100, mechanic_unlocked) is kept for the next Gobbo report instead (00 §5.4.7). */
-  managerSay(id: DeptId, trigger: string, opts?: SayOpts): void {
+  managerSay(id: DeptId, trigger: string, opts?: SayOpts, source: VoiceSource = 'core'): void {
     const def = this.defs[id];
     if (!def) return;
+    // A department may handle a core-fired line itself (ManagerDef.coreSkip).
+    if (source === 'core' && def.manager.coreSkip?.includes(trigger)) return;
     if (this.current !== id) {
       const d = this.save.depts[id];
       const cls = classify(trigger, opts);
@@ -631,7 +708,7 @@ export class Game {
       }
       return;
     }
-    this.manager.say(def, trigger, opts);
+    this.manager.say(def, trigger, opts, source);
   }
 
   haptic(ms = 10): void {
@@ -652,6 +729,7 @@ export class Game {
     // iOS: suggest Add to Home Screen once, before the first Fall (00 §9).
     if (maybeShowA2hs(this, () => this.startFall(id))) return;
     showFallCard(this, def, d, inf, (crush) => this.completeFall(id, inf, crush));
+    this.voice(def, pickLine(def, 'fall'), 'fall', 'fall');
   }
 
   private completeFall(id: DeptId, inf: number, crush: number): void {
@@ -665,6 +743,8 @@ export class Game {
     d.lifetime.falls += 1;
     d.run = def.defaultRun() as DeptSave['run'];
     d.cycle = { n: d.cycle.n + 1, startedAt: Date.now(), earnings: 0, heldLevel: 0, legendWaiting: false };
+    // A ritual bonus earned on the old cycle's haul must not land in the new cycle's economy gate.
+    delete d.haul;
     this.applyCyclePerks(id);
     void requestPersistence();
     this.persistSync();
@@ -688,6 +768,7 @@ export class Game {
 
   replaceSave(s: SaveRoot): void {
     this.save = s;
+    this.migrateSettings();
     this.save.lastSeen = Date.now();
     this.persistSync();
     this.goThrone();

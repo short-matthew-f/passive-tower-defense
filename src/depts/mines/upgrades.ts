@@ -1,7 +1,7 @@
 // The Mines' upgrade tree (02 §6) as shared-sheet groups: Fist, Crew, Shaft, Drum, Gems.
-// Nugget nodes honour the Buy x1 / x10 / MAX mode (02 §15); a mode row tops every tab. The Drum
-// and Fist tabs also carry the player's options (drum on/off, tempo, Steady Drum, latency
-// calibration, hold-to-auto-hit), since the shared Settings screen has no department slot.
+// Nugget nodes give the sheet exact bulk prices (costFor / buyMany / descFor) for its native
+// Buy x1 / x10 / MAX mode (02 §15). The Drum tab keeps the drum's own switches (on/off, tempo);
+// hold-to-auto-hit, Steady Drum and latency calibration live in Settings -> Goblin Mines.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
 import { formatNum } from '../../core/format';
@@ -32,16 +32,15 @@ export interface NugNode {
   single?: boolean;
 }
 
-export const BUY_MODES = ['X1', 'X10', 'MAX'];
-
 export interface BuildOpts {
-  /** Always buy one level (the balance sim and the Steward). */
+  /** Headless use (the balance sim and the Steward): hides option rows. */
   single?: boolean;
 }
 
 export interface Hooks {
   onDig(): void;
   onDrum(): void;
+  /** Unused since calibration moved to Settings (kept for callers). */
   onCalibrate?(): void;
   onBuy?(id: string): void;
 }
@@ -53,66 +52,49 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
   const bones = () => ctx.save.imports?.bones ?? 0;
   M.normalize(ctx.save.run, ctx.save.persistent);
 
-  /** How many levels a buy takes under the current mode, and their total price. */
-  const plan = (n: NugNode): { n: number; cost: number } => {
+  /** Total price of the next k levels (clamped to the node's max). */
+  const priceFor = (n: NugNode, k: number): number => {
     const left = n.max - n.level();
-    if (left <= 0) return { n: 0, cost: n.next(0) };
-    const mode = opts.single || n.single ? 0 : p().buyMode;
-    if (mode === 0) return { n: 1, cost: n.next(0) };
-    if (mode === 1) {
-      const k = Math.min(10, left);
-      let c = 0;
-      for (let i = 0; i < k; i++) c += n.next(i);
-      return { n: k, cost: c };
-    }
-    // MAX: as many as the bank covers (at least one, to show the next price).
-    const bank = r().bank;
-    let c = n.next(0);
-    let k = 1;
-    while (k < left && k < 1000) {
-      const nc = c + n.next(k);
-      if (nc > bank + 1e-9) break;
-      c = nc;
-      k++;
-    }
-    return { n: k, cost: c };
+    let c = 0;
+    for (let i = 0; i < Math.min(k, left, 1000); i++) c += n.next(i);
+    return c;
   };
 
-  const nug = (n: NugNode): UpgradeEntry => ({
+  /** Buys up to k levels one by one through ctx.spend (first-upgrade line, saves). */
+  const buyUpTo = (n: NugNode, k: number): number => {
+    let got = 0;
+    for (let i = 0; i < k && n.level() < n.max && !n.locked?.(); i++) {
+      if (!ctx.spend(n.next(0))) break;
+      n.apply();
+      got++;
+    }
+    if (got > 0) hooks.onBuy?.(n.id);
+    return got;
+  };
+
+  const N = (n: NugNode): UpgradeEntry => ({
     id: n.id,
     name: n.name,
     max: n.max,
     level: n.level,
     visible: n.visible,
     locked: n.locked,
-    cost: () => plan(n).cost,
-    desc: () => n.desc(Math.max(1, plan(n).n)),
-    canAfford: () => n.level() < n.max && !n.locked?.() && ctx.save.run.bank + 1e-9 >= plan(n).cost,
-    buy: () => {
-      if (n.level() >= n.max || n.locked?.()) return;
-      const { n: k, cost } = plan(n);
-      if (ctx.save.run.bank + 1e-9 < cost) return;
-      for (let i = 0; i < k && n.level() < n.max; i++) {
-        if (!ctx.spend(n.next(0))) break;
-        n.apply();
-      }
-      hooks.onBuy?.(n.id);
-    },
+    cost: () => n.next(0),
+    desc: () => n.desc(1),
+    descFor: (k) => n.desc(Math.max(1, k)),
+    canAfford: () => n.level() < n.max && !n.locked?.() && ctx.save.run.bank + 1e-9 >= n.next(0),
+    buy: () => void buyUpTo(n, 1),
+    // Native sheet bulk buying (x10 / MAX), except one-at-a-time nodes.
+    bulk: !n.single,
+    costFor: (k) => priceFor(n, k),
+    buyMany: (k) => buyUpTo(n, k),
   });
-  // The label getter must re-read the mode each frame: wrap it in a property.
-  const live = (e: UpgradeEntry, n: NugNode): UpgradeEntry => {
-    Object.defineProperty(e, 'buyLabel', {
-      get: () => (opts.single || n.single || p().buyMode === 0 ? undefined : `+${Math.max(1, plan(n).n)}`),
-      enumerable: true,
-    });
-    return e;
-  };
-  const N = (n: NugNode) => live(nug(n), n);
 
   /** A Gem-priced node (persistent; always one level). */
   const gem = (e: { id: string; name: string; max: number; level(): number; cost(): number; desc(): string; apply(): void; locked?(): string | null; visible?(): boolean }): UpgradeEntry => ({
     ...e,
     currency: 'Gems',
+    bulk: false, // one Gem node at a time
     canAfford: () => p().gems + 1e-9 >= e.cost() && e.level() < e.max && !e.locked?.(),
     buy: () => {
       if (e.level() >= e.max || e.locked?.()) return;
@@ -157,18 +139,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
     visible,
   });
 
-  const modeRow = (tab: string): UpgradeEntry =>
-    option(
-      `buymode.${tab}`,
-      'Buy amount',
-      () => 'CYCLE X1 / X10 / MAX',
-      () => BUY_MODES[p().buyMode] ?? 'X1',
-      () => (p().buyMode = (p().buyMode + 1) % BUY_MODES.length),
-      () => !opts.single,
-    );
-
   const fist: UpgradeEntry[] = [
-    modeRow('fist'),
     N({
       id: 'tap',
       name: 'Tap Damage',
@@ -219,15 +190,6 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
       desc: (n) => `SPLASH ${pct(M.knucklesSplash(r().knuckles))} -> ${pct(M.knucklesSplash(r().knuckles + n))} SHARED`,
       apply: () => r().knuckles++,
     }),
-    header('opt.fist', 'Options', () => !opts.single),
-    option(
-      'holdAuto',
-      'Hold to auto-hit',
-      () => 'HOLD A ROCK: 4 HITS/S',
-      () => (p().holdAuto ? 'ON' : 'OFF'),
-      () => (p().holdAuto = !p().holdAuto),
-      () => !opts.single,
-    ),
   ];
 
   const hireNode = (id: string, name: string, kind: 'grunts' | 'sappers' | 'shockers' | 'prospectors', mult: number, depth: number, what: string): UpgradeEntry =>
@@ -244,7 +206,6 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
     });
 
   const crew: UpgradeEntry[] = [
-    modeRow('crew'),
     N({
       id: 'hire',
       name: 'Hire Grunt',
@@ -278,7 +239,6 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
   ];
 
   const shaft: UpgradeEntry[] = [
-    modeRow('shaft'),
     N({
       id: 'dig',
       name: 'Dig Deeper',
@@ -356,7 +316,6 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
       () => (p().drumOn = !p().drumOn),
       () => drumOwned() && !opts.single,
     ),
-    { ...modeRow('drum'), visible: () => drumOwned() && !opts.single },
     N({
       id: 'drumhead',
       name: 'Drumhead',
@@ -479,22 +438,6 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks, opts: BuildOpts = {}): U
         p().tempo = opts2[(i + 1) % opts2.length];
       },
       () => drumOwned() && p().tempoL > 0 && !opts.single,
-    ),
-    option(
-      'steady',
-      'Steady Drum',
-      () => 'WINDOW X2, EDGE PULSE',
-      () => (p().steady ? 'ON' : 'OFF'),
-      () => (p().steady = !p().steady),
-      () => drumOwned() && !opts.single,
-    ),
-    option(
-      'calibrate',
-      'Calibrate',
-      () => `TAP WITH THE BOOM X8 (${Math.round(p().latency * 1000)}MS)`,
-      () => 'START',
-      () => hooks.onCalibrate?.(),
-      () => drumOwned() && !opts.single,
     ),
   ];
 

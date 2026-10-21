@@ -9,6 +9,7 @@ import { styxEcon } from './def';
 import { styxLastStand } from './laststand';
 import * as M from './model';
 import { StyxScene } from './scene';
+import { sfx } from './sfx';
 
 const run = (s: DeptSave) => s.run as M.StyxRun;
 const per = (s: DeptSave) => s.persistent as M.StyxPersistent;
@@ -20,6 +21,12 @@ const pilk: ManagerDef = {
   title: 'Ferryman',
   portrait: [PILK_IDLE, PILK_TALK],
   palette: PILK_PAL,
+  // Styx fires its own first-purchase lines (firstLine, chum), so the core's generic one is off.
+  coreSkip: ['firstUpgrade'],
+  // The scene chirps for its own typed lines; Pilk voices the core's (intro, Legend, beats ...).
+  voice: (_line, i) => {
+    if (i.source !== 'dept') sfx.pilk(i.vol, 3);
+  },
   lines: {
     // ----- core-fired -----
     intro: ['EVENING, YOUR DREADNESS...', 'FISHING TONIGHT, DREADNESS?'],
@@ -132,6 +139,8 @@ export const styx: DeptDef = {
   currencyColor: '#a8d0e0',
   doorColor: 0x2a4a6a,
   manager: pilk,
+  // Head Start grants Wrath levels without the first purchase that runs the lesson.
+  dialLessons: { wrath: (s) => run(s)?.wrathMax ?? 0 },
   onboarding,
   lessons,
   legend: {

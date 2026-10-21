@@ -147,6 +147,10 @@ export interface QueuedLine {
   at: number; // ms epoch when queued
   /** A struggle offer: the ✓ chip runs it. */
   offer?: () => void;
+  /** Who fired it ('core' | 'dept' ...), for ManagerDef.voice. */
+  source?: string;
+  /** A ManagerDef.expressions name shown while it is up. */
+  expression?: string;
 }
 
 export const PRIORITY_RANK: Record<Priority, number> = { guided: 4, high: 3, medium: 2, low: 1, ambient: 0 };

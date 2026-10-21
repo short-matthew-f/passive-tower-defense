@@ -46,6 +46,37 @@ import {
   type GoodId,
 } from '../src/core/goods';
 import { BANNER, bannerId, DREAD_PERKS, RUINBORN, ruinbornId, SEAL_COST, SEAL_DREAD, THRONE_UPGRADES } from '../src/core/meta';
+import {
+  activeEdict,
+  CARAVAN_ID,
+  DARK_TITHE,
+  EDICT_BOARD_ID,
+  econGateMult,
+  edictCooldown,
+  edictTributeAdd,
+  headStartId,
+  headStartLevel,
+  hasSignature,
+  LATER_PERKS,
+  legendsBane,
+  legendsBaneId,
+  ritualBonus,
+  SATCHEL_ID,
+  satchelLevel,
+  setEdict,
+  signatureId,
+  stewardOn,
+  stewardShare,
+  stewardSpend,
+  SWIFT_REBUILD_ID,
+  THRONE_EXTRAS,
+  TROPHY_CAP,
+  TROPHY_HALL_ID,
+  TROPHY_STEP,
+  trophyAdd,
+  WING_PERKS,
+  type EdictId,
+} from '../src/core/perks';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from '../src/core/types';
 import { childSeed } from './rng';
 import type { ActiveSession, AdapterFactory, BotGoals, DeptAdapter, SessionEnv } from './types';
@@ -62,35 +93,45 @@ export interface SessionPlan {
 export interface Profile {
   name: string;
   day(day: number): SessionPlan[];
+  /** Return-ritual score (0-1) on the first entry after an absence (00 §5.3, perks.ritualBonus):
+   * +5% x score of the haul. 0 = skips rituals (Collect-All players). Default 0. */
+  ritualScore?: number;
+  /** Opts in Gobbo's Satchel L2-L3 and the Steward in every department (00 §5.2 m5). `reserve` is
+   * the bank fraction it never spends below (the Throne UI's default is 0.25). */
+  steward?: { satchel: 2 | 3; reserve: number };
 }
+
+const REFERENCE_DAY = (d: number): SessionPlan[] =>
+  d === 0
+    ? [
+        { at: 9, min: 45 },
+        { at: 13, min: 15 },
+        { at: 19, min: 30 },
+      ]
+    : [
+        { at: 8, min: 10 },
+        { at: 12.5, min: 10 },
+        { at: 18, min: 10 },
+        { at: 21, min: 20 },
+      ];
 
 export const PROFILES: Record<string, Profile> = {
   // Day 1: 90 min active; then ~50 min/day as 3 x 10 min + 1 x 20 min; the rest offline.
-  reference: {
-    name: 'reference',
-    day: (d) =>
-      d === 0
-        ? [
-            { at: 9, min: 45 },
-            { at: 13, min: 15 },
-            { at: 19, min: 30 },
-          ]
-        : [
-            { at: 8, min: 10 },
-            { at: 12.5, min: 10 },
-            { at: 18, min: 10 },
-            { at: 21, min: 20 },
-          ],
-  },
+  reference: { name: 'reference', day: REFERENCE_DAY, ritualScore: 0.7 },
+  // The reference schedule with Gobbo's Satchel L3 and the Steward on in every department (reserve
+  // 25%, the UI default): checks the Steward's rules (never below the reserve, never a dial,
+  // consumable or spatial item) and what it does to the pace.
+  steward: { name: 'steward', day: REFERENCE_DAY, ritualScore: 0.7, steward: { satchel: 3, reserve: 0.25 } },
   // Two Collect-All visits a day that buy what's Ready; no on-screen play after the first look.
   'idle-only': {
     name: 'idle-only',
     day: (d) => (d === 0 ? [{ at: 9, min: 5 }, { at: 20, min: 0 }] : [{ at: 8, min: 0 }, { at: 20, min: 0 }]),
   },
   // Plays one stretch of 8 h on day 1 (local-curve checks, single-department runs).
-  solo: { name: 'solo', day: (d) => (d === 0 ? [{ at: 8, min: 480 }] : [{ at: 8, min: 60 }]) },
+  solo: { name: 'solo', day: (d) => (d === 0 ? [{ at: 8, min: 480 }] : [{ at: 8, min: 60 }]), ritualScore: 0.7 },
   grinder: {
     name: 'grinder',
+    ritualScore: 0.9,
     day: () => [
       { at: 9, min: 60 },
       { at: 14, min: 60 },
@@ -127,6 +168,10 @@ export interface SimConfig {
   /** Turn the Goods system off (no accrual, no imports, no Black Market or Roads): the pre-Goods
    * baseline for before/after comparisons (`--no-goods`). */
   noGoods?: boolean;
+  /** Experiment: turn new rules off for attribution (`--off edicts,rituals,extras,wings,later`):
+   * Edicts, return rituals, the Throne extras (Trophy Hall, Edict Board, Satchel), the wing perks
+   * (Head Start, Legend's Bane, Signature) and the Later perks (Swift Rebuild, Goods Caravan). */
+  off?: string[];
 }
 
 export const DEFAULT_CONFIG: Omit<SimConfig, 'adapters'> = {
@@ -224,9 +269,38 @@ export interface GoodsTrack {
   roads: number;
 }
 
+/** The Steward (Satchel L2-L3) audit: what it bought, and any rule it broke (must stay empty). */
+export interface StewardTrack {
+  passes: number;
+  buys: number;
+  /** Local currency spent, per department. */
+  spent: Partial<Record<DeptId, number>>;
+  /** Purchases by department and candidate id. */
+  bought: Record<string, number>;
+  /** Rule breaks: spent below the reserve floor, bought a dial level, or more than the allowance. */
+  violations: string[];
+}
+
+/** New-rule bookkeeping (Edicts, rituals, wing perks), for the report. */
+export interface PerkTrack {
+  /** Edict switches by `${edict}:${target}`. */
+  edicts: Record<string, number>;
+  /** Seconds each Edict stood (sim time), by Edict id. */
+  edictSecs: Partial<Record<EdictId, number>>;
+  /** Ritual bonus credited (local currency, summed across departments; count of rituals). */
+  rituals: number;
+  /** Day each new perk / extra was first bought (id -> sim day). */
+  firstBuy: Record<string, number>;
+  /** Dread spent on the Later / wing perks vs the original Dread perks. */
+  dreadNew: number;
+  dreadOld: number;
+}
+
 export interface SimResult {
   config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean; floorGrowth: number; noGoods: boolean };
   goods: GoodsTrack;
+  steward: StewardTrack;
+  perks: PerkTrack;
   tracks: Record<string, DeptTrack>;
   snaps: DaySnap[];
   events: SimEvent[];
@@ -300,6 +374,11 @@ export function simulate(cfg: SimConfig): SimResult {
   const goodsTrack: GoodsTrack = { marketGoods: 0, marketTribute: 0, spent: {}, levelsByDay: {}, stockByDay: {}, roads: 0 };
   const activeGoods: Partial<Record<DeptId, ActiveGoodsTrack>> = {};
   const useGoods = !cfg.noGoods;
+  const stewardTrack: StewardTrack = { passes: 0, buys: 0, spent: {}, bought: {}, violations: [] };
+  const perkTrack: PerkTrack = { edicts: {}, edictSecs: {}, rituals: 0, firstBuy: {}, dreadNew: 0, dreadOld: 0 };
+  const off = new Set(cfg.off ?? []);
+  const ritualScore = off.has('rituals') ? 0 : (cfg.profile.ritualScore ?? 0);
+  let stewardAcc = 0;
 
   // Profile-derived constants for the meta buyer's value heuristics.
   const dayPlan = cfg.profile.day(1);
@@ -315,10 +394,12 @@ export function simulate(cfg: SimConfig): SimResult {
 
   const unlocked = () => built.filter((id) => s.depts[id]);
 
-  function credit(d: DeptSave, amount: number): void {
+  /** game.ts credit(): the bank gets the amount, the economy gate counts it x econGateMult
+   * (Fear Itself, +25% gate progress in the Edict's department). */
+  function credit(d: DeptSave, amount: number, id?: DeptId): void {
     if (!(amount > 0)) return;
     d.run.bank += amount;
-    d.cycle.earnings += amount;
+    d.cycle.earnings += amount * (id ? econGateMult(s, id) : 1);
   }
   function addTribute(amount: number, from?: DeptId, commend = false): void {
     if (!(amount > 0)) return;
@@ -360,6 +441,8 @@ export function simulate(cfg: SimConfig): SimResult {
     }
     return i > 0 && b > 0 ? b / i : 2.5;
   }
+  /** When each department's economy gate filled this cycle (slice picker, pass 6). */
+  const econFullAt: Partial<Record<DeptId, number>> = {};
   function checkProgress(): void {
     for (const id of built) {
       const d = s.depts[id];
@@ -368,6 +451,7 @@ export function simulate(cfg: SimConfig): SimResult {
       const tr = tracks[id];
       d.lifetime.peakRank = Math.max(d.lifetime.peakRank, rank(s, id, defs));
       const inf = infamy(def, d);
+      if (inf.econ >= 1 && econFullAt[id] === undefined) econFullAt[id] = t;
       if (d.cycle.n === 0) {
         if (inf.econ >= 1 && tr.econGateAEH === null) tr.econGateAEH = tr.aeCycleS / 3600;
         if (inf.skill >= 1 && tr.skillGateAEH === null) tr.skillGateAEH = tr.aeCycleS / 3600;
@@ -387,17 +471,23 @@ export function simulate(cfg: SimConfig): SimResult {
     }
   }
   function applyOffline(elapsed: number): void {
-    const factor = offlineFactor(s);
     const cap = offlineCapSeconds(s);
     const tt = Math.min(elapsed, cap);
     const tcap = Math.min(elapsed, tributeCapSeconds(s));
     const now = nowMs();
     for (const id of unlocked()) {
       const d = s.depts[id]!;
+      // game.ts applyOffline: per-department factor (Iron Discipline adds 0.1 in its target, <= 0.9)
+      // for local income and that department's Tribute.
+      const factor = offlineFactor(s, id);
       const rate = defs[id].idleRate(d) * coreMult(s, id, defs, now);
-      credit(d, rate * factor * tt);
+      const amount = rate * factor * tt;
+      credit(d, amount, id);
       tracks[id].aeCycleS += (factor * tt) / ratioEst(id);
       addTribute(tributeRate(s, id, defs, false) * factor * tcap, id);
+      // Return ritual: the haul waits for the first entry after this absence.
+      if (elapsed >= 60 && amount > 0) d.haul = (d.haul ?? 0) + amount;
+      if (stewardOn(s, id)) stewardPass(id, stewardShare(s) * amount);
     }
     if (useGoods) {
       // game.ts applyOffline: passive Goods under the offline cap.
@@ -410,6 +500,34 @@ export function simulate(cfg: SimConfig): SimResult {
     }
     checkProgress();
   }
+  /** game.ts stewardPass (Satchel L2-L3): adds `allowance` to the pool (capped at the bank) and
+   * spends what the ranking, the pool and the reserve allow, through the core's stewardSpend. The
+   * audit checks the rules the core promises: never below the reserve floor, never past the pool,
+   * never a dial level (each department's stewardCandidates must exclude dials, consumables and
+   * spatial items; a dial move during the pass is the detectable symptom). */
+  function stewardPass(id: DeptId, allowance: number): void {
+    const d = s.depts[id];
+    const def = defs[id];
+    if (!d || !def?.stewardCandidates) return;
+    const st = (s.meta.steward[id] ??= { on: true, reserve: 0, pool: 0 });
+    st.pool = Math.min(d.run.bank, (st.pool || 0) + Math.max(0, allowance));
+    const floor = Math.max(0, Math.min(0.9, st.reserve || 0)) * d.run.bank;
+    const pool0 = st.pool;
+    const dial0 = byId[id]!.dialLevel(d);
+    const r = stewardSpend(d, () => def.stewardCandidates!(d), st.pool, floor);
+    st.pool = Math.max(0, st.pool - r.spent);
+    stewardTrack.passes++;
+    if (!r.bought.length) return;
+    stewardTrack.buys += r.bought.length;
+    stewardTrack.spent[id] = (stewardTrack.spent[id] ?? 0) + r.spent;
+    for (const b of r.bought) stewardTrack.bought[`${id}:${b}`] = (stewardTrack.bought[`${id}:${b}`] ?? 0) + 1;
+    const bad = (msg: string) => stewardTrack.violations.length < 20 && stewardTrack.violations.push(`${id} t=${t}: ${msg}`);
+    if (d.run.bank < floor - 1e-6 * Math.max(1, floor)) bad(`bank ${d.run.bank} below the reserve floor ${floor}`);
+    if (r.spent > pool0 * (1 + 1e-9) + 1e-9) bad(`spent ${r.spent} past the pool ${pool0}`);
+    if (byId[id]!.dialLevel(d) !== dial0) bad(`dial moved ${dial0} -> ${byId[id]!.dialLevel(d)} (bought ${r.bought.join(', ')})`);
+    if (r.bought.some((b) => b === byId[id]!.dialId)) bad(`bought the dial (${byId[id]!.dialId})`);
+  }
+
   function snapshot(dayIdx: number): void {
     const depts: DaySnap['depts'] = {};
     for (const id of unlocked()) {
@@ -460,6 +578,19 @@ export function simulate(cfg: SimConfig): SimResult {
     }
     return den > 0 ? num / den : 0;
   }
+  /** Tribute group without the option being valued (Tithe, Dark Tithe, Trophy Hall). */
+  const tributeGroup = () => 1 + 0.15 * (s.meta.dreadPerks['empire.tithe'] ?? 0) + edictTributeAdd(s) + trophyAdd(s);
+  /** Measured Dread per day from one department so far, net of its Legend's Bane. */
+  function dreadPerDay(id: DeptId): number {
+    const tr = tracks[id];
+    if (tr.unlockedAt === null) return 0;
+    const days = Math.max(1, (t - tr.unlockedAt) / DAY);
+    return tr.dread / (1 + 0.1 * legendsBane(s, id)) / days;
+  }
+  const noteFirst = (key: string) => {
+    if (perkTrack.firstBuy[key] === undefined) perkTrack.firstBuy[key] = t / DAY;
+  };
+
   function throne(): void {
     if (cfg.noMeta) return;
     // Seals first, in unlock order.
@@ -484,12 +615,15 @@ export function simulate(cfg: SimConfig): SimResult {
     const ids = unlocked();
     const n = Math.max(1, ids.length);
     if (useGoods) buyImportsWithGoods();
-    // Tribute: Dark Banners, Curfew Bells, Treasury Vaults by value per Tribute.
+    // Tribute: Dark Banners, Curfew Bells, Treasury Vaults, Roads and the Throne extras by value per
+    // Tribute (prices rounded up like the Throne sheet). Value = share of the empire's income; Tribute
+    // boosts count half (the Tithe heuristic), since Tribute only buys these and Seals.
+    const steward = cfg.profile.steward;
     for (let guard = 0; guard < 200; guard++) {
       const opts: { key: string; cost: number; value: number; qty?: number }[] = [];
       for (const id of ids) {
         const L = s.meta.throne[bannerId(id)] ?? 0;
-        if (L < BANNER.max) opts.push({ key: bannerId(id), cost: BANNER.cost(L), value: 0.1 / (1 + 0.1 * L) / n });
+        if (L < BANNER.max) opts.push({ key: bannerId(id), cost: Math.ceil(BANNER.cost(L)), value: 0.1 / (1 + 0.1 * L) / n });
       }
       for (const u of THRONE_UPGRADES) {
         const L = s.meta.throne[u.id] ?? 0;
@@ -502,7 +636,23 @@ export function simulate(cfg: SimConfig): SimResult {
               : u.id === ROADS.id && useGoods
                 ? roadsValue(n)
                 : 0;
-        if (v > 0) opts.push({ key: u.id, cost: u.cost(L), value: v });
+        if (v > 0) opts.push({ key: u.id, cost: Math.ceil(u.cost(L)), value: v });
+      }
+      for (const u of off.has('extras') ? [] : THRONE_EXTRAS) {
+        const L = s.meta.throne[u.id] ?? 0;
+        if (L >= u.max) continue;
+        let v = 0;
+        // Trophy Hall: +1% Tribute per Legend captured (cap 25%), counting the next week's Falls.
+        if (u.id === TROPHY_HALL_ID) {
+          const fallsPerWeek = ids.reduce((a, id) => a + Math.min(7, 7 / Math.max(1.5, cycleDaysEst(id))), 0);
+          v = (0.5 * Math.min(TROPHY_CAP, TROPHY_STEP * (s.meta.trophies.length + fallsPerWeek))) / tributeGroup();
+        }
+        // Edict Board: worth at least a standing Dark Tithe (+25% Tribute).
+        else if (u.id === EDICT_BOARD_ID) v = (0.5 * DARK_TITHE) / tributeGroup();
+        // Gobbo's Satchel: quality of life only for the reference player; the steward profile buys
+        // it up to its Steward level ahead of everything but the Seal reserve.
+        else if (u.id === SATCHEL_ID && steward && L < steward.satchel) v = 1e3;
+        if (v > 0) opts.push({ key: u.id, cost: Math.ceil(u.cost(L)), value: v });
       }
       if (useGoods) {
         const m = marketOption(n);
@@ -525,31 +675,135 @@ export function simulate(cfg: SimConfig): SimResult {
       s.meta.tribute -= pick.cost;
       s.meta.throne[pick.key] = (s.meta.throne[pick.key] ?? 0) + 1;
       if (pick.key === ROADS.id) goodsTrack.roads++;
+      if (THRONE_EXTRAS.some((u) => u.id === pick.key)) {
+        noteFirst(`${pick.key}${s.meta.throne[pick.key]}`);
+        log('extra', `${pick.key} L${s.meta.throne[pick.key]} (${pick.cost} Tribute)`);
+      }
     }
-    // Dread perks by value per Dread.
+    // Steward opt-in (steward profile): every unlocked department, at the profile's reserve.
+    if (steward && satchelLevel(s) >= 2) {
+      for (const id of ids) {
+        const st = (s.meta.steward[id] ??= { on: false, reserve: steward.reserve, pool: 0 });
+        if (!st.on) {
+          st.on = true;
+          st.reserve = steward.reserve;
+        }
+      }
+    }
+    if (!off.has('edicts')) edicts();
+    // Dread: the original perks, the Later perks (Swift Rebuild, Goods Caravan) and the wing perks
+    // (Head Start, Legend's Bane, Signature) by value per Dread, prices rounded up like the Altar.
     for (let guard = 0; guard < 200; guard++) {
-      const opts: { key: string; cost: number; value: number }[] = [];
+      const opts: { key: string; cost: number; value: number; isNew: boolean; dept?: DeptId }[] = [];
       const perk = (k: string) => s.meta.dreadPerks[k] ?? 0;
       const dg = (id: DeptId) => 1 + 0.1 * perk('empire.ironFist') + 0.25 * perk(ruinbornId(id));
+      const push = (key: string, cost: (l: number) => number, value: number, isNew: boolean, dept?: DeptId) => {
+        if (value > 0) opts.push({ key, cost: Math.ceil(cost(perk(key))), value, isNew, dept });
+      };
       for (const u of DREAD_PERKS) {
         const L = perk(u.id);
         if (L >= u.max) continue;
         let v = 0;
         if (u.id === 'empire.ironFist') v = ids.reduce((a, id) => a + 0.1 / dg(id), 0) / n;
-        else if (u.id === 'empire.tithe') v = (0.5 * 0.15) / (1 + 0.15 * L);
+        else if (u.id === 'empire.tithe') v = (0.5 * 0.15) / tributeGroup();
         else if (u.id === 'empire.longReach') v = offlineShareGain(offlineCapSeconds(s), 3600);
         else if (u.id === 'empire.idleHands') v = offlineFactor(s) < 0.9 ? (0.05 / offlineFactor(s)) * 0.6 : 0;
-        if (v > 0) opts.push({ key: u.id, cost: u.cost(L), value: v });
+        push(u.id, u.cost, v, false);
+      }
+      for (const u of off.has('later') ? [] : LATER_PERKS) {
+        if (perk(u.id) >= u.max) continue;
+        // Swift Rebuild: 15 more Rush minutes at x3 per Fall, i.e. ~1,800 s of income per cycle,
+        // weighed at half (income is lowest right after a Fall).
+        if (u.id === SWIFT_REBUILD_ID) push(u.id, u.cost, ids.reduce((a, id) => a + (0.5 * 1800) / (cycleDaysEst(id) * DAY), 0) / n, true);
+        // Goods Caravan: the same +10% trickle as an Imperial Roads level.
+        else if (u.id === CARAVAN_ID && useGoods) push(u.id, u.cost, roadsValue(n), true);
       }
       for (const id of ids) {
         const L = perk(ruinbornId(id));
-        if (L < RUINBORN.max) opts.push({ key: ruinbornId(id), cost: RUINBORN.cost(L), value: 0.25 / dg(id) / n });
+        if (L < RUINBORN.max) push(ruinbornId(id), RUINBORN.cost, 0.25 / dg(id) / n, false);
+        // Head Start: the first 2L dial levels and 1 + L helpers each cycle. Valued as a fading
+        // share of the department's income (the rebuild ramp it skips): +10% x 0.6^L.
+        if (off.has('wings')) continue;
+        if (defs[id].applyHeadStart && perk(headStartId(id)) < WING_PERKS.headStart.max)
+          push(headStartId(id), WING_PERKS.headStart.cost, (0.1 * 0.6 ** perk(headStartId(id))) / dg(id) / n, true, id);
+        // Signature: a one-time perk, valued like +15% local income.
+        if (defs[id].signature && perk(signatureId(id)) < 1) push(signatureId(id), WING_PERKS.signature.cost, 0.15 / dg(id) / n, true, id);
+      }
+      // Legend's Bane pays in Dread: bought when its extra Dread over a week buys more than its
+      // price would now (value = the best current value per Dread x a week of extra Dread).
+      const lambda = opts.reduce((a, o) => Math.max(a, o.value / o.cost), 0);
+      for (const id of off.has('wings') ? [] : ids) {
+        if (perk(legendsBaneId(id)) >= WING_PERKS.legendsBane.max) continue;
+        push(legendsBaneId(id), WING_PERKS.legendsBane.cost, lambda * 0.1 * dreadPerDay(id) * 7, true, id);
       }
       opts.sort((a, b) => b.value / b.cost - a.value / a.cost);
       const pick = opts[0];
       if (!pick || s.meta.dread + 1e-9 < pick.cost) break;
       s.meta.dread -= pick.cost;
       s.meta.dreadPerks[pick.key] = perk(pick.key) + 1;
+      if (pick.isNew) {
+        perkTrack.dreadNew += pick.cost;
+        noteFirst(pick.key);
+        log('perk', `${pick.key} L${s.meta.dreadPerks[pick.key]} (${pick.cost} Dread)`, pick.dept);
+      } else perkTrack.dreadOld += pick.cost;
+      // The Altar applies a Signature at once (throne.ts onBuy); it re-applies at every cycle start.
+      if (pick.key.endsWith('.signature') && pick.dept) {
+        const d = s.depts[pick.dept];
+        if (d) defs[pick.dept].signature?.apply(d);
+      }
+    }
+  }
+
+  /** Average wall-clock days per completed cycle so far (2 before the first Fall). */
+  function cycleDaysEst(id: DeptId): number {
+    const f = tracks[id].falls;
+    if (f.length < 2) return 2;
+    const later = f.slice(1);
+    return later.reduce((a, x) => a + x.cycleWallH, 0) / later.length / 24;
+  }
+
+  /**
+   * The reference player's Edict (Edict Board): one standing Edict, switched at most hourly
+   * (perks.setEdict enforces the cooldown).
+   *  1. Dark Tithe while the next Seal's Dread is met but its Tribute is short.
+   *  2. Otherwise Fear Itself where a department's economy gate is what holds its Legend (skill gate
+   *     at least as full as the economy gate), the most lagging one.
+   *  3. Otherwise Iron Discipline on the department whose cycle has run longest.
+   */
+  function edicts(): void {
+    if (!(s.meta.throne[EDICT_BOARD_ID] ?? 0)) return;
+    const now = nowMs();
+    const cur = activeEdict(s);
+    if (edictCooldown(s, now) > 0) return;
+    const seal = nextSeal();
+    let want: { id: EdictId; target?: DeptId } | null = null;
+    if (seal && byId[seal] && s.meta.dreadLifetime >= (SEAL_DREAD[seal] ?? 0) && s.meta.tribute < SEAL_COST[seal]) want = { id: 'darkTithe' };
+    if (!want) {
+      let best: DeptId | null = null;
+      let gap = 0;
+      for (const id of unlocked()) {
+        const d = s.depts[id]!;
+        if (d.cycle.legendWaiting) continue;
+        const inf = infamy(defs[id], d);
+        if (inf.econ >= 1 || inf.skill < inf.econ) continue;
+        const g = inf.skill - inf.econ + (1 - inf.econ);
+        if (g > gap) {
+          gap = g;
+          best = id;
+        }
+      }
+      if (best) want = { id: 'fearItself', target: best };
+    }
+    if (!want) {
+      const ids = unlocked().filter((id) => !s.depts[id]!.cycle.legendWaiting);
+      const longest = ids.sort((a, b) => tracks[a].cycleStartT - tracks[b].cycleStartT)[0];
+      want = longest ? { id: 'ironDiscipline', target: longest } : { id: 'darkTithe' };
+    }
+    if (cur && cur.id === want.id && cur.target === want.target) return;
+    if (setEdict(s, want.id, want.target, now)) {
+      if (cur) perkTrack.edictSecs[cur.id] = (perkTrack.edictSecs[cur.id] ?? 0) + (now - cur.since) / 1000;
+      const k = `${want.id}:${want.target ?? ''}`;
+      perkTrack.edicts[k] = (perkTrack.edicts[k] ?? 0) + 1;
     }
   }
 
@@ -583,7 +837,8 @@ export function simulate(cfg: SimConfig): SimResult {
     const open = openUnmaxed();
     if (!open.length) return 0;
     const inc = goodsIncomePerH(s, defs);
-    const L = s.meta.throne[ROADS.id] ?? 0;
+    // The trickle group: Imperial Roads + Goods Caravan (goods.roadsMult).
+    const L = (s.meta.throne[ROADS.id] ?? 0) + (s.meta.dreadPerks[CARAVAN_ID] ?? 0);
     let perDay = 0;
     for (const g of new Set(open.map((nd) => nd.good))) perDay += (inc[g] / (1 + 0.1 * L)) * 0.1 * 18;
     const avgCost = open.reduce((a, nd) => a + nodeCost(s, nd), 0) / open.length;
@@ -623,7 +878,7 @@ export function simulate(cfg: SimConfig): SimResult {
     const def = defs[id];
     const tr = tracks[id];
     const inf = infamy(def, d).value;
-    const dread = dreadPayout(d, inf, cfg.crush);
+    const dread = dreadPayout(d, inf, cfg.crush, legendsBane(s, id));
     s.meta.dread += dread;
     s.meta.dreadLifetime += dread;
     s.meta.trophies.push({ dept: id, name: `${id}#${d.cycle.n}`, at: nowMs() });
@@ -642,7 +897,13 @@ export function simulate(cfg: SimConfig): SimResult {
     d.lifetime.falls += 1;
     d.run = def.defaultRun() as DeptSave['run'];
     d.cycle = { n: d.cycle.n + 1, startedAt: nowMs(), earnings: 0, heldLevel: 0, legendWaiting: false };
+    delete d.haul; // mirrors game.ts completeFall: an unplayed ritual never pays into the new cycle
+    // game.ts applyCyclePerks: Head Start, then the Signature.
+    const hs = headStartLevel(s, id);
+    if (hs > 0) def.applyHeadStart?.(d, hs);
+    if (hasSignature(s, id)) def.signature?.apply(d);
     tr.cycleStartT = t;
+    delete econFullAt[id];
     tr.onScreenCycleS = 0;
     tr.aeCycleS = 0;
   }
@@ -662,7 +923,7 @@ export function simulate(cfg: SimConfig): SimResult {
         }
         baseThisStep += base;
         const amount = base * coreMult(s, id, defs, nowMs());
-        credit(d(), amount);
+        credit(d(), amount, id);
         return amount;
       },
       raiseSkill(level: number) {
@@ -686,9 +947,23 @@ export function simulate(cfg: SimConfig): SimResult {
       log('firstBuy', `${id} first upgrade (${bought[0]}) after ${tr.onScreenS.toFixed(0)} s on screen`, id);
     }
   }
-  function enter(id: DeptId): ActiveSession {
+  function enter(id: DeptId, play = true): ActiveSession {
     const tr = tracks[id];
     if (tr.firstEntryAt === null) tr.firstEntryAt = t;
+    // Return ritual (game.ts startRitual): once, on the first entry after an absence, +5% x score
+    // of the haul. A Collect-All visit (no play) skips it and keeps the haul for the next entry.
+    const d = s.depts[id]!;
+    if (play && d.haul && d.haul > 0) {
+      const haul = d.haul;
+      delete d.haul;
+      const bonus = ritualBonus(haul, ritualScore);
+      if (bonus > 0) {
+        credit(d, bonus, id);
+        perkTrack.rituals++;
+      }
+    }
+    // The ritual plays on entry, before the player lets a waiting Legend in (the bonus is forfeit
+    // if the scene closes, and the Fall re-enters the department), so it pays the old cycle.
     if (fallReady(id)) fall(id);
     activeGoods[id] = newActiveTrack();
     const sess = byId[id]!.startSession(s.depts[id]!, envFor(id));
@@ -716,20 +991,30 @@ export function simulate(cfg: SimConfig): SimResult {
     agg.base += baseThisStep / scale;
     agg.idle += idle / scale;
     agg.secs += 1;
-    agg.factorSecs += offlineFactor(s);
+    agg.factorSecs += offlineFactor(s, cur);
     if (phase === 'base') {
       const dd = (tr.ratioByDay[day()] ??= { base: 0, idle: 0, secs: 0, factorSecs: 0 });
       dd.base += baseThisStep / scale;
       dd.idle += idle / scale;
       dd.secs += 1;
-      dd.factorSecs += offlineFactor(s);
+      dd.factorSecs += offlineFactor(s, cur);
     }
     let tribute = 0;
+    // game.ts econTick: the Steward's allowance accrues every tick, it spends every 5 s.
+    const share = stewardShare(s);
+    const stewardNow = share > 0 && ++stewardAcc >= 5;
+    if (stewardNow) stewardAcc = 0;
     for (const id of unlocked()) {
       const od = s.depts[id]!;
       if (id !== cur) {
-        credit(od, defs[id].idleRate(od) * coreMult(s, id, defs, nowMs()));
+        const amount = defs[id].idleRate(od) * coreMult(s, id, defs, nowMs());
+        credit(od, amount, id);
         tracks[id].aeCycleS += 1 / ratioEst(id);
+        if (stewardOn(s, id)) {
+          const st = (s.meta.steward[id] ??= { on: true, reserve: 0, pool: 0 });
+          st.pool = (st.pool || 0) + share * amount;
+          if (stewardNow) stewardPass(id, 0);
+        }
       }
       const tr2 = tributeRate(s, id, defs, id === cur);
       tribute += tr2;
@@ -771,9 +1056,10 @@ export function simulate(cfg: SimConfig): SimResult {
     }
     throne();
     let remaining = Math.round(plan.min * 60);
+    const sessionStart = t;
     if (remaining <= 0) {
       // Collect-All visit: pop into each department to shop, no on-screen play.
-      for (const id of unlocked()) enter(id).end();
+      for (const id of unlocked()) enter(id, false).end();
       throne();
       return;
     }
@@ -781,8 +1067,16 @@ export function simulate(cfg: SimConfig): SimResult {
       const ids = unlocked();
       const fresh = ids.find((id) => tracks[id].firstEntryAt === null);
       const legend = ids.find((id) => fallReady(id));
+      // SIM CHANGE (pass 6): then a department whose economy gate has been full for 12 h while its
+      // skill gate isn't (the HUD's Infamy bar shows it), once per session, the longest-waiting
+      // first. Late War Pit cycles hung on one Triumph with ~1 Run a day (a 5.5-day stall in 1 of 3
+      // seeds); a player reads that bar. The 12 h keeps it to real stalls, not the normal flow.
+      const lagging = ids
+        .filter((id) => (lastVisit[id] ?? -1) < sessionStart && !s.depts[id]!.cycle.legendWaiting)
+        .filter((id) => econFullAt[id] !== undefined && t - econFullAt[id]! >= 12 * 3600 && infamy(defs[id], s.depts[id]!).skill < 1)
+        .sort((a, b) => econFullAt[a]! - econFullAt[b]!)[0];
       // Otherwise the department visited longest ago (a round robin across sessions and days).
-      const cur = fresh ?? legend ?? ids.slice().sort((a, b) => (lastVisit[a] ?? -1) - (lastVisit[b] ?? -1))[0];
+      const cur = fresh ?? legend ?? lagging ?? ids.slice().sort((a, b) => (lastVisit[a] ?? -1) - (lastVisit[b] ?? -1))[0];
       let sess = enter(cur);
       const slice = Math.min(remaining, cfg.sliceMin * 60);
       for (let i = 0; i < slice; i++) {
@@ -829,12 +1123,18 @@ export function simulate(cfg: SimConfig): SimResult {
   }
   while (lastDay < cfg.days) snapshot(lastDay++);
 
+  {
+    const e = activeEdict(s);
+    if (e) perkTrack.edictSecs[e.id] = (perkTrack.edictSecs[e.id] ?? 0) + (nowMs() - e.since) / 1000;
+  }
   const adapterStats: Record<string, Record<string, number>> = {};
   for (const [id, sess] of Object.entries(sessionStats)) adapterStats[id] = sess.stats?.() ?? {};
 
   return {
     config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? FLOOR_GROWTH, noGoods: !!cfg.noGoods },
     goods: goodsTrack,
+    steward: stewardTrack,
+    perks: perkTrack,
     tracks,
     snaps,
     events,

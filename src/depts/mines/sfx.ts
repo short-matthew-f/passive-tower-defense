@@ -83,6 +83,13 @@ function noise(dur: number, vol: number, at = 0, freq = 800, type: BiquadFilterT
 const vary = () => 1 + (Math.random() - 0.5) * 0.16; // +-8% pitch (02 §12)
 
 export const sfx = {
+  /** Gritch's voice: quick squeaky goblin chatter, 2-4 rising yips. */
+  gritch(v: number, words = 3): void {
+    const a = audio();
+    if (!a) return;
+    const t = a.currentTime;
+    for (let i = 0; i < words; i++) tone(420 * vary() + i * 30, 0.06, 0.09 * v, 'square', t + i * 0.1, 160);
+  },
   /** A tap: layered "tock"; veins ring glassy. */
   tock(v: number, shiny = false): void {
     tone(180 * vary(), 0.05, 0.12 * v, 'triangle');

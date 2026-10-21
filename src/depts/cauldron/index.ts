@@ -5,6 +5,8 @@ import { cauldronEcon } from './def';
 import { granny, lessons, onboarding } from './granny';
 import { cauldronLastStand } from './laststand';
 import { CauldronScene } from './scene';
+import { sfx } from './sfx';
+import type { CRun } from './econ';
 
 export const cauldron: DeptDef = {
   ...cauldronEcon,
@@ -12,7 +14,10 @@ export const cauldron: DeptDef = {
   currency: 'Bile',
   currencyColor: '#9ad43a',
   doorColor: 0x4a7a22,
-  manager: granny,
+  // Granny cackles for the core's lines (intro, Legend, returns, beats); her own stay quiet.
+  manager: { ...granny, voice: (_line, i) => i.source !== 'dept' && i.source !== 'beat' && sfx.cackle(i.vol) },
+  // Head Start grants Malice levels without the first purchase that runs the lesson.
+  dialLessons: { malice: (s) => (s.run as CRun)?.maliceBought ?? 0 },
   onboarding,
   lessons,
   legend: {
