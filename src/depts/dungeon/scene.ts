@@ -1536,12 +1536,12 @@ export class DungeonScene implements DeptScene {
     else if (this.armed) hint = `TAP A GLOWING ${M.PIECES[this.armed].slot === 'wall' ? 'WALL' : M.PIECES[this.armed].slot === 'chamber' ? 'CHAMBER' : 'PATH TILE'}`;
     if (hint) this.status.set(hint, C.goldText);
     else {
-      const gong = sim.gongStack > 0 ? `  GONG+${sim.gongStack * 10}%` : '';
+      const gong = sim.gongStack > 0 ? `  GONG+${Math.round(sim.gongStack * M.GONG_STEP * 100)}%` : '';
       this.status.set(`P${sim.partyN} LEAK ${leak}%${gong}  {skull}${Math.min(2, champs)}/2@L${target}`, leak >= 20 ? C.redText : C.inkDim);
     }
 
     // Ability row.
-    const nextBonus = Math.min(M.GONG_MAX, sim.gongStack + 1) * 10;
+    const nextBonus = Math.round(Math.min(M.GONG_MAX, sim.gongStack + 1) * M.GONG_STEP * 100);
     const wait = Math.ceil(sim.partyTimer - (M.PARTY_EVERY - M.GONG_GAP));
     this.setBtn(this.gongBtn, 'GONG', sim.gongReady ? `+${nextBonus}%` : sim.spawnQ.length ? 'WAIT' : `${wait}S`, sim.gongReady);
     this.setBtn(this.glareBtn, this.glareArmed ? 'AIM!' : 'GLARE', this.glareCd > 0 ? `${Math.ceil(this.glareCd)}S` : 'READY', this.glareCd <= 0);

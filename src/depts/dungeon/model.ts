@@ -8,8 +8,10 @@
 //  - Lure price growth 1.45 -> 1.75 and hero HP growth 1.15 -> 1.16 per tier: with the raw seeds the
 //    bot held Lure 14 after 30 min and Lure 17 on day 1 (first skill target is 15, first Fall ~day 4).
 //    Now: Lure 5 ~12 min, Lure 8 at 30 min, 13 at end of day 1, 16 on day 2.
-//  - Gong: at least 8 s between launches and the perfect-wave stack capped at +50% (spec +100%).
-//    Unlimited ringing made active play 5-13x idle; now active ~2.4-2.5x on-screen idle (~4x offline).
+//  - Gong: at least 8 s between launches and the perfect-wave stack capped at +40% (spec +100%):
+//    five rings of +8%. Unlimited ringing made active play 5-13x idle. SIM-TUNED (sim/README.md):
+//    +10% steps (+50%) measured 2.27-2.38x on-screen idle on the balance sim's reference bot,
+//    above 01 §3's 1.8-2.2x; +8% steps measure ~2.1x (~3.3x offline).
 //  - Glare: 40 dmg x the hero HP scale (so it stays a real verb at high Lure) x Gaze, and a 12 s
 //    base cooldown (spec 20 s) so the primary active verb comes round often on a phone.
 //  - The idle sim measures 10 consecutive parties (always one Champion party) on 2 seeds, run
@@ -200,8 +202,8 @@ export const TRAP_OPEN = 2;
 export const GRAB_BONUS = 0.1;
 export const RECOVER_BONUS = 0.25;
 export const COIN_LIFE = 1.5;
-export const GONG_STEP = 0.1;
-export const GONG_MAX = 5; // TUNED +100% -> +50% (with GONG_GAP, active lands ~2.5x on-screen idle)
+export const GONG_STEP = 0.08; // SIM-TUNED 0.1 -> 0.08 (see header)
+export const GONG_MAX = 5; // TUNED +100% -> +40% (5 steps of GONG_STEP)
 /** Minimum seconds between party launches when ringing early (throughput at most 12/8 = 1.5x). */
 export const GONG_GAP = 8;
 /** Ledger-Bones throws bones from the Hoard: 1 dps, range 3 (starter kit). */

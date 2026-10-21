@@ -184,6 +184,10 @@ export interface SimResult {
 }
 
 const DAY = 86400;
+/** 00 §8 baseline: a department's state 30 min or more into a cycle. Counted in active-equivalent
+ * time (on-screen seconds plus background/offline income at the measured active rate), so the
+ * baseline is "the helpers a 30-min player would have bought". With 4+ departments sharing the
+ * reference player's ~50 min a day, a department rarely gets 30 on-screen minutes in one cycle. */
 const BASELINE_S = 30 * 60;
 
 // ---------- the simulation ----------
@@ -556,7 +560,7 @@ export function simulate(cfg: SimConfig): SimResult {
     const tr = tracks[cur];
     const idle = defs[cur].idleRate(d);
     const state = byId[cur]!.ratioState?.(d) ?? 'all';
-    const phase = tr.onScreenCycleS >= BASELINE_S ? 'base' : 'early';
+    const phase = tr.aeCycleS >= BASELINE_S ? 'base' : 'early';
     baseThisStep = 0;
     sess.step(1);
     t += 1;
@@ -596,6 +600,9 @@ export function simulate(cfg: SimConfig): SimResult {
   function playSession(plan: SessionPlan, isReturn: boolean): void {
     if (isReturn) {
       for (const id of unlocked()) {
+        // Only departments the player has entered: one unlocked at the very end of a session
+        // (e.g. the Bridge, which starts with an empty bank and no goons) has had no chance to earn.
+        if (tracks[id].firstEntryAt === null) continue;
         tracks[id].returns++;
         if (byId[id]!.anyAffordable(s.depts[id]!)) tracks[id].returnsAffordable++;
       }

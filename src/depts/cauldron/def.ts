@@ -34,12 +34,13 @@ export const cauldronEcon: DeptEcon = {
   skillLabel: (t) => `5 BATCHES AT MALICE ${t}`,
   // SIM-TUNED (sim/README.md "Tuning log"). Idle rate runs ~1.5/s at start, ~8K/s after 10 min on
   // screen and ~3.5e5/s at the first 100% Infamy (gold pegs now counted, econ.ts expectedMult).
-  //  - econBase: the reference player fills the economy gate during the day-1 evening session at
-  //    ~3-3.5 h active-equivalent (00 §8 hard band 3-4 h +- 1 h). A later Fall (00 §6 "early day 2")
-  //    costs ~7 h AE in this profile, because the night adds ~2.3 h AE of offline income at the
-  //    ~3.5-4x active:offline ratio.
+  //  - econBase 6e9 -> 2.4e9 (second pass, with 4 departments): the reference player fills the
+  //    economy gate during the day-1 evening session at ~3.1-3.3 h active-equivalent (00 §8 hard
+  //    band 3-4 h +- 1 h). With the Dungeon and the Bridge open on day 1 the Cauldron gets fewer
+  //    of the 90 minutes, and 6e9 slipped the Fall to day 2 08:00 at ~5.7 h AE (the night adds
+  //    ~2 h AE of offline income at the ~4x active:offline ratio), outside the hard band.
   //  - rankRef: idleRate after ~10 min on screen; rankTarget: idleRate at the first 100% Infamy.
-  econBase: 6e9,
+  econBase: 2.4e9,
   rankRef: 8000,
   rankTarget: 350_000,
   commendations,

@@ -5,13 +5,13 @@ days on **the game's own pure modules**, so "the sim matches the game" holds bec
 same code. Nothing here imports Pixi or the DOM.
 
 ```
-npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json}
+npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json} (~45-50 s)
 npm run sim -- --days 30        # weeks 2-4 cycle metrics
 npm run sim -- --quick          # reference profile only, 1 seed (~5 s)
 npm run sim -- --fall-at 150    # Fall policy: push to 150% Infamy before letting the Legend in
 npm run sim -- --skill expert   # bot skill: novice | reference | expert
 npm run sim -- --live           # Cauldron: live physics every second (no activeRate table)
-npm test                        # includes tests/balance.test.ts, the fast CI tier (~7-9 s)
+npm test                        # includes tests/balance.test.ts, the fast CI tier (~10-14 s)
 ```
 
 `npm run sim` uses Vite's module runner (`sim/cli.mjs`), so it needs no extra dependency.
@@ -39,12 +39,40 @@ Two layers, as in 00 §8.1:
      `DeptCtx`, so costs, caps and locks are the game's. The bot taps 6/s, lights kegs that touch
      at least 3 rocks, breaks Veins and Geodes first, then finishes the most-cracked rock. With
      the drum it lands 85% of judged taps.
-   - **Greedy buyer** (both): it buys the best Δincome/cost. When the skill gate needs the next
-     dial level (Malice, Dig Deeper), it saves for it, and only buys items that pay for
+   - **Dungeon** runs the shipped 20 Hz path sim (`src/depts/dungeon/sim.ts`, the same `Sim` the
+     scene renders and `idleRate` runs headless) live on screen, and ports the scene's thin layer
+     around it: coins (the bot grabs 30/60/85% for +10%, the rest auto-collect), steals from the
+     bank (2% cap) and recovered sacks (+25%), Glare (thieves, then Champions, then whoever is
+     nearest the Hoard), the Trapdoor (under a hero in the route's last quarter), the Gong (door
+     clear and the last party held), Champion kills feeding the leak-gated skill gate, Lure
+     step-down when the live floor leaks > 25%, the blueprint snapshot and the post-Fall starter
+     kit. Verbs fire after a reaction delay (1.0 / 0.3 / 0.15 s). The builder ranks every
+     placement (the best free tile per kind by path coverage on the current route), piece
+     upgrade, L5 branch, Workshop node, Bait Chest and Rune Slot by Δdefense/cost, where defense
+     is the expected damage a party member takes on the route (model.ts stats, map.ts routes).
+     The Lure is bought when a 1-seed, 8-party probe of the real `Sim` says the layout holds the
+     next tier (< 20% leaks); while it holds, the bot saves for it. Workshop and Lure purchases
+     go through the real `buildGroups()`. It shops every 15 / 6 / 4 on-screen seconds.
+   - **Bridge**: the gate loop lives in `scene.ts`, so the adapter ports it headless on the
+     real pure rules (`model.ts`: generator, tells, Poster, `reply`, `band`, bounties, goon
+     tolls). That covers the fresh bench on entry, one arrival per 7 s (overflow to the goons),
+     walk / decide / Search (1.1 s) / reveal (1.3 s) timing, counters, bonks and naps (taps on
+     Grumm shorten them), the streak, the Hero Whisper showdown, the onboarding's scripted
+     travelers and the evidence-gated skill gate. The bot reads each traveler like a player:
+     parts and destination against `NORMAL[claim]`, the Writ seal and the Poster, ignoring
+     today's fake tell after the Menace 9 card. It spots each real contradiction with p = 0.7 /
+     0.9 / 0.98 and misreads an alternate 4% / 1% / 0.3% of the time. It Unmasks at >= 2 hero
+     clues (the expert at 1), Searches on smuggling clues or a sniff, and otherwise drags into
+     the Wallet Sense band (lower for brawny or suspect Claims), taking or pushing a counter.
+     The buyer ranks the real `buildGroups()` by Δ(idleRate + 0.25 x expected active income)/cost,
+     the active part a 160-traveler Monte Carlo of the same policy on the real generator.
+   - **Greedy buyer** (Cauldron, Mines): it buys the best Δincome/cost. When the skill gate needs the next
+     dial level (Malice, Dig Deeper, Menace), it saves for it, and only buys items that pay for
      themselves before the dial would be affordable anyway. Gems and Batch Tokens buy the drum,
      then the cheapest node.
-   - **Skill**: novice / reference / expert set reaction time and decision cadence (Cauldron),
-     and tap rate and beat accuracy (Mines, 02 §13: 50/85/95%).
+   - **Skill**: novice / reference / expert set reaction time and decision cadence (Cauldron,
+     Dungeon), tap rate and beat accuracy (Mines, 02 §13: 50/85/95%), and reading accuracy,
+     haggling and think time (Bridge).
 2. **Meta layer** (`sim/meta.ts`): department-agnostic. It mirrors `src/core/game.ts` step by step.
    - **On screen**: one 1 s `econTick` per second. Off-screen departments accrue
      `idleRate x coreMult`, Tribute accrues with the x1.5 on-screen bonus, and `checkProgress`
@@ -64,8 +92,11 @@ Everything is seeded (`sim/rng.ts`) and deterministic for a given seed. The CI t
 ### Measured quantities
 
 - **Active : offline** = (base local income earned on screen) / (on-screen `idleRate` x offline
-  factor). The metric uses "baseline" seconds only, meaning at least 30 min of on-screen play into
-  the cycle (00 §8). Core multipliers cancel out, because both sides exclude them.
+  factor). The metric uses "baseline" seconds only, meaning at least 30 min of active-equivalent
+  time into the cycle (00 §8: the helpers a 30-minute player owns). With 4 departments sharing
+  the reference player's ~50 min a day, a department rarely gets 30 on-screen minutes in one
+  cycle, so the first pass's on-screen definition left the Dungeon and Bridge with no baseline.
+  Core multipliers cancel out, because both sides exclude them.
 - **Active-equivalent (AE) time** = on-screen seconds, plus background and offline income
   converted at that department's measured active rate.
 - **Calibration** rows run the live core with no player input against `idleRate`, which should
@@ -76,7 +107,8 @@ Everything is seeded (`sim/rng.ts`) and deterministic for a given seed. The CI t
 The pure economy lives in `src/depts/<dept>/def.ts`, a `DeptEcon` with no Pixi imports;
 `index.ts` spreads it into the full `DeptDef`. To add a department:
 
-1. Give the department a `def.ts` (copy `cauldron/def.ts`). Keep its numbers in pure modules.
+1. Give the department a `def.ts` (copy `cauldron/def.ts`; all four built departments have one).
+   Keep its numbers in pure modules.
 2. Write `sim/adapters/<dept>.ts` that implements `DeptAdapter` (`sim/types.ts`):
    - `startSession(save, env)` returns `{ step(dt), buy(goals), end() }`. `step` plays on screen
      and credits income only through `env.earn(base)` and `env.raiseSkill(level)`, exactly like
@@ -100,40 +132,44 @@ Each row shows a status, the spec level and a CI marker.
 - **CI gate**: rows marked `+CI` fail `npm test`. These are integrity (NaN, Infinity,
   negative balances), offline factor at most 0.9, first upgrade under 60 s, Fall #0-#5 targets
   inside the dial range, and every department reaching its first Fall. `tests/balance.test.ts`
-  also gates the bands the tuning pass brought into range (`TUNED_GATES`: Cauldron first Fall AE,
-  both departments' active:offline and local ratio bands, cycle bounds, "something affordable",
-  and, while exactly Cauldron + Mines are built, the shares and the day-7 Dread band). Those are
-  keyed per department, so a newly added department isn't gated until its own tuning pass. To
-  gate a band for every department, set `ci: true` on it in `metrics.ts`.
+  also gates the bands the tuning passes brought into range (`TUNED_GATES`: Cauldron first Fall AE,
+  the active:offline and local ratio bands, cycle bounds, unlock times, the Dungeon's and the
+  Bridge's arc days, "something affordable"). Those are keyed per department, so a newly added
+  department isn't gated until its own tuning pass. The suite bands (shares, day-7 Dread) are
+  gated per department set (`SUITE_GATES`, keyed by the built set): adding a department turns them
+  off until that set is re-baselined. To gate a band for every department, set `ci: true` on it
+  in `metrics.ts`.
 
 Bands derived for a partial suite (see `metrics.ts`):
 
 - **Tribute / Dread share**: at most the equal share plus 20.7 pp. The spec's 35% at 7
-  departments is 1/7 + 20.7 pp, so 2 departments allow 70.7%.
+  departments is 1/7 + 20.7 pp, so 2 departments allow 70.7% and 4 allow 45.7%.
 - **Dread by day 7**: the 00 §6 arc for only the departments that exist. Each department's first
-  Fall falls on its arc day (Cauldron early day 2, Mines day 3), then cycles of 3 days (low,
-  Crush 0) to 1.5 days (high, Crush 25%) at 100% Infamy. For Cauldron + Mines that gives 70-235.
-- **Phantom Seals** variant: the current 2-department build has no Tribute sink besides Banners.
-  This variant pays the unbuilt departments' Seals as sinks, to approximate the full suite's
-  Tribute economy.
+  Fall falls on its arc day (Cauldron early day 2, Mines day 3, Dungeon day 4, Bridge day 4-5),
+  then cycles of 3 days (low, Crush 0) to 1.5 days (high, Crush 25%) at 100% Infamy. For
+  Cauldron + Mines that gives 70-235; for all four departments, 125-371 (the full suite's 120-200
+  is lower because 00 §6 has the Pit and the Spire contributing almost nothing by day 7).
+- **Phantom Seals** variant: pays the unbuilt departments' Seals (Styx, Spire, Pit) as pure
+  Tribute sinks, to approximate the full suite's Tribute economy.
 
 ## Current results (reference, 7 days, 3 seeds; `sim/out/report.md` has the full table)
 
-36 pass, 11 warn, 0 fail after the tuning pass below. All hard bands pass, including both
-departments' active:offline ratio. The remaining warnings are soft:
+71 pass, 17 warn, 0 fail after the second tuning pass below (Cauldron, Mines, Dungeon, Bridge).
+All hard bands pass. The remaining warnings are soft:
 
 - **First Fall wall clock vs AE hours.** In the reference profile every night and day gap adds
-  ~4 h active-equivalent at a 3.5-4x active:offline ratio. So the hard "3-4 h AE ± 1 h" band puts
-  the Cauldron's first Fall in the day-1 evening session (day 1 19:00, 3.1 h AE), not "early day
-  2" (which would be ~7 h AE). The Mines fall on day 2 18:00 at ~8.6 h AE (arc: day 3).
-- **Economy gate ≈ 2.5 h AE**: 3.1 h (Cauldron) and 8.6 h (Mines), for the same reason.
-- **Cauldron week-1 cycles** average 1.1 days (the 1.5-3 day band is for weeks 2-4).
-- **Dial step cost**: Cauldron median 6.8 min, Mines 1.6 min. After a Fall the low dial levels
-  are bought during the rebuild ramp, where income doubles every few minutes, so they always
-  read cheap. The top levels of a cycle land at ~15-110 min (Cauldron) and 20-35 min (Mines).
+  ~2-4 h active-equivalent. The Cauldron's hard "3-4 h AE ± 1 h" band puts its first Fall in the
+  day-1 evening session (19:10, 3.1 h AE) instead of "early day 2". The later departments are
+  held to their arc day instead: Mines day 3 08:00 (~11 h AE), Dungeon day 4 08:05 (~20 h AE),
+  Bridge day 5 08:00 (~18 h AE).
+- **Economy gate ≈ 2.5 h AE**: the same conflict.
+- **Cauldron week-1 cycles** average 1.1 days (the 1.5-3 day band is for weeks 2-4), so it Falls 6
+  times by day 7 and takes ~50% of the Dread (cap 45.7% for 4 departments). See "Still open".
+- **Dial step cost**: Cauldron median 14 min, Mines 2 min, Dungeon 6 min (Bridge 30 min passes).
+  Low dial levels are bought during the rebuild ramp, where income doubles every few minutes.
 
-30-day runs (`--days 30`) still show the structural late-cycle problem described in the tuning
-log: cycles stretch to 5-11 days in weeks 2-4.
+30-day runs (`--days 30`) still show the structural late-cycle problem from the tuning log, now in
+all four departments: longest cycles 9-11 days.
 
 ## Tuning log
 
@@ -223,3 +259,79 @@ expected, since the band is set for the reference player.
   (4K / 25K / 150K / 600K) are sim-owned, so they should scale up rather than Tribute down.
   That's a Throne-level change.
 - **AE vs wall clock** (above): pick which of the two the reference profile should honour.
+
+### Pass 2: Dungeon and Troll Bridge (4 departments)
+
+New adapters `sim/adapters/dungeon.ts` and `sim/adapters/bridge.ts` (see "How it works"); both
+departments got a Pixi-free `def.ts` that their `index.ts` spreads in (behavior unchanged). The
+meta sim unlocks them by Seal in `DEPT_ORDER`. "Before" is the first run with all four adapters
+registered and the old numbers (seed 1); "after" is the current report (3-seed medians, worst
+status).
+
+Changes:
+
+1. **Seals** (`src/core/meta.ts`): Dungeon 400 -> 2,500, Bridge 4,000 -> 44,000. Tribute runs ~10x
+   the arc on day 1 (see "Still open"), so the provisional prices opened the Dungeon at 10 active
+   min and the Bridge at 45. The Styx/Spire/Pit Seals (25K/150K/600K, Dread-gated) were left for
+   those departments' own passes; the Bridge's Seal now sits above the Styx's.
+2. **Dungeon econBase** 6e6 -> 2.5e7 (`dungeon/def.ts`): first Fall day 3 -> day 4 (arc).
+3. **Bridge econBase** 8e4 -> 1e7, **rankRef** 1 -> 2, **rankTarget** 6 -> 25 (`bridge/def.ts`):
+   the Bridge fell first of all (day 2) and sat at Rank 80-95 on a ~6/s idle rate.
+4. **Dungeon Gong step** +10% -> +8% (`GONG_STEP`; five rings still fill the stack, now +40%).
+   Active play measured 2.27-2.38x on-screen idle against 01 §3's 1.8-2.2x. The "Perfect Gong"
+   Commendation now reads FULL STACK (it tests `bestGong >= GONG_MAX`), Ledger-Bones says +40%,
+   and the scene's HUD texts use `GONG_STEP` instead of a hard-coded 10.
+5. **Cauldron econBase** 6e9 -> 2.4e9 (cross-department, `cauldron/def.ts`). With the Dungeon and
+   the Bridge open on day 1, the Cauldron gets fewer of the day's 90 minutes, and its first Fall
+   slipped to day 2 08:00 at 5.4-5.7 h AE, outside the hard band. A Fall at the next morning's
+   session always costs ~5.5 h AE in this profile (the night adds ~2 h), so the gate has to fill
+   during the day-1 evening session.
+6. **Harness**: the baseline for active:offline is 30 min of active-equivalent time into the cycle
+   (it was 30 on-screen minutes, which the Dungeon and Bridge never reached with ~12 min a day
+   each). Returns count only departments the player has entered (a department unlocked in the
+   last slice of a session has had no chance to earn; the Bridge starts with an empty bank). The
+   balance test gates suite bands per built department set, and checks determinism by replaying
+   day 1 of the 7-day run (one extra 1-day run instead of two). Calibration probes now cover the
+   Dungeon (live floor, no verbs) and the Bridge (goons only).
+
+| Metric (band) | Before | After |
+|---|---|---|
+| Dungeon unlock (40 ± 30 active min) | 10 min | 45 min |
+| Bridge unlock, Department 4 (105 ± 30; 00 §8 <= 2 h) | 45 min | 90 min |
+| Cauldron first Fall (3-4 h AE ± 1, hard) | 8.21 h, day 2 08:00 FAIL | 3.11 h, day 1 19:10 |
+| Dungeon first Fall (arc day 4) | day 3 12:30 (2.52 d) | day 4 08:05 (3.34 d) |
+| Bridge first Fall (arc day 4-5, after the Dungeon) | day 2 21:17 (1.89 d) | day 5 08:00 (4.33 d) |
+| Dungeon active : offline (3-5x) | no baseline time FAIL (first 30 min 3.45x) | 3.30x |
+| Dungeon active : on-screen idle (1.8-2.2x) | 2.26x (first 30 min) | 2.15x |
+| Bridge active : offline (3-5x) | no baseline time FAIL (first 30 min 3.87x) | 3.64x |
+| Bridge active : on-screen idle (2.3-3.2x) | 2.59x (first 30 min) | 2.39x [2.31-2.56] |
+| Cauldron / Mines active : offline (3-5x) | 3.63x / 4.02x | 4.25x / 3.96x |
+| Dungeon / Bridge live floor with no input / idleRate (≈ 1.0) | n/a | 0.99x / 1.05x |
+| Dungeon / Bridge first upgrade (< 60 s) | 0 s / 16 s | 0 s / 4 s |
+| Tribute share C / M / D / B (<= 45.7%) | 26 / 20 / 19 / 35% | 29 / 23 / 24 / 24% |
+| Dread share C / M / D / B (<= 45.7%) | 31 / 22 / 27 / 19% | 50 WARN / 25 / 15 / 9% |
+| Lifetime Dread, day 7 (125-371 derived for 4 depts) | 399 WARN | 329 |
+| Dungeon / Bridge average cycle (1.5-3 d) | 1.68 / 1.50 d | 2.18 d / open cycle 2.7 d at 99% |
+| Dungeon / Bridge dial step median (25-60 min) | 5.2 / 17.3 min | 6.0 / 29.8 min |
+| Something affordable on returns > 15 min (100%) | 100% | 100% |
+| Lifetime Tribute, end of day 1 | 39K | 47K |
+| `npm run sim` runtime | 23 s (`--quick`, before the probe cache) | ~46 s full, ~8 s `--quick` |
+
+Bot skill (`--skill`, seed 1), on-screen ratio novice / reference / expert: Dungeon 1.86x / 2.15x /
+2.25x, Bridge 2.32x / 2.39x / 2.60x.
+
+Still open after pass 2:
+
+- **Cauldron Dread share ~50% at day 7** (cap 45.7%). It isn't the first-Fall change: at the old
+  econBase the Cauldron also Falls 6 times by day 7 (shares 48-51%). Its week-1 cycles run
+  ~1.1 days while the Dungeon (first Fall day 4) and the Bridge (day 5) Fall 1-2 times by the arc.
+  Under the arc's own cycles (1.5-3 days) the Cauldron's share would be ~31-36%. Steeper Malice
+  above the knee (x3) brought it to 41-43% but opened a 2.25-day stall at Malice IX, so it was
+  reverted; fixing it belongs with the weeks 2-4 cycle work below. Not gated.
+- **Weeks 2-4 now stretch in the new departments too** (30 days: Dungeon average 5.1 d, longest
+  10.6 d; Bridge 6.0 d / 9.8 d). The Dungeon fills its floor (85 pieces, all at L10) by day 5, after
+  which only the Lure grows income (bounty x1.17 per tier, +4 tiers per Fall vs a x3 floor). The
+  Bridge caps Signage, Goon Pricing and Goons by ~day 4, after which only Menace grows income
+  (x1.2 per level, +2 levels per Fall). Same meta-level decision as above.
+- **Bridge Seal (44K) above the Styx's (25K).** Fine for unlock order (the Styx is Dread-gated),
+  but the Styx/Spire/Pit prices should be re-derived with their adapters.

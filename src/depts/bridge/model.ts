@@ -588,5 +588,5 @@ export function band(t: Traveler, senseLv: number, offended: boolean): [number, 
  *    5-10x bounties on ~7-10% heroes and 4x on confiscated smugglers: ~2.5-3.2x fare per traveler.
  *    Goons charge 1.0-1.4x at full coverage, so active ~2.5-3.5x on-screen idle, ~4-5x offline.
  *  - Menace 4 (the first Infamy target, 40.5K for the level; 60K total) lands ~2 h active.
- *    See econBase in index.ts.
+ *    See econBase in def.ts.
  */

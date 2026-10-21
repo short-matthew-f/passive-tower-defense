@@ -31,7 +31,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   const fallAt = Number(arg(argv, 'fall-at') ?? 100);
   const skill = (arg(argv, 'skill') ?? 'reference') as Skill;
   const live = argv.includes('--live');
-  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill } };
+  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill } };
 
   // ----- reference profile, N seeds -----
   const runs: SimResult[] = [];
@@ -115,6 +115,8 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
       // short samples mostly undershoot the mean and the default 180 s read ~0.85x.
       ['cauldron', allAdapters({ cauldron: { passive: true, sampleS: 900 } })[0]],
       ['mines', allAdapters({ mines: { passive: true } })[1]],
+      ['dungeon', allAdapters({ dungeon: { passive: true } })[2]],
+      ['bridge', allAdapters({ bridge: { passive: true } })[3]],
     ] as const) {
       const r = simulate({ ...DEFAULT_CONFIG, days: 1, profile: PROFILES.solo, noMeta: true, adapters: [f] });
       const tr = r.tracks[id];
@@ -139,7 +141,11 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
         note:
           id === 'cauldron'
             ? 'idleRate counts the gold pegs (sim-tuned, econ.ts expectedMult), so the live rain matches it.'
-            : 'Crew alone on the live wall (hops, overkill, regrowth) vs the closed form; the probe taps only until the first hire.',
+            : id === 'mines'
+              ? 'Crew alone on the live wall (hops, overkill, regrowth) vs the closed form; the probe taps only until the first hire.'
+              : id === 'dungeon'
+                ? 'The live 20 Hz floor with no verbs (coins auto-collect) vs Cautious Mode; steals hit the bank, not earnings.'
+                : 'Goons work the gate with no orders vs the 06 §3 closed form; each entry refills the bench.',
       });
     }
   }

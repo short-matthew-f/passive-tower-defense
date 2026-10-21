@@ -27,12 +27,17 @@ export const DREAD_PERKS: MetaUpgrade[] = [
 export const ruinbornId = (d: DeptId) => `${d}.ruinborn`;
 export const RUINBORN = { max: 20, cost: (l: number) => 4 * 1.5 ** l, desc: '+25% income here' };
 
-/** Seal costs in Tribute (specs/00 §6). Departments not yet built show as Under Construction. */
+/** Seal costs in Tribute (specs/00 §6). Departments not yet built show as Under Construction.
+ * SIM-TUNED (sim/README.md "Tuning log"): Dungeon 400 -> 2,500 and Bridge 4,000 -> 44,000. Tribute
+ * runs ~10x the 00 §6 arc on day 1 (Rank 40 arrives within the first hour), so the provisional
+ * prices opened the Dungeon at 10 active min and the Bridge at 45. Now the Dungeon opens at the
+ * start of the second session (45 min; arc 40 +- 30) and the Bridge during the day-1 evening
+ * session or at the next morning's (80-90 min; arc 105 +- 30, 00 §8 "Department 4 open <= 2 h"). */
 export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,
-  dungeon: 400,
-  bridge: 4000,
+  dungeon: 2500,
+  bridge: 44000,
   styx: 25000,
   spire: 150000,
   pit: 600000,
