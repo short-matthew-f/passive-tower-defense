@@ -1,6 +1,7 @@
 // The Troll Bridge's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
 import type { Commendation, DeptEcon } from '../../core/dept';
+import { longLocked } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import * as M from './model';
 
@@ -17,7 +18,18 @@ export const commendations: Commendation[] = [
   { id: 'streak', label: 'STREAK OF 10', test: (s) => st(s).bestStreak >= 10 },
   { id: 'writs', label: 'WRITS PLEASE (MENACE 3)', test: (s) => (run(s).menaceMax ?? 0) >= 3 },
   { id: 'hundred', label: '100 TRAVELERS', test: (s) => st(s).travelers >= 100 },
+  { id: 'bribe', label: 'NO BRIBE TOO SMALL', test: (s) => (st(s).bribes ?? 0) >= 1 },
 ];
+
+/** Normalized run (old saves gain new fields); null before the department has a run. */
+function norm(s: DeptSave): M.BridgeRun | null {
+  const r = run(s);
+  if (!r) return null;
+  M.normalize(r, s.persistent);
+  return r;
+}
+
+const nodeOpen = (s: DeptSave) => (id: keyof M.Levels) => id !== 'charter' || !longLocked(s.cycle?.n ?? 0);
 
 export const bridgeEcon: DeptEcon = {
   id: 'bridge',
@@ -55,4 +67,50 @@ export const bridgeEcon: DeptEcon = {
   rankTarget: 25,
 
   commendations,
+
+  // ----- advancement hooks (00 §2.5, §5.2) -----
+
+  readyBuys(save) {
+    const r = norm(save);
+    if (!r) return [];
+    const open = nodeOpen(save);
+    const out: { label: string; cost: number }[] = [];
+    for (const id of Object.keys(M.NODES) as (keyof M.Levels)[]) {
+      const L = r.lv[id] ?? 0;
+      if (L >= M.NODES[id].max || !open(id)) continue;
+      out.push({ label: M.NODE_NAMES[id], cost: M.nodeCost(id, L) });
+    }
+    if (r.menaceMax < M.MENACE_MAX) out.push({ label: `Menace ${r.menaceMax + 1}`, cost: M.menaceCost(r.menaceMax + 1) });
+    return out.sort((a, b) => a.cost - b.cost);
+  },
+
+  // Only idle-raising levels; never Menace (a dial, 00 §5.2 m5). buy() only raises the level.
+  stewardCandidates(save) {
+    const r = norm(save);
+    if (!r) return [];
+    return M.stewardList(r, save.imports?.bones ?? 0, nodeOpen(save)).map((c) => ({
+      id: c.id,
+      label: M.NODE_NAMES[c.id],
+      cost: c.cost,
+      deltaIdle: c.deltaIdle,
+      buy: () => {
+        const L = r.lv[c.id] ?? 0;
+        if (L < M.NODES[c.id].max) r.lv[c.id] = L + 1;
+      },
+    }));
+  },
+
+  applyHeadStart(save, level) {
+    const r = norm(save);
+    if (r) M.applyHeadStart(r, level);
+  },
+
+  signature: {
+    name: 'Familiar Faces',
+    desc: 'Start each cycle with Squint 2 and Wallet Sense 5',
+    apply(save) {
+      const r = norm(save);
+      if (r) M.applyFamiliarFaces(r);
+    },
+  },
 };

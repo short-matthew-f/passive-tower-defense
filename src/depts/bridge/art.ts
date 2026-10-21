@@ -74,6 +74,13 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   } else if (L.aura === 'perfume') {
     for (const [x, y] of [[3, 9], [5, 6], [19, 8], [21, 12], [2, 14]]) r(x, y, 1, 1, 0xf090c0);
     r(4, 7, 1, 1, 0xffc0e0);
+  } else if (L.aura === 'notes') {
+    // music notes drifting off the lute
+    for (const [x, y] of [[20, 6], [3, 10], [22, 14]]) {
+      r(x, y, 1, 3, 0x3a2a5a);
+      r(x - 1, y + 2, 1, 1, 0x3a2a5a);
+      r(x + 1, y, 1, 1, 0x3a2a5a);
+    }
   } else if (L.aura === 'flies') {
     for (const [x, y] of [[3, 12], [20, 10], [1, 18], [22, 22], [4, 30]]) r(x, y, 1, 1, OUTLINE);
   }
@@ -330,6 +337,13 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
     r(20, 8, 1, 18, 0xffffff);
     r(18, 26, 6, 1, GOLD);
     r(20, 27, 2, 3, 0x5a3a22);
+  } else if (it === 'lute') {
+    r(17, 24, 6, 5, 0xc0803a);
+    r(18, 23, 4, 1, 0xc0803a);
+    r(18, 29, 4, 1, 0xa0602a);
+    r(19, 26, 2, 2, 0x4a2a16);
+    r(21, 15, 1, 9, WOOD_D);
+    r(20, 14, 3, 2, WOOD_D);
   } else if (it === 'fan') {
     r(18, 22, 5, 1, 0xf090c0);
     r(18, 23, 5, 2, 0xd060a0);
@@ -345,6 +359,14 @@ const ICON_ROWS: Record<string, string[]> = {
   pilgrim: ['...hhh...', '..hhhhh..', '.hhsssh..', '.hsksksh.', '.hsssssh.', '.hhssshh.', '.hhhhhhh.', '.wwwwwww.', '.wwwwwww.'],
   merchant: ['..rrrrr..', '.rrrrrrr.', '.ggggggg.', '..sssss..', '..sksks..', '..sssss..', '.fffffff.', '.cgcccgc.', '.ccccccc.'],
   adventurer: ['..iiiii..', '.iwiiiii.', '.iiiiiii.', '.iisssii.', '..sksks..', '..sssss..', '.iiiiiii.', '.iiiiiii.', '.iiiiiii.'],
+  bard: ['..rrrrr..', '.rrrrrrrw', '..sssss.w', '..sksks..', '..sssss..', '.yyy.....', 'yyyyy.ccc', 'yykyy.ccc', '.yyy..ccc'],
+  hat: ['.........', '...kkk...', '...kkk...', '...kkk...', '...kkk...', '.kkkkkkk.', '.........', '.........', '.........'],
+  pack: ['...tt....', '..tttt...', '.tttttt..', '.tyyttt..', '.tttttt..', '.tttyyt..', '.tttttt..', '..tttt...', '.........'],
+  belt: ['.........', '.........', '.........', 'ttttttttt', 'tttyyyttt', 'tttyktttt', 'tttyyyttt', 'ttttttttt', '.........'],
+  hand: ['......i..', '.....ii..', '....ii...', '...ii....', '..ii.....', '.yyy.....', '..t......', '.t.......', '.........'],
+  body: ['...sss...', '.ccccccc.', 'ccccccccc', 'c.ccccc.c', 'c.ccccc.c', 's.ccccc.s', '..ccccc..', '..c...c..', '..c...c..'],
+  crate: ['ttttttttt', 'tkkkkkkkt', 'tktt.ttkt', 'tkt.t.tkt', 'tk.ttt.kt', 'tkt.t.tkt', 'tktt.ttkt', 'tkkkkkkkt', 'ttttttttt'],
+  shift: ['.........', '...G.....', '..GG.....', '.GGGGGGG.', '..GG.....', '.....oo..', '.ooooooo.', '.....oo..', '.........'],
   noble: ['......w..', '.....ww..', '.pppppw..', 'ppppppppp', '..ggggg..', '..sksks..', '..sssss..', '.pppppp..', '.pgpppp..'],
   farm: ['....y....', '.y.yyy.y.', '.yyyyyyy.', '..yyyyy..', '...yyy...', '...ttt...', '..ttttt..', '.tt.t.tt.', '.........'],
   shrine: ['....y....', '...iii...', '..iiiii..', '.iiiiiii.', '..i.i.i..', '..i.i.i..', '..i.i.i..', '.iiiiiii.', 'iiiiiiiii'],
@@ -365,7 +387,7 @@ const ICON_ROWS: Record<string, string[]> = {
   up: ['....G....', '...GGG...', '..GGGGG..', '.GGGGGGG.', '...GGG...', '...GGG...', '...GGG...', '...GGG...', '.........'],
   boot: ['.........', '..iii....', '..iii....', '..iii....', '..iiw....', '..iiiiii.', '..iiiiiii', '..yyyyyyy', '.........'],
   glow: ['....y....', '.y..y..y.', '..y.y.y..', '...yyy...', 'yyyywyyyy', '...yyy...', '..y.y.y..', '.y..y..y.', '....y....'],
-  question: ['..wwwww..', '.ww...ww.', '......ww.', '.....ww..', '....ww...', '....ww...', '.........', '....ww...', '....ww...'],
+  question: ['..kkkkk..', '.kk...kk.', '......kk.', '.....kk..', '....kk...', '....kk...', '.........', '....kk...', '....kk...'],
   bang: ['....R....', '...RRR...', '...RRR...', '...RRR...', '....R....', '....R....', '.........', '....R....', '...RRR...'],
   point: ['....g....', '...gwg...', '...ggg...', '...ggg...', '.g.ggggg.', '.gggggggg', '.gggggggg', '..ggggggg', '...ggggg.'],
   sign: ['.ttttttt.', 'tkkkkkkkt', 'tkwkwkwkt', 'tkkkkkkkt', 'tkkwwwkkt', '.ttttttt.', '....t....', '....t....', '....t....'],

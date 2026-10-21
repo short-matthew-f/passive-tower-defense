@@ -6,13 +6,19 @@
 //    so every Menace step pays x1.2 as the suite's dial rule requires.
 //  - No crop strip: travelers are drawn large enough that every tell is a visible part (task
 //    brief, D-26). Uncertainty comes from concealed tells (a liar may hide some of them),
-//    allowed alternates (red herrings), the daily Poster and the Menace rule cards. Squint is
-//    therefore not in the tree; Hero Nose raises the chance a concealed tell shows.
-//  - Toll Booth has 1 level in the MVP (it unlocks the Noble only, 06 §15).
+//    allowed alternates (red herrings), the daily Poster and the Menace rule cards. Hero Nose
+//    raises the chance a concealed tell shows. Squint (2 levels) keeps its price and role as the
+//    "look closer" node: tapping the traveler makes Grumm point at up to L odd parts (red
+//    herrings and today's fake tell included, so it shows where to look, not the verdict).
+//  - Toll Booth has 2 levels: the Noble, then the Bard (06 §5 "later"). The Tax Collector is left
+//    out: a traveler that takes from the bank breaks the 06 §4 rule that nothing drains it.
+//  - Hire Goon caps at 3: goon_efficiency is already 1 at 3 goons (06 §3), so levels 4-6 would buy
+//    nothing.
+//  - Rule cards 3/6/9/15/18 are in; 12 (Travelling Pairs) needs a two-traveler gate and is not.
 
 import { LONG_GROWTH, LONG_MAX, longMult } from '../../core/longnode';
 
-export type Who = 'peasant' | 'pilgrim' | 'merchant' | 'adventurer' | 'noble';
+export type Who = 'peasant' | 'pilgrim' | 'merchant' | 'adventurer' | 'noble' | 'bard';
 export type Kind = Who | 'smuggler' | 'hero';
 export type Where = 'farm' | 'shrine' | 'market' | 'fort' | 'castle';
 export type Slot = 'hat' | 'body' | 'feet' | 'hand' | 'belt' | 'pack' | 'aura';
@@ -48,7 +54,7 @@ export interface Traveler {
   bonkRoll: number;
   smuggler: boolean;
   hero: boolean;
-  /** Visible contradictions (slot names, 'where' or 'writ'). */
+  /** Visible contradictions (slot names, 'where', 'writ' or 'shift'). */
   tells: string[];
   concealed: number;
   writ: 0 | 1 | 2; // none, genuine, forged
@@ -56,6 +62,10 @@ export interface Traveler {
   sniff: boolean;
   showdown: boolean;
   scripted: string;
+  /** Bribes rule card (Menace 15): a smuggler's offer in x claimed fare (0 = none). */
+  bribe: number;
+  /** Shapeshifters rule card (Menace 18): the Claim flickers to the true one on a second look. */
+  shift: boolean;
 }
 
 // ---------- palettes (shared with art.ts) ----------
@@ -87,9 +97,11 @@ export const KINDS: Record<Kind, KindStats> = {
   smuggler: { weight: 12, fare: 8, wallet: [1.0, 1.6], patience: 0.6, brawn: 0.2 },
   hero: { weight: 7, fare: 10, wallet: [1.0, 1.0], patience: 0.1, brawn: 0.8 },
   noble: { weight: 5, fare: 30, wallet: [2.0, 3.5], patience: 0.2, brawn: 0 },
+  // Toll Booth 2 (06 §5 "later"): a cheap purse but endless patience; pays in song too.
+  bard: { weight: 4, fare: 5, wallet: [0.7, 0.9], patience: 1.0, brawn: 0 },
 };
 
-export const WHO_LIST: Who[] = ['peasant', 'pilgrim', 'merchant', 'adventurer', 'noble'];
+export const WHO_LIST: Who[] = ['peasant', 'pilgrim', 'merchant', 'adventurer', 'noble', 'bard'];
 
 /** What each Claim normally looks like. The first option is the usual one; the others are
  *  allowed alternates (the red herrings: odd-looking, but they fit the Claim). */
@@ -99,6 +111,7 @@ export const NORMAL: Record<Who, Record<Slot, string[]> & { where: Where[] }> = 
   merchant: { hat: ['cap', 'none'], body: ['coat', 'patched'], feet: ['fancy', 'worn'], hand: ['scales', 'none'], belt: ['purse'], pack: ['satchel', 'none'], aura: ['none'], where: ['market', 'castle', 'fort'] },
   adventurer: { hat: ['helm', 'none'], body: ['armor'], feet: ['boots'], hand: ['sword'], belt: ['none', 'purse'], pack: ['bedroll', 'none'], aura: ['none'], where: ['fort', 'shrine'] },
   noble: { hat: ['feather'], body: ['coat'], feet: ['fancy'], hand: ['fan'], belt: ['purse'], pack: ['none'], aura: ['perfume', 'none'], where: ['castle', 'market'] },
+  bard: { hat: ['cap', 'none'], body: ['coat', 'patched'], feet: ['worn', 'fancy'], hand: ['lute'], belt: ['rope', 'purse'], pack: ['none', 'satchel'], aura: ['notes', 'none'], where: ['castle', 'market'] },
 };
 
 /** Liar tells: slot -> part. Smugglers carry goods; heroes carry steel and holiness. */
@@ -120,7 +133,12 @@ export const RULE_CARDS: { m: number; id: string; name: string; desc: string }[]
   { m: 3, id: 'writ', name: 'WRITS', desc: 'SOME CARRY A WRIT. ITS SEAL MUST MATCH THE POSTER. HEROES FORGE THEM.' },
   { m: 6, id: 'hats', name: 'HAT SMUGGLING', desc: 'A TALL LUMPY HAT HIDES GOODS. SEARCH IT.' },
   { m: 9, id: 'kits', name: 'DISGUISE KITS', desc: "TODAY'S FAKE TELL (ON THE POSTER) IS WORN BY ANYONE. IGNORE IT." },
+  { m: 15, id: 'bribe', name: 'BRIBES', desc: 'SMUGGLERS MAY OFFER A BRIBE. TAKE IT AND THEY PASS, OR SEARCH FOR THE GOODS.' },
+  { m: 18, id: 'shift', name: 'SHAPESHIFTERS', desc: "TAP A TRAVELER TWICE: A SHIFTER'S CLAIM FLICKERS TO THE TRUTH." },
 ];
+
+/** The rule card that opens at Menace m (or undefined). */
+export const cardAt = (m: number) => RULE_CARDS.find((c) => c.m === m);
 
 // ---------- rng ----------
 
@@ -198,6 +216,9 @@ export interface BridgeStats {
   bestStreak: number;
   posterOpens: number;
   slipped: number;
+  /** Looks at a traveler (taps on the sprite; the onboarding's first beat). */
+  looks: number;
+  bribes: number;
 }
 
 export interface Levels {
@@ -213,6 +234,8 @@ export interface Levels {
   booth: number;
   goons: number;
   pricing: number;
+  /** Squint (06 §6 B): Grumm points at up to L odd parts when you look at a traveler. */
+  squint: number;
   /** Royal Toll Charter, the long node (core/longnode.ts): every fare x1.15 per level. */
   charter: number;
 }
@@ -236,11 +259,11 @@ export interface BridgePersistent {
 }
 
 export function defaultStats(): BridgeStats {
-  return { travelers: 0, tolls: 0, unmasks: 0, evUnmasks: 0, bounty10: 0, falseAcc: 0, confisc: 0, bonks: 0, bestStreak: 0, posterOpens: 0, slipped: 0 };
+  return { travelers: 0, tolls: 0, unmasks: 0, evUnmasks: 0, bounty10: 0, falseAcc: 0, confisc: 0, bonks: 0, bestStreak: 0, posterOpens: 0, slipped: 0, looks: 0, bribes: 0 };
 }
 
 export function defaultLevels(): Levels {
-  return { glare: 0, tongue: 0, skull: 0, fists: 0, sense: 0, nose: 0, sniffer: 0, signage: 0, bench: 0, booth: 0, goons: 0, pricing: 0, charter: 0 };
+  return { glare: 0, tongue: 0, skull: 0, fists: 0, sense: 0, nose: 0, sniffer: 0, signage: 0, bench: 0, booth: 0, goons: 0, pricing: 0, squint: 0, charter: 0 };
 }
 
 /** Grumm's float at unlock and after each Fall. SIM-TUNED 0 -> 100 (sim/README.md "Pass 5"): with
@@ -297,9 +320,10 @@ export const NODES: Record<keyof Levels, NodeDef> = {
   sniffer: { id: 'sniffer', base: 250, growth: 1.3, max: 10 },
   signage: { id: 'signage', base: 200, growth: 1.22, max: 40 },
   bench: { id: 'bench', base: 500, growth: 2.5, max: 2 },
-  booth: { id: 'booth', base: 1000, growth: 3, max: 1 }, // MVP: unlocks the Noble only
+  booth: { id: 'booth', base: 1000, growth: 3, max: 2 }, // the Noble, then the Bard
   goons: { id: 'goons', base: 75, growth: 1.6, max: 3 }, // MVP: 3 goons cover base traffic (06 §3)
   pricing: { id: 'pricing', base: 150, growth: 1.2, max: 20 },
+  squint: { id: 'squint', base: 150, growth: 2.5, max: 2 },
   // The long node (sim/README.md "Pass 5"): opens after the 2nd Fall. SIM-TUNED base: ~2 h of a
   // later cycle's plateau idle (~65/s).
   charter: { id: 'charter', base: 8e4, growth: LONG_GROWTH, max: LONG_MAX },
@@ -335,6 +359,28 @@ export const nap = napSeconds;
 export const visibleChance = (nose: number) => Math.min(0.95, 0.6 + 0.04 * nose);
 export const sniffChance = (sniffer: number) => Math.min(1, 0.1 * sniffer);
 export const GATE_UNMASKS = 5;
+/** "Word gets around" (06 §4): 3 false accusations within 60 s cut traffic 20% for 30 s. */
+export const WORD_FALSE = 3;
+export const WORD_WINDOW_S = 60;
+export const WORD_S = 30;
+export const WORD_TRAFFIC = 0.8;
+/** The Bard pays in song (06 §5): tolls +10% for 30 s. */
+export const SONG_S = 30;
+export const SONG_MULT = 1.1;
+/** Squint (06 §6 B): odd parts Grumm points at, per level. */
+export const squintHints = (L: number) => Math.max(0, Math.min(2, L));
+
+/** Pushes a false accusation at time `now` (s) and reports whether word now gets around. Pure on
+ * the passed array (old stamps fall out of the window). */
+export function falseAccusation(stamps: number[], now: number): boolean {
+  stamps.push(now);
+  while (stamps.length && now - stamps[0] > WORD_WINDOW_S) stamps.shift();
+  if (stamps.length >= WORD_FALSE) {
+    stamps.length = 0;
+    return true;
+  }
+  return false;
+}
 
 /** Spawn weights per kind at this Menace and Toll Booth level. */
 export function weights(m: number, booth: number): [Kind, number][] {
@@ -346,6 +392,7 @@ export function weights(m: number, booth: number): [Kind, number][] {
     ['smuggler', KINDS.smuggler.weight],
   ];
   if (booth > 0) base.push(['noble', KINDS.noble.weight * (1 + 0.1 * booth)]);
+  if (booth > 1) base.push(['bard', KINDS.bard.weight]);
   const others = base.reduce((a, [, w]) => a + w, 0);
   const share = heroShare(m);
   base.push(['hero', (others * share) / (1 - share)]);
@@ -389,6 +436,59 @@ export function goonToll(r: BridgeRun, t: Traveler, skulls = 0): number {
   return t.kindFare * goonFlat(r.lv.pricing) * goonEff(r.lv.goons) * fareMult(r, skulls);
 }
 
+// ---------- advancement hooks (00 §2.5, §5.2) ----------
+
+/** Head Start (00 §2.5): the first 2L Menace levels and 1 + L free goons. Idempotent (max()). */
+export function applyHeadStart(r: BridgeRun, L: number): void {
+  if (!(L > 0)) return;
+  const m = Math.min(MENACE_MAX, 2 * Math.floor(L));
+  r.menaceMax = Math.max(r.menaceMax ?? 0, m);
+  r.menace = Math.max(r.menace ?? 0, m);
+  r.lv.goons = Math.max(r.lv.goons ?? 0, Math.min(NODES.goons.max, 1 + Math.floor(L)));
+}
+
+/** Familiar Faces (00 §2.5 Signature): Squint and the first 5 Wallet Sense levels are kept. */
+export const FAMILIAR_SENSE = 5;
+export function applyFamiliarFaces(r: BridgeRun): void {
+  r.lv.squint = Math.max(r.lv.squint ?? 0, NODES.squint.max);
+  r.lv.sense = Math.max(r.lv.sense ?? 0, FAMILIAR_SENSE);
+}
+
+export const NODE_NAMES: Record<keyof Levels, string> = {
+  glare: 'Glare',
+  tongue: "Haggler's Tongue",
+  skull: 'Thick Skull',
+  fists: 'Big Fists',
+  sense: 'Wallet Sense',
+  nose: 'Hero Nose',
+  sniffer: 'Sniffer Dog',
+  signage: 'Signage',
+  bench: 'Bench',
+  booth: 'Toll Booth',
+  goons: 'Goon',
+  pricing: 'Goon Pricing',
+  squint: 'Squint',
+  charter: 'Toll Charter',
+};
+
+/** Levels the Steward may raise: the ones that move idleRate (no dial levels, 00 §5.2 m5). */
+export const STEWARD_NODES: (keyof Levels)[] = ['goons', 'pricing', 'signage', 'booth', 'charter'];
+
+/** Steward list for a run: cost and idle gain of each next level that raises idle. `open(id)`
+ * filters locked nodes (the charter before the 2nd Fall). */
+export function stewardList(r: BridgeRun, skulls: number, open: (id: keyof Levels) => boolean): { id: keyof Levels; cost: number; deltaIdle: number }[] {
+  const base = idleTollpence(r, skulls);
+  const out: { id: keyof Levels; cost: number; deltaIdle: number }[] = [];
+  for (const id of STEWARD_NODES) {
+    const L = r.lv[id] ?? 0;
+    if (L >= NODES[id].max || !open(id)) continue;
+    const q: BridgeRun = { ...r, lv: { ...r.lv, [id]: L + 1 } };
+    const d = idleTollpence(q, skulls) - base;
+    if (d > 0) out.push({ id, cost: nodeCost(id, L), deltaIdle: d });
+  }
+  return out;
+}
+
 /** Contraband (00 §4, 06 §16): goon crates, each goon seizes max(1, Sniffer) per 5 h. */
 export function crateContrabandPerH(r: BridgeRun): number {
   return (r.lv.goons * Math.max(1, r.lv.sniffer)) / 5;
@@ -419,8 +519,14 @@ export interface GenOpts {
   nose: number;
   sniffer: number;
   poster: Poster;
-  force?: 'merchant' | 'heroLesson' | 'smugglerLesson' | 'showdown';
+  force?: Force;
 }
+
+/** Scripted travelers: the onboarding's (merchant, hero, smuggler), the Showdown, and one per rule
+ * card micro-lesson (06 §18). */
+export type Force = 'merchant' | 'heroLesson' | 'smugglerLesson' | 'showdown' | 'writLesson' | 'hatLesson' | 'kitLesson' | 'bribeLesson' | 'shiftLesson';
+/** The rule-card lesson traveler for each card id. */
+export const CARD_FORCE: Record<string, Force> = { writ: 'writLesson', hats: 'hatLesson', kits: 'kitLesson', bribe: 'bribeLesson', shift: 'shiftLesson' };
 
 function baseLook(r: () => number, who: Who, alt: number): Look {
   const n = NORMAL[who];
@@ -444,9 +550,11 @@ function baseLook(r: () => number, who: Who, alt: number): Look {
 export function generate(seed: number, id: number, o: GenOpts): Traveler {
   const r = rng((seed ^ Math.imul(id + 1, 2654435761)) >>> 0);
   let kind: Kind;
-  if (o.force === 'merchant') kind = 'merchant';
-  else if (o.force === 'heroLesson' || o.force === 'showdown') kind = 'hero';
-  else if (o.force === 'smugglerLesson') kind = 'smuggler';
+  const f = o.force;
+  if (f === 'merchant') kind = 'merchant';
+  else if (f === 'heroLesson' || f === 'showdown' || f === 'writLesson' || f === 'shiftLesson') kind = 'hero';
+  else if (f === 'smugglerLesson' || f === 'hatLesson' || f === 'bribeLesson') kind = 'smuggler';
+  else if (f === 'kitLesson') kind = 'pilgrim';
   else {
     const w = weights(o.menace, o.booth);
     let x = r() * w.reduce((a, [, v]) => a + v, 0);
@@ -463,7 +571,7 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
   const hero = kind === 'hero';
   let who: Who;
   if (smuggler) who = o.force ? 'peasant' : pick(r, ['peasant', 'pilgrim', 'peasant'] as Who[]);
-  else if (hero) who = o.force === 'heroLesson' ? 'pilgrim' : pick(r, ['pilgrim', 'peasant', 'merchant'] as Who[]);
+  else if (hero) who = f === 'heroLesson' || f === 'shiftLesson' ? 'pilgrim' : f === 'writLesson' ? 'merchant' : pick(r, ['pilgrim', 'peasant', 'merchant'] as Who[]);
   else who = kind as Who;
 
   const look = baseLook(r, who, o.force ? 0 : 0.25);
@@ -471,7 +579,8 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
   const tells: string[] = [];
   let concealed = 0;
   const vis = visibleChance(o.nose);
-  const fake = o.menace >= 9 ? o.poster.fake : '';
+  const fake = o.menace >= 9 || f === 'kitLesson' ? o.poster.fake : '';
+  const lesson = !!f && f !== 'merchant' && f !== 'showdown';
 
   if (smuggler) {
     const pool = SMUGGLE_TELLS.slice();
@@ -479,7 +588,7 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
     // One bulky load (bulge or barrel), plus maybe new boots / a tall hat.
     const load = o.force ? SMUGGLE_TELLS[1] : r() < 0.5 ? SMUGGLE_TELLS[0] : SMUGGLE_TELLS[1];
     const extra = pool.filter(([s]) => s !== 'pack').filter(() => r() < 0.45);
-    const chosen = [load, ...extra];
+    const chosen = f === 'hatLesson' ? [HAT_SMUGGLE] : f ? [load] : [load, ...extra];
     chosen.forEach(([slot, part], i) => {
       // Smugglers are bad at hiding goods: the first tell always shows.
       if (i === 0 || o.force || r() < vis) {
@@ -490,9 +599,10 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
   } else if (hero) {
     const pool = HERO_TELLS.slice().sort(() => r() - 0.5);
     const n = o.force === 'heroLesson' ? 2 : 2 + (r() < 0.4 ? 1 : 0);
-    const chosen = o.force === 'heroLesson' ? [HERO_TELLS[0], HERO_TELLS[1]] : pool.slice(0, n);
+    const chosen =
+      f === 'heroLesson' ? [HERO_TELLS[0], HERO_TELLS[1]] : f === 'writLesson' ? [HERO_TELLS[2]] : f === 'shiftLesson' ? [HERO_TELLS[1]] : pool.slice(0, n);
     for (const [slot, part] of chosen) {
-      const show = o.force === 'heroLesson' || (o.force === 'showdown' ? tells.length === 0 : r() < vis);
+      const show = lesson || (o.force === 'showdown' ? tells.length === 0 : r() < vis);
       if (show) {
         look[slot] = part;
         if (part !== fake) tells.push(slot);
@@ -504,7 +614,7 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
       where = pick(r, odd);
       tells.push('where');
     }
-  } else if (fake && r() < 0.2) {
+  } else if (fake && (f === 'kitLesson' || r() < 0.2)) {
     // Disguise kits are in fashion: honest folk wear today's fake tell too.
     const t = HERO_TELLS.find(([, p]) => p === fake)!;
     look[t[0]] = t[1];
@@ -528,12 +638,16 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
     writ = hero && r() < 0.6 ? 2 : 1;
     if (writ === 2) tells.push('writ');
   }
+  if (f === 'writLesson') {
+    writ = 2;
+    tells.push('writ');
+  }
 
   const ks = KINDS[kind];
   const claimFare = KINDS[who].fare;
   const walletCoins = ks.fare * (ks.wallet[0] + r() * (ks.wallet[1] - ks.wallet[0]));
   const slackCoins = ks.fare * ks.patience;
-  return {
+  const t: Traveler = {
     id,
     kind,
     who,
@@ -554,7 +668,31 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
     sniff: smuggler && r() < sniffChance(o.sniffer),
     showdown: o.force === 'showdown',
     scripted: o.force ?? '',
+    bribe: 0,
+    shift: false,
   };
+  // Later rule cards draw after everything else, so lower Menace levels keep their streams.
+  if (smuggler && (f === 'bribeLesson' || (!f && o.menace >= 15 && r() < BRIBE_SHARE))) {
+    t.bribe = f ? 2 : Math.round((BRIBE_MIN + r() * 0.5) * 10) / 10;
+  }
+  if (hero && (f === 'shiftLesson' || (!f && o.menace >= 18 && r() < SHIFT_SHARE))) {
+    t.shift = true;
+    t.tells.push('shift');
+  }
+  return t;
+}
+
+/** Bribes card: share of smugglers that offer one, and its size (x claimed fare). */
+export const BRIBE_SHARE = 0.4;
+export const BRIBE_MIN = 2.0;
+/** Shapeshifters card: share of heroes that shift. */
+export const SHIFT_SHARE = 0.5;
+
+/** Parts that aren't the Claim's usual look (red herrings and today's fake tell included), in slot
+ * order: what Squint points at. */
+export function oddParts(t: Traveler): Slot[] {
+  const n = NORMAL[t.who];
+  return SLOTS.filter((s) => t.look[s] !== n[s][0]);
 }
 
 /** Evidence tier for an Unmask: visible contradictions, with a Poster match counting as 2+. */

@@ -4,7 +4,7 @@
 // if you push a brute too far, and naps while the goons work the gate.
 // All numbers live in model.ts; art in art.ts.
 import { Container, Graphics, Rectangle, type FederatedPointerEvent } from 'pixi.js';
-import type { DeptCtx, DeptScene, UpgradeGroup } from '../../core/dept';
+import type { DeptCtx, DeptScene, Rect, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
 import { PixelText, measure, wrap } from '../../ui/font';
@@ -18,6 +18,12 @@ const HOLD_S = 0.3;
 const IDLE_GATE_S = 10;
 const MAX_PARTS = 70;
 const WALK_S = 0.9;
+const RITUAL_S = 6;
+const RITUAL_CRATES = 5;
+/** Squint pointers: slot -> icon. */
+const SLOT_ICON: Record<M.Slot, string> = { hat: 'hat', body: 'body', feet: 'boot', hand: 'hand', belt: 'belt', pack: 'pack', aura: 'glow' };
+/** Rule card id of a scripted lesson traveler. */
+const LESSON_CARD: Record<string, string> = Object.fromEntries(Object.entries(M.CARD_FORCE).map(([card, f]) => [f, card]));
 
 type Phase = 'none' | 'walkIn' | 'wait' | 'counter' | 'search' | 'reveal' | 'leave';
 type Face = 'calm' | 'shock' | 'angry' | 'happy';
@@ -35,6 +41,17 @@ interface Cur {
   lidOpen: boolean;
   searched: boolean;
   goonT: number;
+  /** Looks (taps on the sprite) at this traveler; a shifter's Claim flickers on the second. */
+  looks: number;
+  shiftT: number;
+}
+
+interface Ritual {
+  n: number;
+  opened: number;
+  t: number;
+  done: boolean;
+  resolve: (score: number) => void;
 }
 
 interface Part {
@@ -184,7 +201,6 @@ export class BridgeScene implements DeptScene {
   private flash = new Graphics();
   private ui = new Container();
   private uiG = new Graphics();
-  private ghost = new Graphics();
   private modal = new Container();
 
   // ui
@@ -260,7 +276,6 @@ export class BridgeScene implements DeptScene {
   private showdownQueued = false;
   private gateOpen = 0;
   private slowT = 0;
-  private flavorT = 40;
   private shownBank = -1;
   private shownMenace = -1;
   private obStep: string | null = null;
@@ -269,6 +284,18 @@ export class BridgeScene implements DeptScene {
   private waterT = 0;
   private goonPop = -1;
   private goonPopT = 0;
+  private shownGoons = -1;
+  /** "Word gets around" (06 §4): false-accusation stamps (scene seconds) and the slowdown left. */
+  private falseStamps: number[] = [];
+  private wordT = 0;
+  /** The Bard's song (+10% tolls) time left. */
+  private songT = 0;
+  /** Rule-card lesson travelers already sent this visit. */
+  private lessonSent = new Set<string>();
+  /** Return ritual (06 §13): goon crates by the gate. */
+  private ritual: Ritual | null = null;
+  private crateG = new Graphics();
+  private crateKey = '';
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -281,7 +308,7 @@ export class BridgeScene implements DeptScene {
       onGoon: () => {
         if (this.run.lv.goons >= 3 && !ctx.seen('b.gang')) {
           ctx.markSeen('b.gang');
-          ctx.say('firstHelper', { milestone: true });
+          ctx.say('firstHelper', { type: 'first_helper' });
         }
         this.layoutGoons();
       },
@@ -295,6 +322,7 @@ export class BridgeScene implements DeptScene {
       this.posterC,
       this.signC,
       this.pileG,
+      this.crateG,
       this.grumm,
       this.grummHit,
       this.travG,
@@ -326,6 +354,7 @@ export class BridgeScene implements DeptScene {
     this.partLayer.eventMode = 'none';
     this.fxG.eventMode = 'none';
     this.flash.eventMode = 'none';
+    this.crateG.eventMode = 'none';
 
     this.root.eventMode = 'static';
     this.root.on('pointerdown', () => (this.lastInput = performance.now()));
@@ -334,9 +363,10 @@ export class BridgeScene implements DeptScene {
     this.grummHit.eventMode = 'static';
     this.grummHit.cursor = 'pointer';
     this.grummHit.on('pointertap', () => this.tapGrumm());
-    // Traveler: tap to zoom.
+    // Traveler: tap to look closer (zoom at 1x, Squint pointers, a shifter's flicker).
     this.travHit.eventMode = 'static';
-    this.travHit.on('pointertap', () => this.showZoom());
+    this.travHit.cursor = 'pointer';
+    this.travHit.on('pointertap', () => this.look());
     // Poster: tap to open the notice board.
     this.posterC.eventMode = 'static';
     this.posterC.cursor = 'pointer';
@@ -401,7 +431,6 @@ export class BridgeScene implements DeptScene {
     this.stackG = new Graphics();
     this.badge = new Graphics();
     this.uiG = new Graphics();
-    this.ghost = new Graphics();
     this.ui.addChild(this.uiG, this.status, this.statusR);
 
     const x0 = c.x + 3;
@@ -482,7 +511,7 @@ export class BridgeScene implements DeptScene {
     const buyX = dx + 59;
     this.buyBtn = new Button({ w: right - buyX, h: 16, label: 'BUY', color: 0xc03a3a, shade: 0x7a2020, textColor: C.ink, onTap: () => this.buyMenace() });
     this.buyBtn.position.set(buyX, rowY);
-    this.ui.addChild(this.upgBtn, this.downBtn, this.menaceText, this.upBtn, this.buyBtn, this.badge, this.napText, this.ghost);
+    this.ui.addChild(this.upgBtn, this.downBtn, this.menaceText, this.upBtn, this.buyBtn, this.badge, this.napText);
     this.napText.position.set(this.grummX - 24, this.deckY - 40 * this.S - 10);
     this.shownMenace = -1;
     this.travKey = '';
@@ -632,7 +661,7 @@ export class BridgeScene implements DeptScene {
 
   // ---------- travelers ----------
 
-  private gen(force?: M.GenOpts['force']): M.Traveler {
+  private gen(force?: M.Force): M.Traveler {
     const r = this.run;
     return M.generate(r.seed, r.idx++, { menace: r.menace, booth: r.lv.booth, nose: r.lv.nose, sniffer: r.lv.sniffer, poster: this.poster, force });
   }
@@ -647,9 +676,13 @@ export class BridgeScene implements DeptScene {
   private pullNext(): void {
     if (this.cur) return;
     const step = this.pendingStep();
+    const card = this.lessonCard();
     let t: M.Traveler | undefined;
-    if (step === 'toll' && this.run.stats.travelers === 0) t = this.gen('merchant');
-    else if (step === 'unmask') t = this.gen('heroLesson');
+    if ((step === 'look' || step === 'toll') && this.run.stats.travelers === 0) t = this.gen('merchant');
+    else if (card) {
+      this.lessonSent.add(card);
+      t = this.gen(M.CARD_FORCE[card]);
+    } else if (step === 'unmask') t = this.gen('heroLesson');
     else if (step === 'search') t = this.gen('smugglerLesson');
     else if (this.showdownQueued && Math.random() < 0.4) {
       this.showdownQueued = false;
@@ -671,15 +704,31 @@ export class BridgeScene implements DeptScene {
       lidOpen: false,
       searched: false,
       goonT: 0,
+      looks: 0,
+      shiftT: 0,
     };
     this.notch = 10;
     this.gateOpen = 0;
     this.drawGate();
   }
 
+  /** A rule-card lesson whose board beat is done and whose traveler hasn't come yet (06 §18). */
+  private lessonCard(): string | null {
+    const seen = this.ctx.save.seen;
+    for (const rc of M.RULE_CARDS) {
+      const id = `card_${rc.id}`;
+      if (seen[`ls.${id}`] || !seen[`ls.${id}.board`] || seen[`b.lsv.${rc.id}`] || this.lessonSent.has(rc.id)) continue;
+      return rc.id;
+    }
+    return null;
+  }
+
   private leave(dir: 1 | -1, face: Face = 'calm'): void {
     const c = this.cur;
     if (!c) return;
+    // A rule-card lesson traveler is done once it leaves, whatever the verdict.
+    const card = LESSON_CARD[c.t.scripted];
+    if (card && c.phase !== 'leave') this.ctx.markSeen(`b.lsv.${card}`);
     c.phase = 'leave';
     c.timer = 0;
     c.fromX = c.x;
@@ -704,7 +753,7 @@ export class BridgeScene implements DeptScene {
       this.showdownQueued = true;
       this.run.whisper = 0;
       this.grummSay(['poster', 'bang', 'mask'], 'squint');
-      this.ctx.say('showdown', { milestone: true });
+      this.ctx.say('showdown', { type: 'tier_reached', key: 'showdown' });
     }
   }
 
@@ -744,9 +793,15 @@ export class BridgeScene implements DeptScene {
     const r = this.run;
     if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
     r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
-    const base = c.t.claimFare * mult * M.fareMult(r, this.skulls) * M.streakMult(r.streak);
+    const song = this.songT > 0 ? M.SONG_MULT : 1;
+    const base = c.t.claimFare * mult * M.fareMult(r, this.skulls) * M.streakMult(r.streak) * song;
     const got = this.ctx.earn(base);
     r.stats.tolls++;
+    if (c.t.kind === 'bard') {
+      // Pays in song too (06 §5): +10% tolls for 30 s.
+      this.songT = M.SONG_S;
+      this.ctx.say('bard', { type: 'tier_reached', key: 'bard' });
+    }
     this.coinBurst(c.x + this.tw / 2, this.deckY - this.th / 2, Math.min(8, 2 + Math.round(mult * 2)), got);
     this.say(`PAID ${mult.toFixed(1)}X${r.streak >= 2 ? `  STREAK ${r.streak}` : ''}`, '#2a6a1a');
     this.grummSay(['coin'], 'grin');
@@ -761,11 +816,29 @@ export class BridgeScene implements DeptScene {
     this.collect(this.cur!.h.counter);
   }
 
+  /** Bribes card (Menace 15): the smuggler's offer stands until a search or a demand. */
+  private bribeOpen(): boolean {
+    const c = this.cur;
+    return !!c && c.t.bribe > 0 && c.phase === 'wait' && !c.searched && c.h.round === 0;
+  }
+
+  private takeBribe(): void {
+    if (!this.canAct() || !this.bribeOpen()) return;
+    const c = this.cur!;
+    this.run.stats.bribes++;
+    this.grummSay(['coin', 'check'], 'grin');
+    this.collect(c.t.bribe);
+  }
+
   private waveOrTake(): void {
     if (!this.canAct()) return;
     const c = this.cur!;
     if (c.phase === 'counter') {
       this.takeCounter();
+      return;
+    }
+    if (this.bribeOpen()) {
+      this.takeBribe();
       return;
     }
     this.say('WAVED THROUGH, FREE', '#2a1a3a');
@@ -800,7 +873,7 @@ export class BridgeScene implements DeptScene {
         r.stats.bounty10++;
         if (!this.ctx.seen('b.tier10')) {
           this.ctx.markSeen('b.tier10');
-          this.ctx.say('tier10x', { milestone: true });
+          this.ctx.say('tier10x', { type: 'tier_reached', key: 'bounty10' });
         }
       }
       r.whisper = Math.max(0, r.whisper - 1);
@@ -820,12 +893,12 @@ export class BridgeScene implements DeptScene {
       this.ctx.haptic(30);
       this.shakeT = 0.15;
     } else {
-      r.streak = 0;
-      r.stats.falseAcc++;
+      this.falseAccusation();
       this.falseInRow++;
       if (this.falseInRow >= 3) {
+        // Struggle (06 §18): the offer opens the Poster board.
         this.falseInRow = 0;
-        this.ctx.say('struggle', { milestone: true });
+        this.ctx.say('struggle', { type: 'struggle', offer: () => this.openBoard() });
       }
       this.say('NOT A HERO! STORMS OFF, NO TOLL', '#c03a3a');
       this.ctx.float('WRONG!', c.x + this.tw / 2, this.deckY - this.th - 6, C.redText);
@@ -836,7 +909,23 @@ export class BridgeScene implements DeptScene {
     }
   }
 
+  /** A false Unmask or Search: the Streak breaks; 3 within 60 s and word gets around (06 §4). */
+  private falseAccusation(): void {
+    const r = this.run;
+    r.streak = 0;
+    r.stats.falseAcc++;
+    if (M.falseAccusation(this.falseStamps, this.time)) {
+      this.wordT = M.WORD_S;
+      this.ctx.float('WORD GETS AROUND', this.cx + this.cw / 2 - 30, this.top + 20, C.redText);
+      this.ctx.say('word', { type: 'hazard_first', key: 'word' });
+    }
+  }
+
   private search(): void {
+    if (this.ritual && !this.ritual.done) {
+      this.popCrate();
+      return;
+    }
     if (!this.canAct()) return;
     const c = this.cur!;
     if (c.searched || c.phase !== 'wait') return;
@@ -870,8 +959,7 @@ export class BridgeScene implements DeptScene {
       c.h.offended = true;
       c.face = 'angry';
       this.travKey = '';
-      r.streak = 0;
-      r.stats.falseAcc++;
+      this.falseAccusation();
       this.say('CLEAN! THEY ARE OFFENDED (PURSE -20%)', '#c03a3a');
       this.grummSay(['barrel', 'cross'], 'blush');
       sfx.sad(this.vol());
@@ -893,7 +981,7 @@ export class BridgeScene implements DeptScene {
     this.ctx.haptic(60);
     if (!this.ctx.seen('b.bonk')) {
       this.ctx.markSeen('b.bonk');
-      this.ctx.say('hazardFirst', { milestone: true });
+      this.ctx.say('hazardFirst', { type: 'hazard_first', key: 'bonk' });
     }
     this.leave(1, 'angry');
   }
@@ -948,12 +1036,16 @@ export class BridgeScene implements DeptScene {
     this.ctx.haptic(25);
     this.grummSay(['sign', 'up', 'coin'], 'grin');
     sfx.grumm(this.vol(), 3);
-    const card = M.RULE_CARDS.find((c) => c.m === m);
+    const card = M.cardAt(m);
+    const seen = this.ctx.save.seen;
+    const best = seen['b.mBest'] ?? 0;
+    if (m > best) seen['b.mBest'] = m;
     if (card && !this.ctx.seen(`b.card.${card.id}`)) {
+      // mechanic_unlocked: the director runs the card's micro-lesson (index.ts lessons).
       this.ctx.markSeen(`b.card.${card.id}`);
-      this.ctx.say(`card_${card.id}`, { milestone: true });
+      this.ctx.say(`card_${card.id}`, { type: 'mechanic_unlocked' });
       this.ctx.game.toast(`NEW RULE: ${card.name}. ${card.desc}`);
-    } else if (m === 1 || m % 5 === 0) this.ctx.say('dialRaised', { milestone: true });
+    } else if (m === 1 || m % 5 === 0 || m > best) this.ctx.say('dialRaised', { type: 'dial_raised', key: `m${m}` });
   }
 
   // ---------- coin stack ----------
@@ -1101,6 +1193,27 @@ export class BridgeScene implements DeptScene {
     }
   }
 
+  /** Tap on the traveler: look closer (06 §2 "zoom", §11 "squint"). At 1x the sprite zooms; with
+   * Squint, Grumm points at up to L odd parts; a shifter's Claim flickers on the second look. */
+  private look(): void {
+    const c = this.cur;
+    if (!c || c.phase === 'leave' || c.phase === 'walkIn') return;
+    this.run.stats.looks++;
+    c.looks++;
+    if (this.S === 1) this.showZoom();
+    if (c.t.shift && c.looks >= 2 && !c.revealed) {
+      c.shiftT = 1.6;
+      this.grummSay(['shift', c.t.who, 'bang'], 'squint');
+      sfx.tick(this.vol());
+      this.ctx.haptic(8);
+      return;
+    }
+    const L = M.squintHints(this.run.lv.squint);
+    const hints = M.oddParts(c.t).slice(0, L).map((sl) => SLOT_ICON[sl]);
+    this.grummSay(['eye', ...(hints.length ? hints : [L > 0 ? 'check' : 'question'])], 'squint');
+    this.ctx.haptic(4);
+  }
+
   private showZoom(): void {
     const c = this.cur;
     if (!c || c.phase === 'leave' || c.phase === 'walkIn' || this.S > 1) return;
@@ -1124,6 +1237,8 @@ export class BridgeScene implements DeptScene {
   private openBoard(): void {
     if (this.modal.children.length) return;
     this.run.stats.posterOpens++;
+    // Rule-card lessons: the card has been seen on the board.
+    for (const rc of M.RULE_CARDS) if (this.run.menace >= rc.m) this.ctx.markSeen(`b.board.${rc.id}`);
     const c = this.ctx.content();
     const p = this.poster;
     const box = new Container();
@@ -1170,10 +1285,17 @@ export class BridgeScene implements DeptScene {
       txt(`FAKE TELL TODAY: ${M.HERO_TELL_NAMES[p.fake]} (IGNORE)`, px + 6, y, '#8a1a1a');
       y += 9;
     }
+    if (m >= 15) {
+      const bl = m >= 18 ? 'BRIBE: TAKE IT, OR SEARCH. SHIFTER: TAP TWICE' : 'BRIBE: TAKE IT, OR SEARCH';
+      txt(bl, px + 6, y, '#6a3a1a');
+      y += measure(wrap(bl, pw - 12)).h + 3;
+    }
     // Look guide: the normal look of each Claim.
     txt('WHO LOOKS LIKE WHAT', px + 6, y, '#6a3a1a');
     y += 8;
-    const whos: M.Who[] = this.run.lv.booth ? ['peasant', 'pilgrim', 'merchant', 'adventurer', 'noble'] : ['peasant', 'pilgrim', 'merchant', 'adventurer'];
+    const whos: M.Who[] = ['peasant', 'pilgrim', 'merchant', 'adventurer'];
+    if (this.run.lv.booth >= 1) whos.push('noble');
+    if (this.run.lv.booth >= 2) whos.push('bard');
     const slot = Math.floor((pw - 8) / whos.length);
     const guide = new Graphics();
     whos.forEach((w, i) => {
@@ -1197,9 +1319,9 @@ export class BridgeScene implements DeptScene {
     const ok = 'ODD BUT OK: NO HAT, OLD BOOTS, FLIES, A STINGY MERCHANT IN PATCHES. MERCHANTS ALSO GO TO FORT + CASTLE';
     txt(ok, px + 6, y, '#5a4a3a');
     y += measure(wrap(ok, pw - 12)).h + 4;
-    const cards = M.RULE_CARDS.map((rc) => (m >= rc.m ? `M${rc.m} ${rc.name}: ON` : `M${rc.m} ???`)).join('  ');
+    const cards = M.RULE_CARDS.map((rc) => (m >= rc.m ? `M${rc.m} ${rc.name}` : `M${rc.m} ???`)).join('  ');
     txt(cards, px + 6, y, '#6a3a1a');
-    y += 10;
+    y += measure(wrap(cards, pw - 12)).h + 4;
     txt('TAP TO CLOSE', px + pw - 54, y, '#8a6a4a');
     const ph = Math.min(c.y + c.h - 2, y + 10) - py;
     drawPanel(panel, px, py, pw, ph, 0xe8d8a8, 0x8a5a2a);
@@ -1235,10 +1357,14 @@ export class BridgeScene implements DeptScene {
     }
     if (this.dragging && this.napT <= 0) this.expr = 'squint';
 
-    // Arrivals: one every 7 s; bench overflow goes to the goons.
+    // Arrivals: one every 7 s (fewer while word gets around); bench overflow goes to the goons.
+    if (this.wordT > 0) this.wordT = Math.max(0, this.wordT - dt);
+    if (this.songT > 0) this.songT = Math.max(0, this.songT - dt);
+    this.updateRitual(dt);
     this.arriveT += dt;
-    if (this.arriveT >= M.ARRIVE_S) {
-      this.arriveT -= M.ARRIVE_S;
+    const every = M.ARRIVE_S / (this.wordT > 0 ? M.WORD_TRAFFIC : 1);
+    if (this.arriveT >= every) {
+      this.arriveT -= every;
       const t = this.gen();
       if (this.bench.length < M.benchCap(r.lv.bench)) this.bench.push(t);
       else this.goonPass(t, false);
@@ -1267,6 +1393,7 @@ export class BridgeScene implements DeptScene {
       return;
     }
     c.timer += dt;
+    if (c.shiftT > 0) c.shiftT -= dt;
     if (c.phase === 'walkIn' || c.phase === 'leave') {
       const f = Math.min(1, c.timer / WALK_S);
       c.x = Math.round(c.fromX + (c.toX - c.fromX) * f);
@@ -1275,6 +1402,11 @@ export class BridgeScene implements DeptScene {
           c.phase = 'wait';
           c.timer = 0;
           this.grummSay([c.t.who as string, 'eye'], 'squint');
+          // A scripted traveler at the gate opens its beat (OnboardingStep.waitFor in index.ts).
+          const sc = c.t.scripted;
+          if (sc === 'heroLesson') this.ctx.markSeen('b.obr.unmask');
+          else if (sc === 'smugglerLesson') this.ctx.markSeen('b.obr.search');
+          else if (LESSON_CARD[sc]) this.ctx.markSeen(`b.lsr.${LESSON_CARD[sc]}`);
         } else {
           this.cur = null;
           this.gateOpen = 0;
@@ -1291,7 +1423,7 @@ export class BridgeScene implements DeptScene {
       if (c.timer >= 1.3) this.leave(-1, 'shock');
     } else if (c.phase === 'wait' || c.phase === 'counter') {
       // Goons take the gate while Grumm naps, or after 10 s with no orders (06 §3).
-      const idle = (performance.now() - this.lastInput) / 1000 > IDLE_GATE_S && !this.obStep && !this.modal.children.length;
+      const idle = (performance.now() - this.lastInput) / 1000 > IDLE_GATE_S && !this.obStep && !this.lessonActive() && !this.modal.children.length;
       if (this.napT > 0 || (idle && this.run.lv.goons > 0)) {
         c.goonT += dt;
         if (c.goonT > 1.4) this.goonPass(c.t, true);
@@ -1326,7 +1458,9 @@ export class BridgeScene implements DeptScene {
       // arrow between who and where
       bg.rect(14, 7, 4, 1).fill(0x6a5a7a);
       bg.rect(17, 6, 1, 3).fill(0x6a5a7a);
-      this.claimIcons[0].context = icon(items[0][0]);
+      // A shifter's Claim flickers to the truth for a moment after a second look.
+      const flick = c.shiftT > 0 && Math.floor(this.time * 8) % 2 === 0;
+      this.claimIcons[0].context = icon(flick ? 'adventurer' : items[0][0]);
       this.claimIcons[0].position.set(3, 3);
       this.claimIcons[1].context = icon(items[2][0]);
       this.claimIcons[1].position.set(19, 3);
@@ -1467,9 +1601,20 @@ export class BridgeScene implements DeptScene {
     // Status row: streak (left), Infamy gate progress + Hero Whisper pips (right).
     const target = this.ctx.def.skillTarget(this.ctx.save.cycle.n);
     const gateN = Math.min(M.GATE_UNMASKS, M.evAtLeast(r.ev, target));
-    const goonDuty = act && (performance.now() - this.lastInput) / 1000 > IDLE_GATE_S && r.lv.goons > 0 && !this.obStep;
-    const left = this.napT > 0 ? 'GOONS ON GATE' : goonDuty ? 'GOONS ON DUTY' : r.streak > 0 ? `STREAK ${r.streak} +${r.streak * 5}%` : 'STREAK 0';
-    this.status.set(left, r.streak >= 5 ? '#e8c04a' : C.inkDim);
+    const goonDuty = act && (performance.now() - this.lastInput) / 1000 > IDLE_GATE_S && r.lv.goons > 0 && !this.obStep && !this.lessonActive();
+    const left =
+      this.napT > 0
+        ? 'GOONS ON GATE'
+        : this.wordT > 0
+          ? `WORD GOT OUT ${Math.ceil(this.wordT)}S`
+          : goonDuty
+            ? 'GOONS ON DUTY'
+            : this.songT > 0
+              ? `SONG +10% ${Math.ceil(this.songT)}S`
+              : r.streak > 0
+                ? `STREAK ${r.streak} +${r.streak * 5}%`
+                : 'STREAK 0';
+    this.status.set(left, this.wordT > 0 ? C.redText : r.streak >= 5 || this.songT > 0 ? '#e8c04a' : C.inkDim);
     this.statusR.set(`{skull}${gateN}/5 AT M${target}`, gateN >= 5 ? C.greenText : r.menace >= target ? '#e8c04a' : C.inkDim);
     const sx = this.cx + this.cw - 3 - this.statusR.width;
     this.statusR.position.set(sx, this.sceneBottom + 2);
@@ -1484,14 +1629,21 @@ export class BridgeScene implements DeptScene {
     if (this.respT > 0) this.respT -= dt;
     let msg = '';
     let col = '#2a1a3a';
+    const rit = this.ritual && !this.ritual.done ? this.ritual : null;
     if (this.respT > 0) {
       msg = this.respMsg;
       col = this.respColor;
+    } else if (rit) {
+      msg = `GOON CRATES! HOLD SEARCH ${rit.opened}/${rit.n}`;
+      col = '#6a3a00';
     } else if (this.napT > 0) {
       msg = `GRUMM NAPS ${Math.ceil(this.napT)}S. TAP HIM TO WAKE`;
       col = '#6a4a1a';
     } else if (c?.phase === 'counter') {
       msg = `OFFERS ${c.h.counter.toFixed(1)}X = ${fm(c.t.claimFare * c.h.counter * M.fareMult(r, this.skulls) * M.streakMult(r.streak + (c.h.counter >= M.STREAK_MIN ? 1 : 0)))}. TAP TO TAKE`;
+      col = '#6a3a00';
+    } else if (c?.phase === 'wait' && this.bribeOpen()) {
+      msg = `PSST: BRIBE ${c.t.bribe.toFixed(1)}X = ${fm(c.t.claimFare * c.t.bribe * M.fareMult(r, this.skulls))}. TAP TO TAKE`;
       col = '#6a3a00';
     } else if (c?.phase === 'wait') {
       msg = r.stats.tolls < 3 ? `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}. DRAG COINS UP, LET GO` : `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}{coin}`;
@@ -1500,7 +1652,7 @@ export class BridgeScene implements DeptScene {
     else if (!c) msg = 'WAITING FOR TRAVELERS...';
     const rw = this.cw - 6;
     const bg = this.respBg.clear();
-    const hot = c?.phase === 'counter' && this.respT <= 0;
+    const hot = (c?.phase === 'counter' || this.bribeOpen()) && this.respT <= 0;
     bg.rect(0, 0, rw, 16).fill(OUTLINE);
     bg.rect(1, 1, rw - 2, 14).fill(hot ? (Math.floor(this.time * 3) % 2 ? 0xfff0a0 : 0xf4e8c1) : 0xe8dcc0);
     this.respText.set(msg.slice(0, Math.floor((rw - 6) / 4)), col);
@@ -1544,11 +1696,12 @@ export class BridgeScene implements DeptScene {
 
     // Buttons.
     const waiting = c?.phase === 'wait' && act;
-    this.unmaskBtn.setEnabled(!!waiting);
-    this.searchBtn.setEnabled(!!waiting && !c?.searched);
+    this.unmaskBtn.setEnabled(!!waiting && !rit);
+    this.searchBtn.setEnabled(!!rit || (!!waiting && !c?.searched));
     this.unmaskBtn.setSub('HOLD');
-    this.searchBtn.setSub(c?.searched ? 'DONE' : 'HOLD');
+    this.searchBtn.setSub(rit ? 'CRATE' : c?.searched ? 'DONE' : 'HOLD');
     if (c?.phase === 'counter') this.waveBtn.setLabel('TAKE', `${c.h.counter.toFixed(1)}X`).setColor(0x8fd14f, 0x4a7a22);
+    else if (this.bribeOpen()) this.waveBtn.setLabel('BRIBE', `${c!.t.bribe.toFixed(1)}X`).setColor(0x8fd14f, 0x4a7a22);
     else this.waveBtn.setLabel('WAVE', 'FREE').setColor(C.edge, 0x3a2046);
     this.waveBtn.setEnabled(act);
     this.askBtn.setLabel('ASK', `${mult.toFixed(1)}X`).setEnabled(act);
@@ -1567,35 +1720,6 @@ export class BridgeScene implements DeptScene {
       this.drawSign();
     }
     this.napText.set(this.napT > 0 ? `ZZZ ${Math.ceil(this.napT)}` : '');
-
-    // Onboarding: glow + ghost finger on the control the current step needs.
-    const gh = this.ghost.clear();
-    const step = this.obStep;
-    let target2: { x: number; y: number; w: number; h: number } | null = null;
-    let drag = false;
-    if (step === 'toll' && c && (c.phase === 'wait' || c.phase === 'counter')) {
-      target2 = { x: this.stackX, y: this.stackY, w: 30, h: this.stackH };
-      drag = true;
-    } else if (step === 'hire') target2 = { x: this.upgBtn.x, y: this.upgBtn.y, w: this.upgBtn.width, h: 16 };
-    else if (step === 'unmask' && c?.phase === 'wait') target2 = { x: this.unmaskBtn.x, y: this.unmaskBtn.y, w: 56, h: 30 };
-    else if (step === 'search' && c?.phase === 'wait') target2 = { x: this.searchBtn.x, y: this.searchBtn.y, w: 56, h: 30 };
-    else if (step === 'poster') {
-      const px = this.cx + 3;
-      const py = this.deckY - 50;
-      target2 = { x: px - 1, y: py - 1, w: 26, h: 29 };
-    }
-    if (target2 && Math.floor(this.time * 3) % 2 === 0) {
-      const { x, y, w, h } = target2;
-      gh.rect(x - 2, y - 2, w + 4, 1).rect(x - 2, y + h + 1, w + 4, 1).rect(x - 2, y - 1, 1, h + 2).rect(x + w + 1, y - 1, 1, h + 2).fill(0xfff0a0);
-    }
-    if (target2) {
-      // ghost finger
-      const t = (this.time % 1.6) / 1.6;
-      const fx = target2.x + Math.floor(target2.w / 2) - 2;
-      const fy = drag ? target2.y + target2.h - 8 - Math.round(t * Math.min(30, target2.h - 12)) : target2.y + Math.floor(target2.h / 2) + (t < 0.5 ? 0 : 1);
-      gh.rect(fx, fy, 3, 6).fill({ color: 0xffffff, alpha: 0.75 });
-      gh.rect(fx - 1, fy + 5, 7, 5).fill({ color: 0xffffff, alpha: 0.75 });
-    }
 
     // Bench minis (redrawn only when the bench changes).
     const key = this.bench.map((t) => t.id).join(',') + `|${M.benchCap(r.lv.bench)}`;
@@ -1626,13 +1750,145 @@ export class BridgeScene implements DeptScene {
       b.rect(4, 2, 1, 3).fill(0xffffff);
       b.rect(4, 6, 1, 1).fill(0xffffff);
     }
-    // Ambient flavour, only when nothing intense is happening (06 §18 isIntense).
-    this.flavorT -= 0.5;
-    const intense = this.dragging || this.unmaskBtn.isHolding || this.searchBtn.isHolding || this.cur?.phase === 'counter' || this.cur?.phase === 'reveal' || this.cur?.phase === 'search';
-    if (this.flavorT <= 0 && !intense) {
-      this.flavorT = 45;
-      this.ctx.say('flavor');
+    // Goons bought elsewhere (the Steward, Head Start) show up on the bank.
+    if (this.shownGoons !== this.run.lv.goons) {
+      this.shownGoons = this.run.lv.goons;
+      this.layoutGoons();
     }
+  }
+
+  /** True while the current traveler is a rule-card lesson's (the goons leave it alone). */
+  private lessonActive(): boolean {
+    return !!LESSON_CARD[this.cur?.t.scripted ?? ''];
+  }
+
+  // ---------- core hooks ----------
+
+  /** 06 §18: a Coin Stack drag, a verdict hold, the Unmask or Search animation, a counter waiting
+   * (and the return ritual). */
+  isIntense(): boolean {
+    const ph = this.cur?.phase;
+    return (
+      this.dragging ||
+      this.unmaskBtn.isHolding ||
+      this.searchBtn.isHolding ||
+      ph === 'counter' ||
+      ph === 'search' ||
+      ph === 'reveal' ||
+      this.bribeOpen() ||
+      !!(this.ritual && !this.ritual.done)
+    );
+  }
+
+  targetRect(id: string): Rect | null {
+    const c = this.cur;
+    const btn = (b: Container, w: number, h: number): Rect => ({ x: b.x, y: b.y, w, h });
+    switch (id) {
+      case 'traveler':
+        if (!c || (c.phase !== 'wait' && c.phase !== 'counter')) return null;
+        return { x: this.travX - 2, y: this.deckY - this.th - 2, w: this.tw + 4, h: this.th + 4 };
+      case 'stack':
+        return { x: this.stackX, y: this.stackY, w: 30, h: this.stackH };
+      case 'stackGrab': {
+        if (!c || c.phase !== 'wait') return null;
+        const y = this.notchY(10) - 3;
+        return { x: this.stackX, y, w: 30, h: this.stackY + this.stackH - y };
+      }
+      case 'stackBand': {
+        if (!c) return null;
+        const b = M.band(c.t, this.run.lv.sense, c.h.offended);
+        const n = Math.max(M.NOTCH_MIN, Math.min(M.NOTCH_MAX, Math.round(b[0] * 10 + 1)));
+        return { x: this.stackX, y: this.notchY(n) - 3, w: 30, h: 6 };
+      }
+      case 'upgrades':
+        return btn(this.upgBtn, this.upgBtn.width, 16);
+      case 'menace':
+        return btn(this.buyBtn, this.buyBtn.width, 16);
+      case 'unmask':
+        return this.unmaskBtn.enabled ? btn(this.unmaskBtn, 56, 30) : null;
+      case 'search':
+        return this.searchBtn.enabled ? btn(this.searchBtn, 56, 30) : null;
+      case 'ask':
+        return btn(this.askBtn, this.askBtn.width, 29);
+      case 'resp':
+        return { x: this.resp.x, y: this.resp.y, w: this.cw - 6, h: 16 };
+      case 'poster':
+        return this.modal.children.length ? null : { x: this.cx + 2, y: this.deckY - 51, w: 26, h: 29 };
+      case 'grumm':
+        return { x: this.grummX, y: this.deckY - 40 * this.S, w: 36 * this.S, h: 40 * this.S };
+      case 'crates':
+        return this.ritual && !this.ritual.done ? this.crateRect() : null;
+      default:
+        return null;
+    }
+  }
+
+  /** Return ritual (06 §13, 00 §5.3): goon crates stacked by the gate; hold SEARCH to pop each
+   * open (eels, ore, potions). Score = crates opened / crates, within ~6 s. */
+  returnRitual(haul: number): Promise<number> {
+    if (this.ritual && !this.ritual.done) return Promise.resolve(0);
+    return new Promise<number>((resolve) => {
+      this.ritual = { n: RITUAL_CRATES, opened: 0, t: 0, done: false, resolve };
+      this.crateKey = '';
+      this.grummSay(['crate', 'goon', 'coin'], 'grin');
+      void haul;
+    });
+  }
+
+  private crateRect(): Rect {
+    const x = this.gateX + 6;
+    const w = Math.max(14, this.grummX - x - 2);
+    return { x, y: this.deckY - 21, w, h: 21 };
+  }
+
+  private updateRitual(dt: number): void {
+    const rit = this.ritual;
+    if (!rit) return;
+    if (!rit.done) {
+      rit.t += dt;
+      if (rit.opened >= rit.n || rit.t >= RITUAL_S) this.endRitual();
+    }
+    const key = rit.done ? 'done' : `${rit.opened}`;
+    if (key === this.crateKey) return;
+    this.crateKey = key;
+    const g = this.crateG.clear();
+    if (rit.done) return;
+    const r = this.crateRect();
+    for (let i = rit.opened; i < rit.n; i++) {
+      // a little pyramid of 9x9 crates: 3 at the bottom, 2 on top
+      const row = i < 3 ? 0 : 1;
+      const col = i < 3 ? i : i - 3;
+      const x = r.x + 1 + col * 10 + row * 5;
+      const y = this.deckY - 9 - row * 9;
+      g.rect(x - 1, y - 1, 11, 11).fill(OUTLINE);
+      g.rect(x, y, 9, 9).fill(WOOD);
+      g.rect(x + 1, y + 1, 7, 7).fill(WOOD_D);
+      g.rect(x + 1, y + 4, 7, 1).fill(WOOD_L);
+      g.rect(x + 4, y + 1, 1, 7).fill(WOOD_L);
+    }
+  }
+
+  private popCrate(): void {
+    const rit = this.ritual;
+    if (!rit || rit.done || rit.opened >= rit.n) return;
+    const i = rit.opened++;
+    const r = this.crateRect();
+    const row = i < 3 ? 0 : 1;
+    const x = r.x + 5 + (i < 3 ? i : i - 3) * 10 + row * 5;
+    const y = this.deckY - 6 - row * 9;
+    this.eels(x, y);
+    this.poof(x, y);
+    sfx.clink(this.vol(), 2 + i);
+    this.ctx.haptic(12);
+  }
+
+  private endRitual(): void {
+    const rit = this.ritual;
+    if (!rit || rit.done) return;
+    rit.done = true;
+    const score = rit.n > 0 ? rit.opened / rit.n : 0;
+    if (score >= 1) this.grummSay(['crate', 'check', 'coin'], 'thump');
+    rit.resolve(Math.max(0, Math.min(1, score)));
   }
 
   resize(_layout: Layout): void {
@@ -1642,6 +1898,7 @@ export class BridgeScene implements DeptScene {
   }
 
   destroy(): void {
+    this.endRitual();
     this.stack.removeAllListeners();
     this.root.destroy({ children: true });
   }

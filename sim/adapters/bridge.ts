@@ -4,7 +4,11 @@
 // a fresh bench on entry, one arrival every ARRIVE_S (bench overflow goes to the goons), walk-in /
 // decide / walk-out timing, Search (1.1 s) and Unmask reveals (1.3 s), counters, bonks and
 // naps (goons take the gate, taps on Grumm shorten the nap), the streak, the Hero Whisper and its
-// showdown, the onboarding's scripted travelers, and the evidence-gated Infamy skill gate.
+// showdown, the onboarding's scripted travelers, the evidence-gated Infamy skill gate, "word gets
+// around" (3 false accusations in 60 s slow arrivals 20% for 30 s), the Bard's song (+10% tolls for
+// 30 s), the Bribes card (a bribe the bot takes unless it reads smuggling) and the Shapeshifters
+// card (the bot looks twice and notices the flicker like any other tell). Squint only points at
+// parts in the scene, so it has no rule to mirror.
 // The shop is the real upgrade list (src/depts/bridge/upgrades.ts buildGroups) on a headless
 // DeptCtx, so costs, caps and the Menace dial match the game.
 //
@@ -101,6 +105,7 @@ function readTraveler(t: M.Traveler, menace: number, poster: M.Poster, sk: (type
     else if (HERO_PARTS.has(part)) hero++;
   }
   if (!normal.where.includes(t.where) && rnd() < sk.notice) hero++;
+  if (t.shift && rnd() < sk.notice) hero++;
   const checks = rnd() < sk.poster;
   if (checks && t.writ === 2) hero++;
   if (checks && M.posterMatches(poster, t.look) >= 2) hero = Math.max(2, hero);
@@ -145,6 +150,11 @@ function expectedPerTraveler(r: M.BridgeRun, sk: (typeof SKILL)[Skill]): number 
       continue;
     }
     const h: M.Haggle = { round: 0, counter: 0, offended: false };
+    if (t.bribe > 0 && !read.smuggle) {
+      streak = Math.min(10, streak + 1);
+      total += t.claimFare * t.bribe * pm * M.streakMult(streak);
+      continue;
+    }
     if (read.smuggle) {
       if (t.smuggler) {
         total += t.kindFare * 4 * pm;
@@ -219,6 +229,10 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     let arriveT = 0;
     let napT = 0;
     let showdownQueued = false;
+    let clock = 0;
+    let wordT = 0;
+    let songT = 0;
+    const falseStamps: number[] = [];
     // Passive (calibration): play normally until the first goon is hired, then give no orders.
     const passive = () => !!opts.passive && r.lv.goons > 0;
     if (!opts.passive) r.stats.posterOpens++;
@@ -272,8 +286,9 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       const c = cur!;
       if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
       r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
-      env.earn(c.t.claimFare * mult * M.fareMult(r, skulls()) * M.streakMult(r.streak));
+      env.earn(c.t.claimFare * mult * M.fareMult(r, skulls()) * M.streakMult(r.streak) * (songT > 0 ? M.SONG_MULT : 1));
       r.stats.tolls++;
+      if (c.t.kind === 'bard') songT = M.SONG_S;
       heroSlipped();
       leave();
     }
@@ -317,10 +332,14 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         c.phase = 'reveal';
         c.timer = 0;
       } else {
-        r.streak = 0;
-        r.stats.falseAcc++;
+        falseAcc();
         leave();
       }
+    }
+    function falseAcc(): void {
+      r.streak = 0;
+      r.stats.falseAcc++;
+      if (M.falseAccusation(falseStamps, clock)) wordT = M.WORD_S;
     }
     function finishSearch(): void {
       const c = cur!;
@@ -331,8 +350,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         c.timer = 0.3;
       } else {
         c.h.offended = true;
-        r.streak = 0;
-        r.stats.falseAcc++;
+        falseAcc();
         c.phase = 'wait';
         c.timer = 0;
         c.think = 0.5 + 0.5 * rnd();
@@ -367,14 +385,23 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         c.timer = 0;
         return;
       }
+      if (c.t.bribe > 0 && !c.searched && c.h.round === 0) {
+        r.stats.bribes = (r.stats.bribes ?? 0) + 1;
+        collect(c.t.bribe);
+        return;
+      }
       demand(demandFor(c.t, r, c.h.offended, read.hero > 0 || c.t.who === 'adventurer', sk, rnd));
     }
 
     function stepH(h: number): void {
       if (napT > 0) napT = Math.max(0, napT - h * (1 + (passive() ? 0 : sk.taps)));
+      clock += h;
+      if (wordT > 0) wordT = Math.max(0, wordT - h);
+      if (songT > 0) songT = Math.max(0, songT - h);
       arriveT += h;
-      if (arriveT >= M.ARRIVE_S) {
-        arriveT -= M.ARRIVE_S;
+      const every = M.ARRIVE_S / (wordT > 0 ? M.WORD_TRAFFIC : 1);
+      if (arriveT >= every) {
+        arriveT -= every;
         const t = gen();
         if (bench.length < M.benchCap(r.lv.bench)) bench.push(t);
         else goonPass(t, false);

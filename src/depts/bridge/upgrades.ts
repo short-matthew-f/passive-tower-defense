@@ -38,11 +38,9 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('fists', 'Big Fists', () => `BONK CHANCE X${M.brawnMult(r().lv.fists).toFixed(2)} -> X${M.brawnMult(r().lv.fists + 1).toFixed(2)}`),
   ];
   const eye = [
+    node('squint', 'Squint', () => `TAP A TRAVELER: GRUMM POINTS AT ${M.squintHints(r().lv.squint)} -> ${M.squintHints(r().lv.squint + 1)} ODD PARTS`),
     node('sense', 'Wallet Sense', () => `PURSE BAND +-${pct(M.senseBand(r().lv.sense))} -> +-${pct(M.senseBand(r().lv.sense + 1))}`, () => {
-      if (!ctx.seen('b.sense')) {
-        ctx.markSeen('b.sense');
-        ctx.say('senseUp', { milestone: true });
-      }
+      ctx.say('senseUp', { type: 'first_upgrade', key: 'sense' });
     }),
     node('nose', 'Hero Nose', () => `TELLS SHOW ${pct(M.visibleChance(r().lv.nose))} -> ${pct(M.visibleChance(r().lv.nose + 1))}`),
     node('sniffer', 'Sniffer Dog', () => `SNIFFS SMUGGLERS ${pct(M.sniffChance(r().lv.sniffer))} -> ${pct(M.sniffChance(r().lv.sniffer + 1))}`),
@@ -50,7 +48,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
   const bridge = [
     node('signage', 'Fancy Signage', () => `ALL FARES X${M.signageMult(r().lv.signage).toFixed(2)} -> X${M.signageMult(r().lv.signage + 1).toFixed(2)}`),
     node('bench', 'Waiting Bench', () => `BENCH ${M.benchCap(r().lv.bench)} -> ${M.benchCap(r().lv.bench + 1)} TRAVELERS`),
-    node('booth', 'Toll Booth', () => (r().lv.booth ? 'NOBLES VISIT (FARE 30)' : 'UNLOCKS NOBLES: FARE 30')),
+    node('booth', 'Toll Booth', () => (r().lv.booth >= 2 ? 'NOBLES + BARDS VISIT' : r().lv.booth ? 'UNLOCKS BARDS: PAY IN SONG +10%' : 'UNLOCKS NOBLES: FARE 30')),
     node('charter', 'Royal Toll Charter', () => longDesc(M.CHARTERS, r().lv.charter ?? 0), undefined, () => longLocked(ctx.save.cycle.n)),
   ];
   const goons = [
