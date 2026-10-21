@@ -81,6 +81,7 @@ export class CauldronScene implements DeptScene {
   private spoonNext = new Sprite();
   private nextText = new PixelText('NEXT', '#1c3008', null);
   private brewText = new PixelText('', '#9ad43a');
+  private tokenText = new PixelText('', '#e8c04a');
   private overflowText = new PixelText('', '#9ad43a');
   private chutes: Button[] = [];
   private upBtn!: Button;
@@ -160,6 +161,7 @@ export class CauldronScene implements DeptScene {
       this.spoonNext,
       this.nextText,
       this.brewText,
+      this.tokenText,
       this.overflowText,
     );
 
@@ -226,7 +228,8 @@ export class CauldronScene implements DeptScene {
     this.malUp.position.set(this.bx + 18, this.potY + 19);
     this.maliceLabel.position.set(this.bx + 4, this.potY + 3);
     this.maliceText.position.set(this.bx + 4, this.potY + 11);
-    this.brewText.position.set(this.bx + 78, this.btnY + 4);
+    this.brewText.position.set(this.bx + 78, this.btnY);
+    this.tokenText.position.set(this.bx + 78, this.btnY + 8);
     this.drawStatic();
   }
 
@@ -584,6 +587,7 @@ export class CauldronScene implements DeptScene {
       this.brewT = 0;
       this.brewText.set(`BREW ${formatNum(this.brewRate)}/S`);
     }
+    this.tokenText.set(`{coin}${formatNum(this.per.tokens)} BATCH TOKENS`);
     if (this.overflowAcc > 0) {
       this.overflowText.set(`+${formatNum(this.overflowAcc)}`);
       this.overflowShow = 0.8;

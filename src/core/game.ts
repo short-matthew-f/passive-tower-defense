@@ -184,7 +184,12 @@ export class Game {
         this.econTick(now);
       }
     }
-    this.scene?.update(dt);
+    try {
+      this.scene?.update(dt);
+    } catch (err) {
+      this.recover(err);
+      return;
+    }
     this.hud?.update();
     this.manager.update(dt);
     this.floatLayer.update(dt);
@@ -478,6 +483,22 @@ export class Game {
     this.app.stage.hitArea = { contains: () => true };
     if (this.current === 'throne') this.goThrone();
     else this.enter(this.current);
+  }
+
+  /** A department threw during its update: save, drop back to the Throne Room, and say so. */
+  private recovering = false;
+  recover(err: unknown): void {
+    console.error(err);
+    if (this.recovering) return;
+    this.recovering = true;
+    const where = this.current;
+    try {
+      this.persistSync();
+      this.goThrone();
+      this.toast(`THE ${String(where).toUpperCase()} MINIONS TRIPPED. YOUR PROGRESS IS SAFE. (${String((err as Error)?.message ?? err).slice(0, 60)})`);
+    } finally {
+      this.recovering = false;
+    }
   }
 
   private showReadOnly(): void {

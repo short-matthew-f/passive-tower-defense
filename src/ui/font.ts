@@ -70,19 +70,7 @@ export function wrap(text: string, maxW: number): string {
     .join('\n');
 }
 
-const cache = new Map<string, Texture>();
-
-function textTexture(text: string, color: string, shadow: string | null): Texture {
-  const key = `${text}|${color}|${shadow}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
-  const src = expand(text);
-  const { w, h } = measure(text);
-  const sh = shadow ? 1 : 0;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, w + sh);
-  canvas.height = Math.max(1, h + sh);
-  const ctx = canvas.getContext('2d')!;
+function drawText(ctx: CanvasRenderingContext2D, src: string, color: string, shadow: string | null): void {
   const draw = (fill: string, ox: number, oy: number) => {
     ctx.fillStyle = fill;
     src.split('\n').forEach((line, li) => {
@@ -96,24 +84,18 @@ function textTexture(text: string, color: string, shadow: string | null): Textur
   };
   if (shadow) draw(shadow, 1, 1);
   draw(color, 0, 0);
-  const tex = new Texture({ source: new CanvasSource({ resource: canvas, scaleMode: 'nearest' }) });
-  if (cache.size > 2000) {
-    // Text that changes every frame (counters) would otherwise grow the cache forever.
-    for (const [k, t] of cache) {
-      t.destroy(true);
-      cache.delete(k);
-      if (cache.size < 1000) break;
-    }
-  }
-  cache.set(key, tex);
-  return tex;
 }
 
-/** A sprite showing pixel text. Call set() to change it; textures are cached by content. */
+/**
+ * A sprite showing pixel text. Each instance owns one canvas texture and redraws it in place
+ * when the text changes, so memory stays bounded and no texture is ever freed while on screen.
+ */
 export class PixelText extends Sprite {
   private _text = '';
   private _color: string;
   private _shadow: string | null;
+  private canvas: HTMLCanvasElement | null = null;
+  private owned: Texture | null = null;
 
   constructor(text = '', color = '#f4e8c1', shadow: string | null = '#0a0410') {
     super(Texture.EMPTY);
@@ -127,11 +109,45 @@ export class PixelText extends Sprite {
     if (text === this._text && (color === undefined || color === this._color)) return this;
     this._text = text;
     if (color) this._color = color;
-    this.texture = text ? textTexture(text, this._color, this._shadow) : Texture.EMPTY;
+    if (!text) {
+      this.texture = Texture.EMPTY;
+      return this;
+    }
+    const src = expand(text);
+    const { w, h } = measure(text);
+    const sh = this._shadow ? 1 : 0;
+    const cw = Math.max(1, w + sh);
+    const ch = Math.max(1, h + sh);
+    if (!this.canvas || !this.owned || this.canvas.width !== cw || this.canvas.height !== ch) {
+      // Size changed: replace our own texture (never shared, so freeing it is safe).
+      const old = this.owned;
+      this.canvas = document.createElement('canvas');
+      this.canvas.width = cw;
+      this.canvas.height = ch;
+      drawText(this.canvas.getContext('2d')!, src, this._color, this._shadow);
+      this.owned = new Texture({ source: new CanvasSource({ resource: this.canvas, scaleMode: 'nearest' }) });
+      this.texture = this.owned;
+      old?.destroy(true);
+    } else {
+      const ctx = this.canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, cw, ch);
+      drawText(ctx, src, this._color, this._shadow);
+      this.owned.source.update();
+    }
     return this;
   }
 
   get text(): string {
     return this._text;
+  }
+
+  override destroy(options?: Parameters<Sprite['destroy']>[0]): void {
+    const owned = this.owned;
+    this.owned = null;
+    this.canvas = null;
+    // Detach first so a destroy({ texture: true }) never frees our texture twice.
+    this.texture = Texture.EMPTY;
+    super.destroy(options);
+    owned?.destroy(true);
   }
 }
