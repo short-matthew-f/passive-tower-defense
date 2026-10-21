@@ -19,6 +19,8 @@ export class DeptHud extends Container {
   private rate = new PixelText('', '#9c8aa8');
   private bars = new Graphics();
   private infText = new PixelText('', '#9c8aa8');
+  private tribute = new PixelText('', '#e8c04a');
+  private dread = new PixelText('', '#c070e0');
   private legendBtn: Button;
   private infHit = new Container();
   private blink = 0;
@@ -47,22 +49,22 @@ export class DeptHud extends Container {
     this.addChild(this.bank, this.rate);
 
     this.legendBtn = new Button({
-      w: 44,
-      h: 17,
+      w: 50,
+      h: 10,
       label: '{skull}LEGEND',
       color: C.red,
       shade: 0x7a2020,
       textColor: C.ink,
       onTap: () => game.startFall(def.id),
     });
-    this.legendBtn.position.set(x0 + w - 46, 3);
+    this.legendBtn.position.set(x0 + w - 52, 12);
     this.addChild(this.legendBtn);
 
-    this.addChild(this.bars, this.infText);
+    this.addChild(this.bars, this.infText, this.tribute, this.dread);
     // Tapping the Infamy bar explains both gates.
     this.infHit.eventMode = 'static';
     this.infHit.hitArea = new Rectangle(x0 + w - 62, 0, 62, HUD_H);
-    this.infHit.on('pointertap', () => this.explainInfamy());
+    this.infHit.on('pointertap', () => (this.d.cycle.legendWaiting ? game.startFall(def.id) : this.explainInfamy()));
     this.addChild(this.infHit);
     this.update();
   }
@@ -92,13 +94,23 @@ export class DeptHud extends Container {
     this.blink += 1;
     if (legend) this.legendBtn.alpha = Math.floor(this.blink / 30) % 2 ? 1 : 0.75;
 
+    // Row 1 right: the empire's shared currencies, always visible.
+    this.dread.set(`${formatNum(this.game.save.meta.dread, notation)} DREAD`);
+    this.dread.position.set(x0 + w - this.dread.width - 2, 4);
+    this.tribute.set(`{coin}${formatNum(this.game.save.meta.tribute, notation)}`);
+    this.tribute.position.set(this.dread.x - this.tribute.width - 5, 4);
+
+    // Row 2 right: Infamy (skill | economy), replaced by the Legend button when one waits.
     const g = this.bars.clear();
-    const bx = legend ? x0 + w - 98 : x0 + w - 52;
-    const bw = 24;
-    drawBar(g, bx, 12, bw, 5, inf.skill, C.green);
-    drawBar(g, bx + bw + 1, 12, bw, 5, inf.econ, C.gold);
-    this.infText.set(`INFAMY ${Math.floor(inf.value)}%`);
-    this.infText.position.set(bx, 4);
-    this.infHit.hitArea = new Rectangle(bx, 0, bw * 2 + 2, HUD_H);
+    const bw = 17;
+    const bx = x0 + w - (bw * 2 + 3);
+    this.bars.visible = !legend;
+    this.infText.visible = !legend;
+    drawBar(g, bx, 13, bw, 5, inf.skill, C.green);
+    drawBar(g, bx + bw + 1, 13, bw, 5, inf.econ, C.gold);
+    this.infText.set(`INF ${Math.floor(inf.value)}%`);
+    this.infText.position.set(bx - this.infText.width - 3, 13);
+    // Generous target: the whole right half of row 2 (Infamy, or the Legend when one waits).
+    this.infHit.hitArea = new Rectangle(x0 + w - 72, 11, 72, HUD_H - 11);
   }
 }
