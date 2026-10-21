@@ -33,22 +33,28 @@ export class ManagerBubble extends Container {
   private toastBg = new Graphics();
   private toastText = new PixelText('');
   private toastTimer = 0;
+  private chip = new Container();
+  private chipBg = new Graphics();
+  private chipText = new PixelText('', '#f4e8c1', null);
   private onboarding: { def: DeptDef; d: DeptSave; steps: OnboardingStep[]; i: number } | null = null;
 
   constructor(game: Game) {
     super();
     this.game = game;
-    this.bubble.addChild(this.bg, this.portrait, this.textSprite);
-    this.bubble.visible = false;
-    this.bubble.eventMode = 'static';
-    this.bubble.on('pointertap', (e) => {
+    // Touches pass through the bubble (it never blocks play); only the small chip is tappable.
+    this.chip.addChild(this.chipBg, this.chipText);
+    this.chip.eventMode = 'static';
+    this.chip.cursor = 'pointer';
+    this.chip.on('pointertap', (e) => {
       e.stopPropagation();
       this.dismiss();
     });
+    this.bubble.addChild(this.bg, this.portrait, this.textSprite, this.chip);
+    this.bubble.visible = false;
+    this.bubble.eventMode = 'passive';
     this.toastBox.addChild(this.toastBg, this.toastText);
     this.toastBox.visible = false;
-    this.toastBox.eventMode = 'static';
-    this.toastBox.on('pointertap', () => (this.toastTimer = 0));
+    this.toastBox.eventMode = 'none';
     this.addChild(this.bubble, this.toastBox);
   }
 
@@ -153,7 +159,7 @@ export class ManagerBubble extends Container {
     const L = this.game.layout;
     const w = L.w - L.safe.l - L.safe.r - 4;
     const pw = 12 * PORTRAIT_PX;
-    const textW = w - pw - 12;
+    const textW = w - pw - 30; // leaves room for the chip
     const name = `${line.def.manager.name.toUpperCase()}:`;
     const body = wrap(line.text, textW);
     const full = `${name}\n${body}`;
@@ -166,7 +172,14 @@ export class ManagerBubble extends Container {
     this.textSprite.set(full, '#2a1a3a');
     this.portrait.position.set(4, 3);
     this.bubble.position.set(L.safe.l + 2, L.safe.t + HUD_H + 2);
-    this.bubble.hitArea = new Rectangle(0, 0, w, h);
+    const label = line.pinned ? 'SKIP' : 'X';
+    this.chipText.set(label);
+    const cw = this.chipText.width + 6;
+    this.chipBg.clear().rect(0, 0, cw, 9).fill(C.edge);
+    this.chipText.position.set(3, 2);
+    this.chip.position.set(w - cw - 2, h - 11);
+    // Generous touch target around the small chip.
+    this.chip.hitArea = new Rectangle(-6, -6, cw + 10, 19);
     this.bubble.visible = true;
     this.drawPortrait(0);
   }
