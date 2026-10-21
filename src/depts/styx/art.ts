@@ -103,6 +103,51 @@ const SOULS: Record<string, { rows: string[]; tail: [string, string]; pal: Recor
     tail: ['b.bb.bb.bb.', '.bb.bb.bb.b'],
     pal: { a: 0x7888b8, b: 0x485888, e: 0xf0f0ff, g: 0xe8c04a, r: 0xc03a3a, m: 0x1a2040 },
   },
+  chorister: {
+    rows: ['..hhhhh..', '.hhhhhhh.', '.aaaaaaa.', 'aaeaaaeaa', 'aaaaoaaaa', 'aaaaoaaab', 'brrrrrrbb', 'bbaaaabbb'],
+    tail: ['b.bb.bb..', '.bb.bb.b.'],
+    pal: { a: 0xe0a0a0, b: 0x9a5a5a, e: EYE, h: 0x5a1a2a, o: 0x2a0a10, r: 0xc03a3a },
+  },
+  siren: {
+    rows: ['.hh...hh.', 'hhhhhhhhh', '.haaaaah.', 'haeaaaeah', '.aaaoaaa.', 'aaaaaaaab', 'baaaaaabb', 'bbaaaabbb'],
+    tail: ['bb.b.b.bb', 'b.bb.bb.b'],
+    pal: { a: 0xf08080, b: 0xb04848, e: 0xfff0a0, h: 0xc03050, o: 0x400818 },
+  },
+  conductor: {
+    rows: ['.......s.', '..hhhh.s.', '.hhhhhhs.', '.aaaaaas.', 'aaeaaeaas', 'aaaaaaaaa', 'aaawwwaab', 'baaaaaabb', 'bbaaaabbb'],
+    tail: ['b.bb.bb..', '.bb.bb.b.'],
+    pal: { a: 0xf06060, b: 0xa03030, e: 0xffffff, h: 0x2a0a14, s: 0xf4e8c1, w: 0x400818 },
+  },
+  forgotten: {
+    rows: ['..aaaaa..', '.aaaaaaa.', 'aaaaaaaaa', 'aaeaaaeaa', 'aaaaaaaaa', 'aaaaaaaab', 'baaaaaabb', 'bbaaaabbb'],
+    tail: ['b.bb.bb..', '.bb.bb.b.'],
+    pal: { a: 0xf0f0f4, b: 0xb8b8c8, e: 0xc8c8d8 },
+  },
+  wanderer: {
+    rows: ['...hhh...', '..hhhhh..', '.aaaaaaa.', 'aaaaaaaaa', 'aa.aaa.aa', 'aaaaaaaab', 'baaaaaabb', 'bbaaaabbb'],
+    tail: ['b..b..b..', '.b..b..b.'],
+    pal: { a: 0xdce4f0, b: 0x98a4b8, h: 0x8890a8 },
+  },
+  leviathan: {
+    rows: [
+      '..s.s.s.s.s..',
+      '.aaaaaaaaaaa.',
+      'aaaaaaaaaaaaa',
+      'aeeaaaaaaaeea',
+      'aaaaaaaaaaaaa',
+      'atttttttttttb',
+      'aat.t.t.t.tab',
+      'baaaaaaaaaabb',
+      'bbaaaaaaaabbb',
+    ],
+    tail: ['bb.bbb.bbb.b.', '.bbb.bbb.bbb.'],
+    pal: { a: 0xc8d0e8, b: 0x8088a8, e: 0x101018, s: 0xf4f4ff, t: 0xffffff },
+  },
+  ripper: {
+    rows: ['.s.....s.', 'ss.aaa.ss', '.saaaaas.', 'aaeaaaeaa', 'atttttta.', '.aaaaaaab', 'bbaaaabbb'],
+    tail: ['b.b.b.b..', '.b.b.b.b.'],
+    pal: { a: 0x302030, b: 0x181018, e: 0xff3030, s: 0xa0a0b0, t: 0xe8e8e8 },
+  },
   echo: {
     rows: [
       '....hhhh....',
@@ -173,4 +218,34 @@ export const IMP_PAL = { k: 0xe8dcc0, r: 0xc8503c, y: 0xf0d040 };
 
 export const JAR = ['.www.', 'w...w', 'w...w', 'w...w', '.www.'];
 
-export const BAIT_COLOR: Record<string, number> = { worm: 0xd08080, promise: 0x80a0f0, debt: 0x60d060, gilded: 0xe8c04a };
+export const BAIT_COLOR: Record<string, number> = { worm: 0xd08080, promise: 0x80a0f0, debt: 0x60d060, gilded: 0xe8c04a, lock: 0xf0a040 };
+
+/** The Lantern Eel (7x4), drawn beside the hook; 'l' is its lantern (tinted per bite type). */
+export const EEL = ['..l....', '.bbb..b', 'bebbbbb', '.bbbbb.'];
+export const EEL_PAL = { b: 0x3a6a5a, e: 0xf4f4f4, l: 0xffffff };
+
+/** A trophy plaque (5x5): a shield with the soul's colour in the middle. */
+export const PLAQUE = ['wwwww', 'wcccw', 'wcccw', '.wcw.', '..w..'];
+
+/** Dame Brinella the Drainer's bucket (Last Stand), 14x12. */
+export const BUCKET = [
+  '..hhhhhhhhhh..',
+  '.h..........h.',
+  'h............h',
+  'rrrrrrrrrrrrrr',
+  'rwwwwwwwwwwwwr',
+  '.rmmmmmmmmmmr.',
+  '.rmmmmmmmmmmr.',
+  '.rrrrrrrrrrrr.',
+  '..rmmmmmmmmr..',
+  '..rmmmmmmmmr..',
+  '..rmmmmmmmmr..',
+  '...rrrrrrrr...',
+];
+export const BUCKET_PAL = { h: 0x8a8a9a, r: 0x5a4030, w: 0x6ab0e0, m: 0x7a5a3a };
+
+/** Main tint per species (Codex, plaques, the ritual). */
+export function soulTint(id: string): number {
+  const s = SOULS[id] ?? SOULS.clerk;
+  return s.pal.a ?? 0xc8d4e0;
+}

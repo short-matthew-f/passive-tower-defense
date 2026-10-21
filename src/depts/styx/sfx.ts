@@ -93,6 +93,24 @@ export const sfx = {
   warn(v: number): void {
     tone(240, 0.08, 0.08 * v, 'square', 0, 40);
   },
+  /** Legendary reel: a low two-beat heart. */
+  heartbeat(v: number): void {
+    tone(55, 0.12, 0.3 * v, 'sine', 0, -10);
+    tone(50, 0.14, 0.22 * v, 'sine', 0.18, -10);
+  },
+  /** A Ripper streaking past the line. */
+  whoosh(v: number): void {
+    tone(900, 0.25, 0.06 * v, 'sawtooth', 0, -700);
+  },
+  /** A trophy mounted on the Wall. */
+  mount(v: number): void {
+    [784, 988, 1175].forEach((f, i) => tone(f, 0.12, 0.1 * v, 'triangle', i * 0.07));
+  },
+  /** CLEAN reel. */
+  clean(v: number): void {
+    tone(1319, 0.08, 0.08 * v, 'sine');
+    tone(1760, 0.12, 0.08 * v, 'sine', 0.06);
+  },
   /** Pilk: lilting buzzy chirps with a sing-song rise and a lazy droop at the end. */
   pilk(v: number, words = 3): void {
     for (let i = 0; i < words; i++) {

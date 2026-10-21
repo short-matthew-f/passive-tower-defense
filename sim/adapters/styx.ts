@@ -14,6 +14,15 @@
 //   (src/depts/styx/upgrades.ts buildGroups) on a headless DeptCtx; Wrath is bought the way the
 //   dock's buy button does it.
 //
+// v1.1 rules mirrored from the scene: CLEAN reels (the line never touched the red) pay
+// M.CLEAN_MULT; per-species telegraphs (M.teleS: the Choirmaster and the Leviathan warn later),
+// the Chorister's paired thrashes, the Choirmaster's 1.6 s rhythm, the Leviathan's dive, the Blank
+// Wanderer's quick drift; Ripper passes from Wrath 10 (a line above M.RIPPER_TAUT at the crossing
+// is cut); Twin Hooks (after a land the next hook is already down: no sink, bite wait x TWIN_WAIT,
+// an escape brings the rig up); the Lantern Eel (the bot stops tapping fake-out dips); the Trophy
+// Wall (the bot KEEPs a trophy-worthy catch, forgoing its Obols) and the Chum Barrel (idleObols
+// reads the equipped bait and its stock).
+//
 // Bot (00 §8.1 "Styx" row): casts to the band with the best expected Obols per second, twitches
 // while waiting, taps a fake-out dip by mistake with a small chance, sets the hook with a
 // reaction-time distribution (normal, mean/sd by skill; a fog surge adds 60 ms), and reels by
@@ -40,7 +49,7 @@ export type Skill = 'novice' | 'reference' | 'expert';
 const SKILL: Record<Skill, { rt: number; rtSd: number; fakeTap: number; lapse: number; hold: number; think: number; wisp: number; twitch: number; aimSd: number }> = {
   novice: { rt: 0.4, rtSd: 0.12, fakeTap: 0.12, lapse: 0.15, hold: 64, think: 1.4, wisp: 0.35, twitch: 0.4, aimSd: 12 },
   reference: { rt: 0.29, rtSd: 0.07, fakeTap: 0.04, lapse: 0.06, hold: 72, think: 0.7, wisp: 0.7, twitch: 0.9, aimSd: 5 },
-  expert: { rt: 0.22, rtSd: 0.04, fakeTap: 0.01, lapse: 0.02, hold: 77, think: 0.35, wisp: 0.9, twitch: 1, aimSd: 2 },
+  expert: { rt: 0.22, rtSd: 0.04, fakeTap: 0.01, lapse: 0.02, hold: 74, think: 0.35, wisp: 0.9, twitch: 1, aimSd: 2 },
 };
 
 export interface StyxOpts {
@@ -57,7 +66,7 @@ const FLY_S = 0.55;
 const RERIG_S = 5;
 const MAX_WISPS = 3;
 const WISP_CROSS_S = 6.5; // ~130 px of river at 16-24 px/s
-const FOG_S = 20;
+const FOG_S = M.FOG_S;
 /** Share of the bot's expected active income counted in the buyer's value (see bridge.ts). */
 const ACTIVE_W = 0.25;
 
@@ -102,27 +111,58 @@ interface Est {
   band: number;
 }
 
-function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.bait): Est {
+/** P(a reaction, with the skill's lapse, takes longer than `avail` seconds). */
+function pLate(sk: (typeof SKILL)[Skill], avail: number): number {
+  const a = (1 - sk.lapse) * (1 - phi((avail - sk.rt) / sk.rtSd));
+  const b = sk.lapse * (1 - phi((avail - sk.rt - 0.35) / sk.rtSd));
+  return Math.min(1, a + b);
+}
+
+const RAR: M.Rarity[] = ['common', 'uncommon', 'rare', 'legendary'];
+const RMULT: Record<M.Rarity, number> = { common: 1, uncommon: 2.5, rare: 12, legendary: 50 };
+
+function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.bait, p?: M.StyxPersistent): Est {
   const w = r.wrath;
   const win = M.hookWindowMs(r.lv.strike, w) / 1000;
-  const pHook = phi((win - sk.rt) / sk.rtSd) * (1 - sk.fakeTap * M.fakeChance(w) * 1.2);
+  const fakeTap = sk.fakeTap * (r.lv.eel > 0 ? 0.2 : 1);
+  const pHook = phi((win - sk.rt) / sk.rtSd) * (1 - fakeTap * M.fakeChance(w) * 1.2);
+  const cap = M.lineCap(r.lv.line);
+  const drain = M.drainRate(r.lv.steady);
+  // Ripper passes (W >= 10): cut if the bot hasn't drained below the taut mark in time.
+  const pCut = M.ripperChance(w) * pLate(sk, M.RIPPER_WARN - Math.max(0, sk.hold - M.RIPPER_TAUT) / drain);
   let best = { rate: 0, band: 0 };
   for (let b = 0; b < r.bands; b++) {
     const depth = b * M.BAND_PX + 30;
     const wt = M.rarityWeights(bait, b, r.lv.scent, w);
-    const ev = M.bandEV(b, wt);
+    const ev = M.bandEV(b, wt) * M.wallMult(p, b);
     const tWait = M.biteWait(r.lv.lantern) / (1 + 0.25 * sk.twitch) + 1.2 + 0.7 + M.fakeChance(w) * 0.9;
-    const cap = M.lineCap(r.lv.line);
-    const duty = M.drainRate(r.lv.steady) / (M.drainRate(r.lv.steady) + M.REEL_RISE / cap);
+    const duty = drain / (drain + M.REEL_RISE / cap);
     const thr = 2 + M.wrathThrashes(w);
     const tReel = (depth + 24) / (M.reelSpeed(r.lv.reel) * duty) + thr * 1.1;
     // Escape chance per thrash: a lapse that holds into a hard pull.
     const pull = (50 / 30) * M.wrathPull(w);
     const qThr = Math.min(0.6, sk.lapse * Math.min(1, (pull * 0.55) / cap));
-    const pLand = 1 - (1 - (1 - qThr) ** thr) * (1 - M.barbChance(r.lv.barb));
-    const tCycle = depth / M.SINK_PX_S + tWait + pHook * tReel + FLY_S + sk.think;
+    const pLand = (1 - (1 - (1 - qThr) ** thr) * (1 - M.barbChance(r.lv.barb))) * (1 - pCut);
+    // CLEAN: no thrash caught the line above the red (the deep rares warn later).
+    const rise = (M.REEL_RISE + 2 * M.REEL_RISE * pull) / cap;
+    const tele = b >= 3 ? 0.26 : 0.3;
+    const pClean = (1 - pLate(sk, tele + Math.max(0, M.RED - sk.hold) / rise)) ** thr;
+    let vw = 0;
+    let vc = 0;
+    for (const k of RAR) {
+      vw += wt[k] * RMULT[k];
+      vc += wt[k] * RMULT[k] * M.CLEAN_MULT[k];
+    }
+    const cleanK = 1 + pClean * (vc / vw - 1);
+    // Twin Hooks: after a land the next hook is already down (no sink, think or full wait).
+    const q = pHook * pLand * pClean;
+    let spares = 0;
+    for (let i = 1; i < M.hooksPerCast(r.lv.twin); i++) spares += q ** i;
+    const tFresh = depth / M.SINK_PX_S + tWait + pHook * tReel + FLY_S + sk.think;
+    const tSpare = tWait - M.biteWait(r.lv.lantern) * (1 - M.TWIN_WAIT) / (1 + 0.25 * sk.twitch) + pHook * tReel + FLY_S;
+    const tCycle = (tFresh + spares * tSpare) / (1 + spares);
     const streak = Math.min(20, (pHook * pLand) / Math.max(0.05, 1 - pLand));
-    const val = ev * M.comboMult(streak * 0.8) * M.wrathActive(w) * M.legendMult(r) * (bait === 'gilded' ? 2 : 1);
+    const val = ev * cleanK * M.comboMult(streak * 0.8) * M.wrathActive(w) * M.legendMult(r) * (bait === 'gilded' ? 2 : 1);
     const rate = (pHook * pLand * val) / tCycle;
     if (rate > best.rate) best = { rate, band: b };
   }
@@ -135,7 +175,7 @@ function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.ba
 export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
   const sk = SKILL[opts.skill ?? 'reference'];
   let sessions = 0;
-  const counters = { casts: 0, lands: 0, escapes: 0, misses: 0, spooks: 0, slips: 0 };
+  const counters = { casts: 0, lands: 0, escapes: 0, misses: 0, spooks: 0, slips: 0, cleans: 0, cuts: 0, trophies: 0 };
 
   function startSession(save: DeptSave, env: SessionEnv): ActiveSession {
     const r = run(save);
@@ -166,12 +206,19 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     let tele = 0;
     let thr = 0;
     let teleported = false;
+    let red = false;
+    let pair = false;
+    let beat = 0;
+    let dived = false;
+    let rip: { at: number; warn: number } | null = null;
+    let hooksLeft = 0;
     let holding = false;
     let releaseIn = -1; // bot release scheduled after a telegraph
     let resumeIn = -1;
     let decideT = 0;
     let landValue = 0;
     let landFirst = false;
+    let landClean = false;
     // wisps and fog
     let wispT = M.wispEvery(r.lv.wispnet) * (0.7 + 0.6 * rnd());
     const wisps: number[] = []; // remaining crossing time
@@ -196,12 +243,13 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
       chooseBait();
       // Work the skill gate at its target Wrath (easier fish); otherwise fish at the top level.
       r.wrath = save.cycle.heldLevel < goalW && r.wrathMax >= goalW ? goalW : r.wrathMax;
-      band = Math.min(r.bands - 1, estimate(r, sk).band);
+      band = Math.min(r.bands - 1, estimate(r, sk, r.bait, p).band);
       const target = band * M.BAND_PX + 30 + gauss(rnd) * sk.aimSd;
       depth = Math.max(4, Math.min(r.bands * M.BAND_PX - 4, target));
       band = Math.max(0, Math.min(r.bands - 1, Math.floor(depth / M.BAND_PX)));
       r.stats.casts++;
       counters.casts++;
+      hooksLeft = M.hooksPerCast(r.lv.twin);
       phase = 'sink';
       phaseT = depth / M.SINK_PX_S;
     }
@@ -270,7 +318,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
           fakes--;
           nibStep = 'dip';
           phaseT = 0.22;
-          if (rnd() < sk.fakeTap) spook();
+          if (rnd() < sk.fakeTap * (r.lv.eel > 0 ? 0.2 : 1)) spook();
         } else {
           nibStep = 'plunge';
           phaseT = hookWindow();
@@ -304,14 +352,21 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
       tele = 0;
       thr = 0;
       teleported = false;
+      red = false;
+      pair = false;
+      beat = 1.4;
+      dived = false;
+      rip = !tutorial() && rnd() < M.ripperChance(W()) ? { at: 0.25 + 0.45 * rnd(), warn: -1 } : null;
       holding = true;
       releaseIn = -1;
       resumeIn = -1;
       decideT = 0;
     }
 
-    function thrashDur(): number {
-      return sp.behavior === 'king' ? 1.3 : sp.behavior === 'heavy' ? 1.1 : sp.behavior === 'echo' ? 1.0 : 0.75;
+    /** A thrash telegraph: the bot sees the red glow and eases off after its reaction time. */
+    function startTele(dur: number): void {
+      tele = dur;
+      if (holding) releaseIn = reaction() + (rnd() < sk.lapse ? 0.35 : 0);
     }
 
     function botReel(dt: number): void {
@@ -331,6 +386,12 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
       decideT -= dt;
       if (decideT > 0 || releaseIn >= 0 || tele > 0 || thr > 0) return;
       decideT = 0.1;
+      // A Ripper is coming: stay slack until it has passed (but never drift loose).
+      if (rip && rip.warn >= 0 && rip.warn < 9) {
+        if (!holding && tension < 5) holding = true;
+        else if (holding && tension >= 30) holding = false;
+        return;
+      }
       if (holding && tension >= sk.hold) holding = false;
       else if (!holding && tension <= sk.hold - 28) holding = true;
       // Never let it drift loose.
@@ -340,13 +401,20 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     function updateReel(dt: number): void {
       if (tele > 0) {
         tele -= dt;
-        if (tele <= 0) thr = thrashDur();
+        if (tele <= 0) thr = M.thrashS(sp);
       } else if (thr > 0) {
         thr -= dt;
         if (thr <= 0) {
           // Thrash over: the bot resumes after a short look.
           resumeIn = 0.5 * reaction();
           holding = tension < sk.hold - 10;
+          // The Abyss Chorister's second thrash follows hard on the first.
+          if (sp.behavior === 'canon' && !tutorial()) {
+            if (!pair) {
+              pair = true;
+              startTele(0.45);
+            } else pair = false;
+          }
         }
       }
       botReel(dt);
@@ -357,7 +425,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         const rise = M.REEL_RISE + (thrashing ? 2 * M.REEL_RISE * pullK : 0);
         tension += (rise / cap) * dt;
         if (tension < RED) {
-          const slow = sp.behavior === 'heavy' && thrashing ? 0.6 : 1;
+          const slow = (sp.behavior === 'heavy' || sp.behavior === 'leviathan') && thrashing ? 0.6 : 1;
           dist -= M.reelSpeed(r.lv.reel) * slow * dt;
         }
       } else {
@@ -365,24 +433,56 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         if (sp.behavior === 'sinker' || thrashing) dist = Math.min(dist0, dist + (thrashing ? 4 : 6) * dt);
       }
       tension = Math.max(0, Math.min(110, tension));
+      if (tension >= RED) red = true;
       over = tension >= 100 ? over + dt : 0;
       zero = tension <= 0.01 ? zero + dt : 0;
       const prog = 1 - dist / dist0;
-      if (thrIdx < thrN && tele <= 0 && thr <= 0 && prog >= (thrIdx + 1) / (thrN + 1)) {
+      const teleDur = tutorial() ? 0.7 : M.teleS(sp);
+      if (sp.behavior === 'conductor' && !tutorial()) {
+        if (tele <= 0 && thr <= 0) beat -= dt;
+        if (thrIdx < thrN && beat <= 0 && tele <= 0 && thr <= 0) {
+          thrIdx++;
+          beat = 1.6;
+          startTele(teleDur);
+        }
+      } else if (thrIdx < thrN && tele <= 0 && thr <= 0 && !pair && prog >= (thrIdx + 1) / (thrN + 1)) {
         thrIdx++;
-        tele = tutorial() ? 0.7 : 0.3;
-        // The bot sees the red glow and eases off after its reaction time.
-        if (holding) releaseIn = reaction() + (rnd() < sk.lapse ? 0.35 : 0);
+        startTele(teleDur);
       }
       if (sp.behavior === 'teleport' && !teleported && prog >= 0.5) {
         teleported = true;
         dist = Math.min(dist0, dist + 0.3 * dist0);
       }
+      if (sp.behavior === 'leviathan' && !dived && prog >= 0.4) {
+        dived = true;
+        dist = Math.min(dist0, dist + 0.2 * dist0);
+        tension = Math.min(110, tension + 12);
+      }
+      if (rip) {
+        if (rip.warn < 0 && prog >= rip.at) {
+          rip.warn = M.RIPPER_WARN;
+          // The bot sees the fin and eases off after its reaction time.
+          if (holding) releaseIn = reaction() + (rnd() < sk.lapse ? 0.35 : 0);
+        } else if (rip.warn >= 0) {
+          rip.warn -= dt;
+          if (rip.warn < 0) {
+            const cut = tension > M.RIPPER_TAUT;
+            rip = null;
+            if (cut) {
+              r.stats.cuts++;
+              counters.cuts++;
+              escape();
+              return;
+            }
+            r.stats.rippers++;
+          }
+        }
+      }
       if (over >= 0.4) {
         slip(thrashing);
         return;
       }
-      if (zero > 2.5) {
+      if (zero > M.driftS(sp)) {
         escape();
         return;
       }
@@ -407,6 +507,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
 
     function escape(): void {
       phase = 'idle';
+      hooksLeft = 0;
       phaseT = sk.think;
       r.combo = 0;
       r.stats.escapes++;
@@ -418,7 +519,20 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function land(): void {
-      const value = M.soulBase(sp, band) * M.comboMult(r.combo) * M.wrathActive(W()) * M.legendMult(r) * (r.bait === 'gilded' ? M.gildedMult(save.imports?.potions ?? 0) : 1);
+      const clean = !red && !tutorial();
+      const value =
+        M.soulBase(sp, band) *
+        M.comboMult(r.combo) *
+        M.wrathActive(W()) *
+        M.legendMult(r) *
+        M.wallMult(p, band) *
+        (clean ? M.CLEAN_MULT[sp.rarity] : 1) *
+        (r.bait === 'gilded' ? M.gildedMult(save.imports?.potions ?? 0) : 1);
+      landClean = clean;
+      if (clean) {
+        r.stats.cleans++;
+        counters.cleans++;
+      }
       landFirst = !(p.codex[sp.id] > 0);
       landValue = value;
       r.combo++;
@@ -447,8 +561,23 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function finishFly(): void {
-      env.earn(landValue);
+      // The Trophy Wall: the bot KEEPs a trophy-worthy catch (forgoing its Obols).
+      const tr = { id: sp.id, band };
+      if (!tutorial() && M.trophyWorthy(p, tr)) {
+        M.mountTrophy(p, tr);
+        r.stats.trophies++;
+        counters.trophies++;
+      } else env.earn(landValue);
       if (landFirst) env.earn(10 * M.soulBase(sp, band));
+      if (hooksLeft > 1 && !landClean) hooksLeft = 0; // a red-touched reel tangles the spares
+      if (hooksLeft > 1) {
+        // Twin Hooks: the next hook is already down and soaking.
+        hooksLeft--;
+        r.stats.twinLands++;
+        phase = 'wait';
+        biteT = sampleBite() * M.TWIN_WAIT;
+        return;
+      }
       phase = 'idle';
       phaseT = sk.think;
     }
@@ -488,7 +617,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
 
     function tick(dt: number): void {
       // Netters (the scene credits idleObols on screen, once a second).
-      idleAcc += M.idleObols(r) * dt;
+      idleAcc += M.idleObols(r, p) * dt;
       if (idleAcc > 0 && (idleAcc >= 1 || dt >= 1)) {
         env.earn(idleAcc);
         idleAcc = 0;
@@ -540,7 +669,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
 
     // ---------- the buyer ----------
 
-    const value = () => M.idleObols(r) + ACTIVE_W * estimate(r, sk, 'worm').rate;
+    const value = () => M.idleObols(r, p) + ACTIVE_W * estimate(r, sk, 'worm', p).rate;
 
     function buyWrath(): boolean {
       if (r.bands < 2 || r.wrathMax >= M.WRATH_MAX) return false;

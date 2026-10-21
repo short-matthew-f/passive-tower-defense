@@ -46,7 +46,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     max: M.MAX_BANDS - 1,
     level: () => r().bands - 1,
     cost: () => M.BANDS[Math.min(M.MAX_BANDS - 1, r().bands)].cost,
-    desc: () => (r().bands < M.MAX_BANDS ? `OPENS THE ${M.BANDS[r().bands].name} (X${M.BANDS[r().bands].mult} SOULS)` : 'ALL MVP DEPTHS OPEN'),
+    desc: () => (r().bands < M.MAX_BANDS ? `OPENS THE ${M.BANDS[r().bands].name} (X${M.BANDS[r().bands].mult} SOULS)` : 'EVERY DEPTH IS OPEN'),
     canAfford: () => r().bands < M.MAX_BANDS && r().bank >= M.BANDS[r().bands].cost,
     buy: () => {
       if (r().bands >= M.MAX_BANDS) return;
@@ -61,6 +61,8 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('lantern', 'Lantern Glow', (l) => `BITE WAIT ${M.biteWait(l).toFixed(1)} -> ${M.biteWait(l + 1).toFixed(1)}S`),
     node('scent', 'Soul Scent', (l) => `RARE BITES X${M.scentMult(l).toFixed(2)} -> X${M.scentMult(l + 1).toFixed(2)}`),
     node('wispnet', 'Wisp Net', (l) => `WISPS X${M.wispMult(l).toFixed(1)} -> X${M.wispMult(l + 1).toFixed(1)}, MORE OFTEN`),
+    node('twin', 'Twin Hooks', (l) => `HOOKS PER CAST ${M.hooksPerCast(l)} -> ${M.hooksPerCast(l + 1)}. LAND TO KEEP FISHING`, () => (r().bands < 2 ? 'MURK FIRST' : null)),
+    node('eel', 'Lantern Eel', () => 'SHOWS FAKE DIPS (GREY) AND REAL BITES (GOLD)', () => (r().bands < 3 ? 'DROWNED HALLS FIRST' : null)),
     node('legend', "Ferryman's Legend", (l) => longDesc(M.LEGENDS, l), () => longLocked(ctx.save.cycle.n)),
   ];
 
@@ -68,6 +70,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('netter', 'Hire Imp Netter', (l) => `NETTERS ${l} -> ${l + 1} (1 SOUL / 30S EACH)`),
     node('nets', 'Bigger Nets', (l) => `NET RATE X${M.netMult(l).toFixed(1)} -> X${M.netMult(l + 1).toFixed(1)}`),
     node('poles', 'Longer Poles', (l) => `NET DEPTH ${pct(M.poleFrac(l))} -> ${pct(M.poleFrac(l + 1))} OF RIVER`),
+    node('chum', 'Chum Barrel', (l) => `NETTERS USE YOUR BAIT ${pct(M.chumEff(l))} -> ${pct(M.chumEff(l + 1))}`),
   ];
 
   // Debt Collectors (Contraband import) discounts Unpaid Debt.
@@ -95,7 +98,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     { name: 'Line', entries: line },
     { name: 'Lures', entries: lures },
     { name: 'Imps', entries: crew },
-    { name: 'Bait', entries: [bait('promise'), bait('debt'), bait('gilded')] },
+    { name: 'Bait', entries: M.PAID_BAITS.map(bait) },
   ];
 }
 
