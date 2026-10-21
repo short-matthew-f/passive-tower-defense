@@ -56,3 +56,12 @@ describe('offline factor', () => {
     expect(offlineFactor(s)).toBe(0.9);
   });
 });
+
+describe('formatNum small values', () => {
+  it('keeps small rates visible', () => {
+    expect(formatNum(0.0083)).toBe('0.0083');
+    expect(formatNum(0.05)).toBe('0.05');
+    expect(formatNum(0.5)).toBe('0.5');
+    expect(formatNum(0)).toBe('0');
+  });
+});

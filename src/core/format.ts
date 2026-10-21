@@ -6,6 +6,8 @@ export function formatNum(n: number, notation: 'suffix' | 'sci' = 'suffix'): str
   if (!Number.isFinite(n)) return n > 0 ? 'INF' : '-INF';
   if (n < 0) return '-' + formatNum(-n, notation);
   if (n < 1000) {
+    // Small rates (e.g. 0.008/s) keep two significant digits instead of flooring to 0.
+    if (n > 0 && n < 0.1) return n.toPrecision(2).replace(/0+$/, '').replace(/\.$/, '');
     if (n < 10 && n % 1 !== 0) return (Math.floor(n * 10) / 10).toString();
     return Math.floor(n).toString();
   }

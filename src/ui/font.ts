@@ -133,6 +133,8 @@ export class PixelText extends Sprite {
       ctx.clearRect(0, 0, cw, ch);
       drawText(ctx, src, this._color, this._shadow);
       this.owned.source.update();
+      // set('') swapped in Texture.EMPTY; reattach our texture now that there is text again.
+      this.texture = this.owned;
     }
     return this;
   }
