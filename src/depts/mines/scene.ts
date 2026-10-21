@@ -215,8 +215,8 @@ export class MinesScene implements DeptScene {
     const dark = { color: C.edge, shade: 0x3a2046, textColor: C.ink };
     this.downBtn = mk({ w: 15, h: 15, label: '{darr}', ...dark, onTap: () => this.setDepth(this.run.depth - 1) }, x0, depthY);
     this.depthText.position.set(x0 + 19, depthY + 5);
-    this.upBtn = mk({ w: 15, h: 15, label: '{uarr}', ...dark, onTap: () => this.setDepth(this.run.depth + 1) }, x0 + 64, depthY);
-    this.hintText.position.set(x0 + 83, depthY + 5);
+    this.upBtn = mk({ w: 15, h: 15, label: '{uarr}', ...dark, onTap: () => this.setDepth(this.run.depth + 1) }, x0 + 67, depthY);
+    this.hintText.position.set(x0 + 86, depthY + 5);
     const digW = 50;
     this.digBtn = mk({ w: digW, h: 15, label: 'DIG', color: C.gold, shade: 0x9a7a20, onTap: () => this.buyDig() }, right - digW, depthY);
 
@@ -1227,6 +1227,14 @@ export class MinesScene implements DeptScene {
 
     // Contracting beat rings on every rock.
     const g = this.ringG.clear();
+    if (this.frenzyT > 0) {
+      // Frenzy: a pulsing hot frame around the whole wall.
+      const W = this.T * M.GRID;
+      const m = onBeat ? 3 : 2;
+      g.rect(this.wallX - m - 1, this.wallY - m - 1, W + 2 * m + 2, m).rect(this.wallX - m - 1, this.wallY + W + 1, W + 2 * m + 2, m);
+      g.rect(this.wallX - m - 1, this.wallY - 1, m, W + 2).rect(this.wallX + W + 1, this.wallY - 1, m, W + 2);
+      g.fill({ color: Math.floor(this.time * 8) % 2 ? 0xff6040 : 0xffb030, alpha: 0.9 });
+    }
     if (!active) return;
     const tb = this.beatClock;
     const k = Math.round(tb / p);
@@ -1234,7 +1242,7 @@ export class MinesScene implements DeptScene {
     const inWindow = Math.abs(off) <= M.beatWindow(this.run.wide);
     const toNext = ((p - (tb % p)) % p) / p; // 1 just after a beat -> 0 at the next
     if (!inWindow && toNext > 0.7) return;
-    const gap = inWindow ? 0 : Math.round(toNext * 12);
+    const gap = inWindow ? 0 : Math.round(toNext * 9);
     const color = inWindow ? 0xffe060 : 0xe8c04a;
     const alpha = inWindow ? 1 : 0.25 + 0.6 * (1 - toNext / 0.7);
     for (const t of this.tiles) {
@@ -1242,7 +1250,12 @@ export class MinesScene implements DeptScene {
       const x = t.x + 1 - gap;
       const y = t.y + 1 - gap;
       const w = this.s + gap * 2;
-      g.rect(x, y, w, 1).rect(x, y + w - 1, w, 1).rect(x, y + 1, 1, w - 2).rect(x + w - 1, y + 1, 1, w - 2);
+      // Corner brackets (a full square would merge into a lattice with the neighbours).
+      const a = inWindow ? 8 : 5;
+      g.rect(x, y, a, 1).rect(x, y + 1, 1, a - 1);
+      g.rect(x + w - a, y, a, 1).rect(x + w - 1, y + 1, 1, a - 1);
+      g.rect(x, y + w - 1, a, 1).rect(x, y + w - a, 1, a - 1);
+      g.rect(x + w - a, y + w - 1, a, 1).rect(x + w - 1, y + w - a, 1, a - 1);
     }
     g.fill({ color, alpha });
   }
@@ -1283,11 +1296,12 @@ export class MinesScene implements DeptScene {
     this.upBtn.setEnabled(r.depth < r.maxDepth);
     if (r.depth >= target) {
       const n = Math.min(M.GATE_ROCKS, r.gate[String(r.depth)] ?? 0);
-      this.hintText.set(`{skull}${n}/${M.GATE_ROCKS} ROCKS`, n >= M.GATE_ROCKS ? C.greenText : '#e05050');
+      this.hintText.set(`{skull}${n}/${M.GATE_ROCKS}`, n >= M.GATE_ROCKS ? C.greenText : '#e05050');
     } else {
       const tpr = M.tapsPerRock(r, r.depth, this.per);
-      const od = M.overdepth(r) < 1 ? ' SLOW' : '';
-      this.hintText.set(`${tpr > 99 ? '99+' : tpr} TAP${tpr === 1 ? '' : 'S'}${od}`, od ? C.redText : C.inkDim);
+      // Overdepth (crew past its Pick Tier) blinks a warning in place of the taps hint.
+      if (M.overdepth(r) < 1 && Math.floor(this.time * 1.5) % 2 === 0) this.hintText.set('CREW SLOW', C.redText);
+      else this.hintText.set(`${tpr > 99 ? '99+' : tpr} TAP${tpr === 1 ? '' : 'S'}`, C.inkDim);
     }
     if (r.maxDepth >= M.MAX_DEPTH) this.digBtn.setLabel('DIG', 'MAX').setEnabled(false);
     else {

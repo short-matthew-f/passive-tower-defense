@@ -249,12 +249,16 @@ export function normalize(run: any, per: any): void {
 }
 
 /*
- * TUNING (seed reasoning for the future balance sim; numbers from a greedy 6 taps/s bot,
- * scratch script, Gems ignored):
- *  - Raw spec seeds: first Tap Damage at ~5 s, depth 30 at ~20 min. Far too fast for a
- *    "first Fall on day 3" department, because Tap Damage (x2 every 25 levels on top of linear)
- *    outgrew its 1.10 cost growth and Dig Deeper was the only real wall.
- *  - With Tap Damage growth 1.16 and Dig base 150 the bot reaches depth 30 after about 4 h
- *    of active play, first upgrade at ~6 s (bands: < 60 s, first Fall 3-4 h ±1 h). See index.ts
- *    for econBase/rankRef/rankTarget, which come from the same run.
+ * TUNING (seed reasoning for the future balance sim; greedy bot at 6 taps/s that values
+ * idle income x2 as much as active, Gems/kegs/drum ignored; scratch script, not shipped):
+ *  - Raw spec seeds: depth 30 (first Infamy target) at ~14-20 min, and tap DPS ~300x the crew,
+ *    so on-screen active:idle was ~100-300x. Two problems: Tap Damage (x2 per 25 levels on top of
+ *    linear, plus crits to +420%) outgrew its 1.10 cost growth, and the crew (8 goblins, picks
+ *    capped) could not follow HP across strata.
+ *  - Fixes: crit caps 25% / x9 (now also spec R4-02), Tap Damage cost growth 1.20, Pick Tier also
+ *    multiplies crew DPS x2.5, picks x1.18/L, HP growth 1.25 and reward 1.26 per depth (deeper is
+ *    still slightly richer per HP), Dig Deeper 100 x 1.36^d.
+ *  - Result: first Tap Damage at ~6 s, first goblin ~25 s, depth 6 at 2 min, 10 at 5 min, 20 at
+ *    25 min, 30 at ~3.3 h active. Active:on-screen idle ~2.7x at 30 min, 1.8-2.6x from 1-3 h
+ *    (pre-drum band 1.8-2.5x). Taps/rock at the pushed depth stays ~4-10.
  */
