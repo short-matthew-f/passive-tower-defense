@@ -2,6 +2,7 @@
 // shared-sheet groups. Per-piece levels live in the scene's tray panel instead.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import { formatNum } from '../../core/format';
+import { longDesc, longLocked } from '../../core/longnode';
 import * as M from './model';
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -14,19 +15,20 @@ export interface UpgradeHooks {
 export function buildGroups(ctx: DeptCtx, hooks: UpgradeHooks): UpgradeGroup[] {
   const r = () => ctx.save.run as M.DungeonRun;
 
-  const ws = (k: keyof M.Workshop, desc: (n: number) => string): UpgradeEntry => ({
+  const ws = (k: keyof M.Workshop, desc: (n: number) => string, locked?: () => string | null): UpgradeEntry => ({
     id: k,
     name: M.WS[k].name,
     max: M.WS[k].max,
-    level: () => r().ws[k],
-    cost: () => M.wsCost(k, r().ws[k]),
-    desc: () => desc(r().ws[k]),
-    canAfford: () => r().bank >= M.wsCost(k, r().ws[k]) && r().ws[k] < M.WS[k].max,
+    level: () => r().ws[k] ?? 0,
+    cost: () => M.wsCost(k, r().ws[k] ?? 0),
+    desc: () => desc(r().ws[k] ?? 0),
+    locked,
+    canAfford: () => r().bank >= M.wsCost(k, r().ws[k] ?? 0) && (r().ws[k] ?? 0) < M.WS[k].max,
     buy: () => {
-      const n = r().ws[k];
-      if (n >= M.WS[k].max) return;
+      const n = r().ws[k] ?? 0;
+      if (n >= M.WS[k].max || locked?.()) return;
       if (!ctx.spend(M.wsCost(k, n))) return;
-      r().ws[k]++;
+      r().ws[k] = n + 1;
       hooks.changed();
     },
   });
@@ -38,6 +40,7 @@ export function buildGroups(ctx: DeptCtx, hooks: UpgradeHooks): UpgradeGroup[] {
     ws('ledger', (n) => `PLUNDER +${pct(0.04 * n)} -> +${pct(0.04 * (n + 1))}`),
     ws('gaze', (n) => `GLARE +${pct(0.2 * (n + 1))} DMG, ${M.glareCooldown({ ...r().ws, gaze: n + 1 })}S COOLDOWN`),
     ws('slots', (n) => `RUNE SLOTS ${3 + n} -> ${4 + n}`),
+    ws('greed', (n) => longDesc(M.GREED, n), () => longLocked(ctx.save.cycle.n)),
   ];
 
   const lure: UpgradeEntry = {

@@ -787,7 +787,7 @@ export class MinesScene implements DeptScene {
       this.burst(cx, cy, 4, 0x6a6a74);
       return;
     }
-    let reward = M.R(this.run.depth) * M.KIND_REWARD[kind];
+    let reward = M.R(this.run.depth) * M.KIND_REWARD[kind] * M.oreMult(this.run);
     if (by === 'tap' && (kind === 'vein' || kind === 'geode')) reward *= 1 + 0.1 * this.run.keen;
     const got = this.ctx.earn(reward);
     const st = this.run.stats;

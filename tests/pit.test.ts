@@ -5,7 +5,7 @@ import { buy, fight, newRun, prepareLine, rival, sell, type RunOpts } from '../s
 import { botRun } from '../src/depts/pit/bot';
 import { mulberry32 } from '../src/depts/pit/engine';
 import { BASE_POOL } from '../src/depts/pit/units';
-import { defaultPersistent, defaultRun, gauntletReport, heldCrownLevel, pitEcon } from '../src/depts/pit/def';
+import { defaultPersistent, defaultRun, gauntletReport, heldCrownLevel, PIT_CROWNS, pitEcon } from '../src/depts/pit/def';
 import type { DeptSave } from '../src/core/types';
 
 const OPTS: RunOpts = { pool: BASE_POOL, larder: 0, deepLarder: 0, penSpace: 0, freeRoll: false, gritMax: 4, hardy: 0, ratStart: false, chowR1: false, sigils: 0, shade: 0 };
@@ -81,11 +81,14 @@ describe('war pit shop and economy', () => {
     expect(rs.grit).toBe(4);
   });
 
-  it('Pit Crowns: 2 Triumphs at Stakes >= S hold level S', () => {
+  it('Pit Crowns: PIT_CROWNS Triumphs at Stakes >= S hold level S', () => {
+    // PIT_CROWNS is 1 (07 OQ 8's fallback, sim/README.md "Pass 5"): the best Crown holds its level.
+    expect(PIT_CROWNS).toBe(1);
     expect(heldCrownLevel({})).toBe(-1);
-    expect(heldCrownLevel({ 4: 1 })).toBe(-1);
-    expect(heldCrownLevel({ 4: 1, 6: 1 })).toBe(4);
+    expect(heldCrownLevel({ 4: 1 })).toBe(4);
+    expect(heldCrownLevel({ 4: 1, 6: 1 })).toBe(6);
     expect(heldCrownLevel({ 6: 2, 2: 5 })).toBe(6);
+    expect(heldCrownLevel({ 4: 0 })).toBe(-1);
     expect(pitEcon.skillTarget(0)).toBe(4);
     expect(pitEcon.skillTarget(5)).toBe(10);
   });

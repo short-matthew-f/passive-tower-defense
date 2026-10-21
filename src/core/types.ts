@@ -1,4 +1,5 @@
 // Save data model, following specs/00 §9.
+import type { EdictState, StewardSetting } from './perks';
 
 export type DeptId = 'cauldron' | 'mines' | 'dungeon' | 'bridge' | 'styx' | 'spire' | 'pit';
 export const DEPT_ORDER: DeptId[] = ['cauldron', 'mines', 'dungeon', 'bridge', 'styx', 'spire', 'pit'];
@@ -22,6 +23,13 @@ export interface DeptSave<Run = any, Persistent = any> {
   persistent: Persistent;
   run: Run & { bank: number }; // bank = this department's local currency
   seen: Record<string, number>; // manager lines / onboarding steps already shown
+  /** Skipped onboarding / lesson beats ("<script>:<beatId>") that return as one-line tips the
+   * first time they matter (Full chattiness only; 00 §5.4.2). Default-filled on load. */
+  pendingTips?: string[];
+  /** A high-priority manager line that expired unseen; replaces the next report line (00 §5.4.4). */
+  reportCarry?: string;
+  /** Local haul from the last absence not yet "ritualised" (return rituals, 00 §5.3). */
+  haul?: number;
 }
 
 export interface Settings {
@@ -57,6 +65,12 @@ export interface SaveRoot {
     trophies: LegendRecord[];
     seen: Record<string, number>; // global onboarding flags
     settings: Settings;
+    /** The standing Edict (Edict Board, core/perks.ts). */
+    edict?: EdictState;
+    /** Steward (Gobbo's Satchel L2-L3) per department: opt-in, reserve, unspent allowance. */
+    steward: Partial<Record<DeptId, StewardSetting>>;
+    /** Suite-wide manager rate limits (00 §5.4.4); ms epoch. */
+    managerClock: { lastLineAt: number; lastAmbientAt: number; lastThroneCameoDay: string };
   };
   depts: Partial<Record<DeptId, DeptSave>>; // absent = locked
 }
@@ -82,6 +96,8 @@ export function newSave(now: number): SaveRoot {
       trophies: [],
       seen: {},
       settings: { notation: 'suffix', haptics: true, sfx: 0.6, chatter: 'full' },
+      steward: {},
+      managerClock: { lastLineAt: 0, lastAmbientAt: 0, lastThroneCameoDay: '' },
     },
     depts: {},
   };

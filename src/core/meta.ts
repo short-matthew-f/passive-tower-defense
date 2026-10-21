@@ -39,8 +39,10 @@ export const RUINBORN = { max: 20, cost: (l: number) => 4 * 1.5 ** l, desc: '+25
  * Pass 3 (Styx and Spire built): Styx 25,000 -> 120,000 and Spire 150,000 -> 900,000. Lifetime Dread
  * (10 / 60) is met by day 2 / day 3, so Tribute binds: the Styx now opens on day 2 (12:30-18:00,
  * 1.5-1.75 d; it opened at the Bridge's moment, day 2 08:00, at 25K) and the Spire on day 4
- * (12:30-21:00, 3.5-3.9 d; it opened on day 3 at 150K). War Pit 600,000 -> 3,000,000 is provisional,
- * only to keep the ladder rising (the phantom-Seal sim variant pays it); the Pit's own pass sets it. */
+ * (12:30-21:00, 3.5-3.9 d; it opened on day 3 at 150K). War Pit 600,000 -> 3,000,000.
+ * Pass 5 (War Pit built): 3,000,000 kept. Lifetime Dread 150 is met on day 4-5, so Tribute binds
+ * again; the Pit opens on day 6 18:00 - day 7 08:00 (5.75-6.33 d, 00 §6 "day 6-8"), its first Fall
+ * ~3 days later. */
 export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,

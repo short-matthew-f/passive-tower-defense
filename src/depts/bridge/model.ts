@@ -10,6 +10,8 @@
 //    therefore not in the tree; Hero Nose raises the chance a concealed tell shows.
 //  - Toll Booth has 1 level in the MVP (it unlocks the Noble only, 06 §15).
 
+import { LONG_GROWTH, LONG_MAX, longMult } from '../../core/longnode';
+
 export type Who = 'peasant' | 'pilgrim' | 'merchant' | 'adventurer' | 'noble';
 export type Kind = Who | 'smuggler' | 'hero';
 export type Where = 'farm' | 'shrine' | 'market' | 'fort' | 'castle';
@@ -211,6 +213,8 @@ export interface Levels {
   booth: number;
   goons: number;
   pricing: number;
+  /** Royal Toll Charter, the long node (core/longnode.ts): every fare x1.15 per level. */
+  charter: number;
 }
 
 export interface BridgeRun {
@@ -236,12 +240,18 @@ export function defaultStats(): BridgeStats {
 }
 
 export function defaultLevels(): Levels {
-  return { glare: 0, tongue: 0, skull: 0, fists: 0, sense: 0, nose: 0, sniffer: 0, signage: 0, bench: 0, booth: 0, goons: 0, pricing: 0 };
+  return { glare: 0, tongue: 0, skull: 0, fists: 0, sense: 0, nose: 0, sniffer: 0, signage: 0, bench: 0, booth: 0, goons: 0, pricing: 0, charter: 0 };
 }
+
+/** Grumm's float at unlock and after each Fall. SIM-TUNED 0 -> 100 (sim/README.md "Pass 5"): with
+ * an empty bank and no goons the Bridge earns nothing until the player plays it, so a Fall at the
+ * very end of a session left nothing affordable on the next returns (00 §8 hard band). 100 covers
+ * the first goon (75), like the Dungeon's 100 Plunder and the Pit's 120-Teeth purse. */
+export const OPENING_FLOAT = 100;
 
 export function defaultRun(): BridgeRun {
   return {
-    bank: 0,
+    bank: OPENING_FLOAT,
     seed: Math.floor(Math.random() * 1e9),
     idx: 0,
     menace: 0,
@@ -290,7 +300,13 @@ export const NODES: Record<keyof Levels, NodeDef> = {
   booth: { id: 'booth', base: 1000, growth: 3, max: 1 }, // MVP: unlocks the Noble only
   goons: { id: 'goons', base: 75, growth: 1.6, max: 3 }, // MVP: 3 goons cover base traffic (06 §3)
   pricing: { id: 'pricing', base: 150, growth: 1.2, max: 20 },
+  // The long node (sim/README.md "Pass 5"): opens after the 2nd Fall. SIM-TUNED base: ~2 h of a
+  // later cycle's plateau idle (~65/s).
+  charter: { id: 'charter', base: 8e4, growth: LONG_GROWTH, max: LONG_MAX },
 };
+/** Royal Toll Charter milestone titles (one per 10 levels). */
+export const CHARTERS = ['WRIT', 'LICENSE', 'CHARTER', 'MONOPOLY', 'TOLLROAD', 'KINGSWAY', 'EMPIRE'];
+export const charterMult = (L: number) => longMult(L ?? 0);
 
 export const nodeCost = (id: keyof Levels, L: number) => NODES[id].base * NODES[id].growth ** L;
 
@@ -352,7 +368,7 @@ export function avgFare(m: number, booth: number): number {
 export const skullsMult = (skulls: number) => 1 + 0.05 * Math.max(0, Math.min(3, skulls));
 
 /** Tollpence multiplier on every fare, bounty and confiscation. `skulls` = Bones import level. */
-export const fareMult = (r: BridgeRun, skulls = 0) => signageMult(r.lv.signage) * payoutMult(r.menace) * skullsMult(skulls);
+export const fareMult = (r: BridgeRun, skulls = 0) => signageMult(r.lv.signage) * payoutMult(r.menace) * skullsMult(skulls) * charterMult(r.lv.charter);
 
 /** Pillory (Captives import, 00 §4, W-15): an unmasked hero pays a 1x fare fine (L1) and the
  * Unmask bounty rises 5% per further level. Returns the fare multiple an Unmask pays. */

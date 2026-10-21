@@ -23,6 +23,7 @@ import {
   tomeOf,
   UPGRADES,
   upCost,
+  upLocked,
   VOL_MAX,
   volCost,
   type SpirePersistent,
@@ -362,6 +363,7 @@ export class SpireScene implements DeptScene {
       max: u.max,
       cost: () => upCost(u, level()),
       currency: u.pages ? 'Pages' : undefined,
+      locked: () => upLocked(u, this.ctx.save.cycle.n),
       canAfford: () => (u.pages ? per.pages >= upCost(u, level()) : run.bank >= upCost(u, level())),
       buy: () => {
         const l = level();

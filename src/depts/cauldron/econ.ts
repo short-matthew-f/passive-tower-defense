@@ -1,5 +1,6 @@
 // Cauldron numbers (05 §5, §6, §7): save shapes, upgrade formulas, bucket table and idleRate.
 // Everything here is pure so the HUD, the core and the balance scripts can call it freely.
+import { LONG_GROWTH, LONG_MAX, longDesc, longLocked, longMult } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import { BUCKETS, INGREDIENTS, ING_ORDER, landingStats, type IngId } from './sim';
 
@@ -77,6 +78,8 @@ export interface UpDef {
   growth: number;
   max: number;
   tokens?: boolean; // paid in Batch Tokens (persistent)
+  /** Locked until this department's 2nd Fall (the long node, core/longnode.ts). */
+  afterFall?: boolean;
   desc(l: number): string;
 }
 
@@ -86,6 +89,9 @@ const JACKPOT = [3, 5, 7, 10, 15];
 
 export const UPGRADES: UpDef[] = [
   { id: 'fresh', name: 'Fresher Stock', branch: 'pantry', base: 15, growth: 1.22, max: Infinity, desc: (l) => `Value x${fmtX(freshMult(l))} > x${fmtX(freshMult(l + 1))}${(l + 1) % 25 === 0 ? ' X2!' : ''}` },
+  // The long node (core/longnode.ts, sim/README.md "Pass 5"): every ingredient x1.15 per level, a
+  // bigger pot every 10 levels. SIM-TUNED base: ~2 h of a later cycle's plateau idle (~2e6/s).
+  { id: 'size', name: 'Grander Cauldron', branch: 'pantry', base: 1.5e10, growth: LONG_GROWTH, max: LONG_MAX, afterFall: true, desc: (l) => longDesc(CAULDRON_SIZES, l) },
   { id: 'mandrake', name: 'Mandrake Patch', branch: 'pantry', base: 1500, growth: 1, max: 1, desc: () => 'Mandrakes join the flow. Worth 12' },
   { id: 'hire', name: 'Hire Toadling', branch: 'kitchen', base: 100, growth: 7, max: 7, desc: (l) => `Toadlings ${l + 1} > ${l + 2}` },
   { id: 'bribes', name: 'Fly Bribes', branch: 'kitchen', base: 75, growth: 1.9, max: 20, desc: (l) => `Drop every ${interval(l).toFixed(2)}s > ${interval(l + 1).toFixed(2)}s` },
@@ -106,6 +112,12 @@ export const UP: Record<string, UpDef> = Object.fromEntries(UPGRADES.map((u) => 
 export function upCost(u: UpDef, level: number): number {
   return Math.ceil(u.base * u.growth ** level);
 }
+
+/** Grander Cauldron's milestone titles (one per 10 levels). */
+export const CAULDRON_SIZES = ['POT', 'KETTLE', 'VAT', 'TUN', 'CISTERN', 'MOAT', 'LAKE'];
+
+/** Lock reason for a node in cycle `n` (the long node opens after the 2nd Fall), or null. */
+export const upLocked = (u: UpDef, n: number): string | null => (u.afterFall ? longLocked(n) : null);
 
 export const MALICE_MAX = 10;
 /**
@@ -146,7 +158,7 @@ export function freshMult(l: number): number {
 }
 
 export function ingValue(run: CRun, ing: IngId): number {
-  return INGREDIENTS[ing].value * freshMult(lvOf(run, 'fresh'));
+  return INGREDIENTS[ing].value * freshMult(lvOf(run, 'fresh')) * longMult(lvOf(run, 'size'));
 }
 
 export function flow(run: CRun): IngId[] {

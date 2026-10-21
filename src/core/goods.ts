@@ -12,6 +12,7 @@
 import type { DeptEcon } from './dept';
 import { offlineCapSeconds } from './economy';
 import { ROADS_ID, THRONE_UPGRADES } from './meta';
+import { caravanLevel } from './perks';
 import { DEPT_ORDER, type DeptId, type DeptSave, type GoodId, type SaveRoot } from './types';
 
 export type { GoodId } from './types';
@@ -165,7 +166,8 @@ export function addGoods(s: SaveRoot, g: GoodId, amount: number): void {
   s.meta.goods[g] = goodsStock(s, g) + amount;
 }
 
-export const roadsMult = (s: SaveRoot): number => 1 + ROADS_STEP * (s.meta.throne[ROADS.id] ?? 0);
+/** Goods trickle group: Imperial Roads (Throne) + Goods Caravan (Dread perk), +10% per level each. */
+export const roadsMult = (s: SaveRoot): number => 1 + ROADS_STEP * ((s.meta.throne[ROADS.id] ?? 0) + caravanLevel(s));
 
 /** Passive Goods per hour from one unlocked exporter: its formula, at least the 2/h trickle and
  * at most the Good's passive rate, x Imperial Roads. 0 when locked or the department has no Good. */

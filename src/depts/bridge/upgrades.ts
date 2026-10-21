@@ -1,5 +1,6 @@
 // The Bridge's upgrade tree (06 §6) as shared-sheet groups: Grumm, Eye, Bridge, Goons, Menace.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
+import { longDesc, longLocked } from '../../core/longnode';
 import * as M from './model';
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -11,18 +12,20 @@ export interface Hooks {
 
 export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
   const r = () => ctx.save.run as M.BridgeRun;
-  const node = (id: keyof M.Levels, name: string, desc: () => string, after?: () => void): UpgradeEntry => ({
+  const node = (id: keyof M.Levels, name: string, desc: () => string, after?: () => void, locked?: () => string | null): UpgradeEntry => ({
     id,
     name,
     desc,
     max: M.NODES[id].max,
-    level: () => r().lv[id],
-    cost: () => M.nodeCost(id, r().lv[id]),
-    canAfford: () => r().lv[id] < M.NODES[id].max && r().bank >= M.nodeCost(id, r().lv[id]),
+    locked,
+    level: () => r().lv[id] ?? 0,
+    cost: () => M.nodeCost(id, r().lv[id] ?? 0),
+    canAfford: () => (r().lv[id] ?? 0) < M.NODES[id].max && r().bank >= M.nodeCost(id, r().lv[id] ?? 0),
     buy: () => {
-      if (r().lv[id] >= M.NODES[id].max) return;
-      if (ctx.spend(M.nodeCost(id, r().lv[id]))) {
-        r().lv[id]++;
+      const L = r().lv[id] ?? 0;
+      if (L >= M.NODES[id].max || locked?.()) return;
+      if (ctx.spend(M.nodeCost(id, L))) {
+        r().lv[id] = L + 1;
         after?.();
       }
     },
@@ -48,6 +51,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('signage', 'Fancy Signage', () => `ALL FARES X${M.signageMult(r().lv.signage).toFixed(2)} -> X${M.signageMult(r().lv.signage + 1).toFixed(2)}`),
     node('bench', 'Waiting Bench', () => `BENCH ${M.benchCap(r().lv.bench)} -> ${M.benchCap(r().lv.bench + 1)} TRAVELERS`),
     node('booth', 'Toll Booth', () => (r().lv.booth ? 'NOBLES VISIT (FARE 30)' : 'UNLOCKS NOBLES: FARE 30')),
+    node('charter', 'Royal Toll Charter', () => longDesc(M.CHARTERS, r().lv.charter ?? 0), undefined, () => longLocked(ctx.save.cycle.n)),
   ];
   const goons = [
     node('goons', 'Hire Goon', () => `GOONS ${r().lv.goons}->${r().lv.goons + 1}, GATE ${pct(M.goonEff(r().lv.goons))}->${pct(M.goonEff(r().lv.goons + 1))}`, () => hooks.onGoon()),

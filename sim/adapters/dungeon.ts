@@ -22,6 +22,7 @@
 //    chance (the rest auto-collect at 1x).
 //  - Shopping cadence: every few on-screen seconds (a TD player places in bursts), plus on entry.
 import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';
+import { LONG_EFFECT } from '../../src/core/longnode';
 import type { DeptSave } from '../../src/core/types';
 import { dungeonEcon } from '../../src/depts/dungeon/def';
 import { COLS, lairPost, isRuneTile, ROUTES, ROWS, STARTER_SLITS, tileKind } from '../../src/depts/dungeon/map';
@@ -558,11 +559,12 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
             };
         }
         for (const e of ws()) {
-          if (e.id === 'lure' || e.level() >= e.max) continue;
+          if (e.id === 'lure' || e.level() >= e.max || e.locked?.()) continue;
           const k = e.id as keyof M.Workshop;
           let gain = 0;
           if (k === 'whet' || k === 'necro' || k === 'insc') gain = defense(r, cc, { ...r.ws, [k]: r.ws[k] + 1 }) - d0;
           else if (k === 'ledger') gain = (d0 * 0.04) / (1 + 0.04 * r.ws.ledger);
+          else if (k === 'greed') gain = d0 * (LONG_EFFECT - 1);
           else if (k === 'gaze') {
             // Active-only: extra Glare damage per party member, half weight.
             const g = (w: M.Workshop) => (M.glareDamage(w, cc.T) / M.glareCooldown(w)) * (M.PARTY_EVERY / cc.size);
@@ -646,10 +648,11 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
     dialLevel: (save) => run(save).lureMax ?? 0,
     // 01 §3: active ≈ 1.8-2.2x R_sim.
     localRatioBands: { all: [1.8, 2.2] },
+    ratioScale: (save) => M.greedMult((save.run as M.DungeonRun).ws),
     describe(save) {
       const r = run(save);
       const lv = r.pieces.length ? (r.pieces.reduce((a, p) => a + p.l, 0) / r.pieces.length).toFixed(1) : '0';
-      return `lure ${r.lure}/${r.lureMax} pieces ${r.pieces.length} avgL ${lv} chests ${r.chests[0]}${r.chests[1]} held ${M.heldLure(r)} idle ${idleRateOf(r).toFixed(1)}`;
+      return `lure ${r.lure}/${r.lureMax} pieces ${r.pieces.length} avgL ${lv} chests ${r.chests[0]}${r.chests[1]} greed ${r.ws.greed ?? 0} held ${M.heldLure(r)} idle ${idleRateOf(r).toFixed(1)}`;
     },
   };
 };

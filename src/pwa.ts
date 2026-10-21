@@ -56,3 +56,22 @@ function showPrompt(onBeforeReload: () => void): void {
   });
   document.body.appendChild(el);
 }
+
+// Android/Chrome install prompt: captured early so the A2HS modal can offer a one-tap INSTALL.
+let deferredInstall: { prompt(): Promise<void> } | null = null;
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredInstall = e as unknown as { prompt(): Promise<void> };
+  });
+}
+
+/** A one-tap install (Chrome/Android) when the browser offered one; null otherwise. */
+export function installPrompt(): (() => void) | null {
+  const p = deferredInstall;
+  if (!p) return null;
+  return () => {
+    deferredInstall = null;
+    void p.prompt().catch(() => {});
+  };
+}

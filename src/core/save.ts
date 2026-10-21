@@ -23,7 +23,15 @@ export function migrate(raw: any): SaveRoot | null {
   for (const k of Object.keys(s.meta.goods)) if (!Number.isFinite(s.meta.goods[k])) s.meta.goods[k] = 0;
   if (!s.meta.market || typeof s.meta.market.day !== 'number') s.meta.market = { ...base.meta.market };
   s.depts ??= {};
-  for (const d of Object.values(s.depts) as any[]) if (d && (typeof d.imports !== 'object' || !d.imports)) d.imports = {};
+  for (const d of Object.values(s.depts) as any[]) {
+    if (!d) continue;
+    if (typeof d.imports !== 'object' || !d.imports) d.imports = {};
+    if (typeof d.seen !== 'object' || !d.seen) d.seen = {};
+    if (!Array.isArray(d.pendingTips)) d.pendingTips = [];
+  }
+  if (typeof s.meta.steward !== 'object' || !s.meta.steward) s.meta.steward = {};
+  s.meta.managerClock = { ...base.meta.managerClock, ...(s.meta.managerClock ?? {}) };
+  if (s.meta.edict && (typeof s.meta.edict.id !== 'string' || typeof s.meta.edict.since !== 'number')) delete s.meta.edict;
   return s as SaveRoot;
 }
 

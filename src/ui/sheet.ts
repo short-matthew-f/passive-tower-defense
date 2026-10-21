@@ -7,13 +7,14 @@ import { PixelText } from './font';
 import { Button, C, drawPanel } from './widgets';
 
 const ROW_H = 28;
+const HEADER_H = 12;
 
 interface Row {
   entry: UpgradeEntry;
   root: Container;
   name: PixelText;
   desc: PixelText;
-  btn: Button;
+  btn: Button | null;
 }
 
 export class UpgradeSheet extends Container {
@@ -124,9 +125,21 @@ export class UpgradeSheet extends Container {
   private build(): void {
     const { x, w, listY } = this.box;
     const entries = this.groups[this.tab]?.entries.filter((e) => e.visible?.() ?? true) ?? [];
+    let ry = listY + 2;
     entries.forEach((entry, i) => {
       const root = new Container();
-      root.position.set(x + 4, listY + 2 + i * ROW_H);
+      root.position.set(x + 4, ry);
+      if (entry.header) {
+        ry += HEADER_H;
+        const name = new PixelText(entry.name.toUpperCase(), C.goldText);
+        name.position.set(2, 4);
+        const line = new Graphics().rect(0, HEADER_H - 2, w - 8, 1).fill(C.edge);
+        root.addChild(line, name);
+        this.list.addChild(root);
+        this.rows.push({ entry, root, name, desc: name, btn: null });
+        return;
+      }
+      ry += ROW_H;
       const bg = new Graphics();
       bg.rect(0, 0, w - 8, ROW_H - 2).fill(i % 2 ? 0x24162f : 0x2e1d3d);
       const name = new PixelText('');
@@ -151,7 +164,7 @@ export class UpgradeSheet extends Container {
       this.list.addChild(root);
       this.rows.push({ entry, root, name, desc, btn });
     });
-    this.maxScroll = Math.max(0, entries.length * ROW_H + 4 - this.box.listH);
+    this.maxScroll = Math.max(0, ry - (listY + 2) + 4 - this.box.listH);
     this.refresh();
   }
 
@@ -162,6 +175,7 @@ export class UpgradeSheet extends Container {
     const maxChars = Math.floor((this.box.w - 8 - 54) / 4);
     for (const r of this.rows) {
       const e = r.entry;
+      if (!r.btn) continue;
       const lvl = e.level();
       const maxed = lvl >= e.max;
       const lvlText = e.levelText ? e.levelText() : e.max === Infinity ? `LV${lvl}` : `${lvl}/${e.max}`;
@@ -169,13 +183,13 @@ export class UpgradeSheet extends Container {
       r.desc.set(e.desc().toUpperCase().slice(0, maxChars));
       const lock = e.locked?.() ?? null;
       if (maxed) {
-        r.btn.setLabel('MAX').setEnabled(false);
+        r.btn.setLabel(e.maxLabel ?? 'MAX').setEnabled(false);
       } else if (lock) {
         r.btn.setLabel('LOCKED', lock.toUpperCase().slice(0, 10)).setEnabled(false);
       } else {
         const cost = formatNum(e.cost(), notation);
         const unit = !e.currency ? '' : e.currency.startsWith('{') ? e.currency.slice(0, e.currency.indexOf('}') + 1) : e.currency[0];
-        r.btn.setLabel(e.buyLabel ?? 'BUY', `${cost}${unit}`).setEnabled(e.canAfford());
+        r.btn.setLabel(e.buyLabel ?? 'BUY', e.costText ? e.costText() : `${cost}${unit}`).setEnabled(e.canAfford());
       }
     }
   }

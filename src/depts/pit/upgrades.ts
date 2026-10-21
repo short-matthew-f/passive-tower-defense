@@ -1,7 +1,7 @@
 // The War Pit upgrade tree (07 §6) as shared-sheet groups: Pens, Spoils, Kennels (Teeth) and the
 // Bestiary (Crests, persistent: the 6 ★ beasts and the Pedigrees). Stakes live on the home panel.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
-import { PEDIGREES, UPGRADES, lvOf, upCost, type PitPersistent, type PitRun, type UpDef } from './def';
+import { PEDIGREES, UPGRADES, lvOf, upCost, upLocked, type PitPersistent, type PitRun, type UpDef } from './def';
 import { BESTIARY, UNITS } from './units';
 
 export interface Hooks {
@@ -18,10 +18,11 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     max: u.max,
     level: () => lvOf(r(), u.id),
     cost: () => upCost(u, lvOf(r(), u.id)),
+    locked: () => upLocked(u, ctx.save.cycle.n),
     canAfford: () => lvOf(r(), u.id) < u.max && r().bank >= upCost(u, lvOf(r(), u.id)),
     buy: () => {
       const l = lvOf(r(), u.id);
-      if (l >= u.max) return;
+      if (l >= u.max || upLocked(u, ctx.save.cycle.n)) return;
       if (ctx.spend(upCost(u, l))) {
         r().lv[u.id] = l + 1;
         hooks.onBuy(u.id);

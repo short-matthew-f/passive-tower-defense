@@ -28,6 +28,8 @@ export interface Metric {
 
 const H = 3600;
 const DAY = 86400;
+/** Baseline seconds below which the ratio rows are reported as INFO (too few payouts to judge). */
+const MIN_RATIO_S = 600;
 
 /** Spec arc (00 §6): first Fall of each department, in days since the start (0-based, fractional). */
 export const ARC_FIRST_FALL_DAY: Partial<Record<DeptId, [number, number]>> = {
@@ -42,12 +44,15 @@ export const ARC_FIRST_FALL_DAY: Partial<Record<DeptId, [number, number]>> = {
   // 120-200 Dread has the Spire contributing almost nothing by day 7).
   styx: [4.25, 5.25],
   spire: [6.25, 7.25],
+  // The War Pit opens on day 6-8 (00 §6, ~6.0 d); the same 2.75-3.75 days after its unlock.
+  pit: [8.75, 9.75],
 };
 
 /** 00 §6 reference unlock day for departments 5-7 (0-based days), tolerance ± 1 day (00 §8.1). */
 export const ARC_UNLOCK_DAY: Partial<Record<DeptId, [number, number]>> = {
   styx: [1.0, 2.0], // "day 2"
   spire: [3.0, 5.0], // "day 4-5"
+  pit: [5.0, 7.0], // "day 6-8"
 };
 
 /** Expected unlock time from 00 §6, in active minutes, with the ±30 min tolerance for departments 2-4. */
@@ -383,6 +388,10 @@ export function evaluate(r: SimResult, adapters: DeptAdapter[]): Metric[] {
         hi: 5,
         level: 'hard',
         ci: false,
+        // A few baseline minutes (a department opened late in the run, e.g. the War Pit in a
+        // 7-day run) are one or two lumpy payouts: reported, not judged.
+        status: base.secs > 0 && base.secs < MIN_RATIO_S ? 'INFO' : undefined,
+        note: base.secs > 0 && base.secs < MIN_RATIO_S ? `under ${MIN_RATIO_S / 60} baseline minutes: not judged` : undefined,
       }),
     );
     const early = ratioOf(Object.entries(tr.ratio).filter(([k]) => k.startsWith('early:')).map(([, v]) => v));
@@ -404,6 +413,7 @@ export function evaluate(r: SimResult, adapters: DeptAdapter[]): Metric[] {
       if (!band || rs.onScreen === null) continue;
       out.push(
         mk({
+          status: rs.secs < MIN_RATIO_S ? 'INFO' : undefined,
           id: `ratioLocal.${st}`,
           dept: id,
           label: `Active : on-screen idle at baseline (${st})`,

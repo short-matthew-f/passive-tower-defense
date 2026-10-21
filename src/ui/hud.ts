@@ -3,7 +3,7 @@ import { Container, Graphics, Rectangle } from 'pixi.js';
 import type { DeptDef } from '../core/dept';
 import type { Game } from '../core/game';
 import type { DeptSave } from '../core/types';
-import { coreMult, infamy } from '../core/economy';
+import { coreMult, econFloor, infamy } from '../core/economy';
 import { formatNum } from '../core/format';
 import { PixelText } from './font';
 import { Button, C, drawBar } from './widgets';
@@ -74,7 +74,7 @@ export class DeptHud extends Container {
     const target = this.def.skillTarget(this.d.cycle.n);
     this.game.toast(
       `INFAMY ${Math.floor(inf.value)}%  SKILL: ${this.def.skillLabel(target)} (${Math.floor(inf.skill * 100)}%)  ECONOMY: EARN ${formatNum(
-        this.def.econBase * 3 ** this.d.cycle.n,
+        econFloor(this.def, this.d.cycle.n),
       )} THIS CYCLE (${Math.floor(inf.econ * 100)}%)`,
     );
   }

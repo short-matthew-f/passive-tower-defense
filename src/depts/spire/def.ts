@@ -6,6 +6,8 @@ import type { DeptSave } from '../../core/types';
 
 // ---------- orb tiers (04 §3; radii re-curved so a Void Star is ~46% of the base width) ----------
 
+import { LONG_GROWTH, LONG_MAX, longDesc, longLocked, longMult } from '../../core/longnode';
+
 export interface TierDef {
   name: string;
   r: number;
@@ -143,6 +145,8 @@ export interface UpDef {
   growth: number;
   max: number;
   pages?: boolean; // paid in Grimoire Pages (persistent)
+  /** Locked until this department's 2nd Fall (the long node, core/longnode.ts). */
+  afterFall?: boolean;
   desc(l: number): string;
 }
 
@@ -151,6 +155,10 @@ const pct = (n: number) => `${Math.round(n * 100)}%`;
 export const UPGRADES: UpDef[] = [
   // A. Alchemy
   { id: 'potent', name: 'Potent Mana', branch: 'alchemy', base: 50, growth: 1.15, max: 100, desc: (l) => `Merge value x${potentMultL(l).toFixed(1)} > x${potentMultL(l + 1).toFixed(1)}` },
+  // The long node (core/longnode.ts, sim/README.md "Pass 5"): all Arcana x1.15 per level, a
+  // stronger focus every 10 levels; opens after the 2nd Fall. SIM-TUNED base: ~2 h of a later
+  // cycle's plateau idle (~5.6e4/s).
+  { id: 'amp', name: 'Arcane Amplifier', branch: 'alchemy', base: 1.5e8, growth: LONG_GROWTH, max: LONG_MAX, afterFall: true, desc: (l) => longDesc(AMPLIFIERS, l) },
   { id: 'richer', name: 'Richer Spawns', branch: 'alchemy', base: 200, growth: 1.9, max: 10, desc: (l) => `Sparks ${pct(spawnTableL(l, 0)[0])} > ${pct(spawnTableL(l + 1, 0)[0])}, more Wisps` },
   { id: 'seed', name: 'Seed Orb', branch: 'alchemy', base: 5000, growth: 4, max: 5, desc: (l) => `Hexballs spawn ${l}% > ${l + 1}%` },
   { id: 'glass', name: 'Resonant Glass', branch: 'alchemy', base: 300, growth: 1.6, max: 10, desc: (l) => `Resonance cap x${resCapL(l).toFixed(2)} > x${resCapL(l + 1).toFixed(2)}` },
@@ -174,6 +182,12 @@ export function upCost(u: UpDef, level: number): number {
   return Math.ceil(u.base * u.growth ** level);
 }
 
+/** Arcane Amplifier milestone titles (one per 10 levels). */
+export const AMPLIFIERS = ['LENS', 'PRISM', 'FOCUS', 'CONDUIT', 'NEXUS', 'ZENITH', 'APEX'];
+
+/** Lock reason for a node in cycle `n` (the long node opens after the 2nd Fall), or null. */
+export const upLocked = (u: UpDef, n: number): string | null => (u.afterFall ? longLocked(n) : null);
+
 /** Volatility level V costs 5,000 x 4^(V-1) for the V-th level (04 §7: `5,000 x 4^V` with V = levels owned). */
 export function volCost(bought: number): number {
   return 5000 * 4 ** bought;
@@ -190,7 +204,7 @@ export const cascadeWindowL = (l: number) => 1.5 + 0.15 * l;
 export const cooldownL = (l: number) => Math.max(0.4, 0.6 - 0.05 * l);
 export const chainFactorL = (l: number) => Math.min(1, 0.8 + 0.03 * l);
 
-export const potentMult = (run: SpireRun) => potentMultL(lvOf(run, 'potent'));
+export const potentMult = (run: SpireRun) => potentMultL(lvOf(run, 'potent')) * longMult(lvOf(run, 'amp'));
 export const resCap = (run: SpireRun) => resCapL(lvOf(run, 'glass'));
 export const cascadeWindow = (run: SpireRun) => cascadeWindowL(lvOf(run, 'echo'));
 export const cooldown = (run: SpireRun) => cooldownL(lvOf(run, 'valve'));

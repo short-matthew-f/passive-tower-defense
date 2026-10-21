@@ -1,6 +1,7 @@
 // The Styx upgrade tree (03 §6) as shared-sheet groups: Line & Reel, Lures, Imp Crew, Bait.
 // Wrath lives on the dock (in-scene dial), not here.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
+import { longDesc, longLocked } from '../../core/longnode';
 import * as M from './model';
 
 export interface Hooks {
@@ -12,18 +13,20 @@ const pct = (x: number) => `${Math.round(x * 100)}%`;
 export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
   const r = () => ctx.save.run as M.StyxRun;
   const p = () => ctx.save.persistent as M.StyxPersistent;
-  const node = (id: M.NodeId, name: string, desc: (l: number) => string): UpgradeEntry => ({
+  const node = (id: M.NodeId, name: string, desc: (l: number) => string, locked?: () => string | null): UpgradeEntry => ({
     id,
     name,
-    desc: () => desc(r().lv[id]),
+    desc: () => desc(r().lv[id] ?? 0),
     max: M.NODES[id].max,
-    level: () => r().lv[id],
-    cost: () => M.nodeCost(id, r().lv[id]),
-    canAfford: () => r().lv[id] < M.NODES[id].max && r().bank >= M.nodeCost(id, r().lv[id]),
+    locked,
+    level: () => r().lv[id] ?? 0,
+    cost: () => M.nodeCost(id, r().lv[id] ?? 0),
+    canAfford: () => (r().lv[id] ?? 0) < M.NODES[id].max && r().bank >= M.nodeCost(id, r().lv[id] ?? 0),
     buy: () => {
-      if (r().lv[id] >= M.NODES[id].max) return;
-      if (ctx.spend(M.nodeCost(id, r().lv[id]))) {
-        r().lv[id]++;
+      const L = r().lv[id] ?? 0;
+      if (L >= M.NODES[id].max || locked?.()) return;
+      if (ctx.spend(M.nodeCost(id, L))) {
+        r().lv[id] = L + 1;
         hooks.onBuy(id);
       }
     },
@@ -58,6 +61,7 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('lantern', 'Lantern Glow', (l) => `BITE WAIT ${M.biteWait(l).toFixed(1)} -> ${M.biteWait(l + 1).toFixed(1)}S`),
     node('scent', 'Soul Scent', (l) => `RARE BITES X${M.scentMult(l).toFixed(2)} -> X${M.scentMult(l + 1).toFixed(2)}`),
     node('wispnet', 'Wisp Net', (l) => `WISPS X${M.wispMult(l).toFixed(1)} -> X${M.wispMult(l + 1).toFixed(1)}, MORE OFTEN`),
+    node('legend', "Ferryman's Legend", (l) => longDesc(M.LEGENDS, l), () => longLocked(ctx.save.cycle.n)),
   ];
 
   const crew: UpgradeEntry[] = [

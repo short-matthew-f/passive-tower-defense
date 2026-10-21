@@ -5,14 +5,15 @@ days on **the game's own pure modules**, so "the sim matches the game" holds bec
 same code. Nothing here imports Pixi or the DOM.
 
 ```
-npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json} (~50 s)
-npm run sim -- --days 30        # weeks 2-4 cycle metrics
-npm run sim -- --quick          # reference profile only, 1 seed (~9 s)
+npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json} (~55 s)
+npm run sim -- --days 30        # weeks 2-4 cycle metrics (~30 s per seed)
+npm run sim -- --quick          # reference profile only, 1 seed (~10 s)
 npm run sim -- --fall-at 150    # Fall policy: push to 150% Infamy before letting the Legend in
 npm run sim -- --skill expert   # bot skill: novice | reference | expert
 npm run sim -- --live           # Cauldron and Spire: live physics every second (no activeRate table)
-npm run sim -- --floor-growth 2.5   # experiment: economy floor growth per Fall (shipped x3)
-npm test                        # includes tests/balance.test.ts, the fast CI tier (~13 s)
+npm run sim -- --floor-growth 3     # experiment: economy floor growth per Fall (shipped x2.5)
+npm test                        # includes tests/balance.test.ts, the fast CI tier (~11 s)
+BALANCE_LONG=1 npx vitest run tests/balance.test.ts   # + the 30-day weeks 2-4 tier (~35 s)
 ```
 
 `npm run sim` uses Vite's module runner (`sim/cli.mjs`), so it needs no extra dependency.
@@ -95,6 +96,21 @@ Two layers, as in 00 §8.1:
      measure merge income per unit of Potent x arcanaMult(V), the Feat tier and the Distill
      Ceiling; later seconds reuse them and advance the drop count and the Feat's 60-drop log.
      Live physics costs ~0.8 ms per simulated second, so 7-day runs are almost all live.
+   - **War Pit** plays Runs on the real shop and battle rules (`src/depts/pit/run.ts`,
+     `engine.ts`) with the greedy draft bot (`bot.ts`), and pays Skirmishes from the real memoized
+     Gauntlet `idleRate` only while no Run is on screen, as the scene does. It ports the scene's
+     thin layer: battle Teeth x Pliers x Arena Renown at each result card, the run-end bonus,
+     Crests, Pit Crowns (the skill gate), Captives (the Goods counter), the last-3 warband history
+     and stationing the best of them when its Gauntlet beats the Standing Warband. Bots (07 §14.1):
+     the novice adds 20% random buys and shops 1.5x slower; the reference judges up to 8 line
+     orders per shop and the expert 64, each by guessed battles (own seeds) against what the scout
+     shows: the rival's beasts always, their stats with Scouting L1, levels and items with L2 (the
+     expert reads one level more). Time model: shop 8 s + 3 s per action, battles at 1x for rounds
+     1-3 then 2x, the 1.5 s result card, 6 s on the summary and 3 s at home. Stakes: buying a level
+     sets the dial to it (the scene's button); the bot steps one down after a Retreat and back up
+     after a Triumph, plays the Infamy target while it still needs its Crown, and buys Stakes above
+     the target only after a Crown at its current top. The buyer ranks the real `buildGroups()` by
+     Δ(Gauntlet idleRate + 0.25 x an estimate of active Teeth/s)/cost.
    - **Greedy buyer** (Cauldron, Mines): it buys the best Δincome/cost. When the skill gate needs the next
      dial level (Malice, Dig Deeper, Menace), it saves for it, and only buys items that pay for
      themselves before the dial would be affordable anyway. Gems and Batch Tokens buy the drum,
@@ -149,8 +165,9 @@ The pure economy lives in `src/depts/<dept>/def.ts`, a `DeptEcon` with no Pixi i
      call the pure model.
    - `buy(goals)` is the bot's shop. Prefer driving the department's real upgrade list.
      `goals.dialGoal` is the dial level the Fall policy wants.
-   - `anyAffordable`, `dialLevel`, `dialMax`, `dialId`, `dialCost`, plus optional `ratioState`
-     and `localRatioBands` (the spec's own active:idle bands).
+   - `anyAffordable`, `dialLevel`, `dialMax`, `dialId`, `dialCost`, plus optional `ratioState`,
+     `localRatioBands` (the spec's own active:idle bands) and `ratioScale` (the department's long
+     node multiplier, divided out of both sides of the ratio metrics; see Pass 5).
 3. Add one line to `sim/adapters/index.ts`. Add its arc first-Fall day and unlock minute
    (departments 2-4) or unlock day (5-7, `ARC_UNLOCK_DAY`) in `sim/metrics.ts`. Its Seal starts
    being bought automatically. A department whose skill gate isn't counted in dial levels (the
@@ -173,7 +190,10 @@ Each row shows a status, the spec level and a CI marker.
   department isn't gated until its own tuning pass. The suite bands (shares, day-7 Dread) are
   gated per department set (`SUITE_GATES`, keyed by the built set): adding a department turns them
   off until that set is re-baselined. To gate a band for every department, set `ci: true` on it
-  in `metrics.ts`.
+  in `metrics.ts`. With `BALANCE_LONG=1` the test also runs 30 days (seed 1) and gates every
+  department's weeks 2-4 cycle (1.5-3 days) and longest cycle (<= 5 days).
+- **Ratio rows** with under 10 baseline minutes (a department opened in the last day of the run,
+  e.g. the War Pit in a 7-day run) are reported as INFO: one or two payouts can't be judged.
 
 Bands derived for a partial suite (see `metrics.ts`):
 
@@ -194,28 +214,26 @@ Bands derived for a partial suite (see `metrics.ts`):
 
 ## Current results (reference, 7 days, 3 seeds; `sim/out/report.md` has the full table)
 
-96 pass, 29 warn, 0 fail after the third tuning pass below (all six built departments: Cauldron,
-Mines, Dungeon, Bridge, Styx, Spire). All hard bands pass in every seed. The remaining warnings
-are soft:
+105 pass, 34 warn, 0 fail after the fifth pass (all seven departments; Pass 5 below). All hard
+bands pass in every seed. The remaining warnings are soft:
 
 - **First Fall wall clock vs AE hours.** In the reference profile every night and day gap adds
   ~2-4 h active-equivalent. The Cauldron's hard "3-4 h AE ± 1 h" band puts its first Fall in the
-  day-1 evening session (19:15, 3.1 h AE) instead of "early day 2". The later departments are
-  held to their arc day instead: Mines day 3 08:00 (~11 h AE), Dungeon day 4 08:00 (~19 h AE),
-  Bridge day 5 08:05 (~19 h AE), Styx day 5 12:30 (~17 h AE), Spire day 7 08:00 (~16 h AE).
+  day-1 evening session (19:14, 3.1 h AE) instead of "early day 2". The later departments are
+  held to their arc day instead: Mines day 3 08:00 (~12 h AE), Dungeon day 4 08:00 (~19 h AE),
+  Bridge day 5 08:05 (~21 h AE), Styx day 5 12:30 (~17 h AE), Spire day 7 08:05 (~19 h AE). The
+  War Pit opens on day 6 18:00 - day 7 08:00, so its first Fall (~3 days later) is outside a 7-day
+  run.
 - **Economy gate ≈ 2.5 h AE**: the same conflict.
-- **Cauldron week-1 cycles** average 1.2 days (the 1.5-3 day band is for weeks 2-4), so it Falls 5
-  times by day 7 and takes ~41% of the Dread (cap 37.4% for 6 departments; the 00 §6 arc itself
-  implies 24-31% for the starter). See "Still open".
-- **Spire on-screen ratio** 2.51x median, one seed 2.26x (band 2.4-3.2x): ~25 baseline minutes
-  of a lumpy payout; the hard active:offline band passes in every seed (3.3-3.7x).
-- **Spire first Fall** day 7 08:00 (6.33 d; one seed 5.88 d) against the derived 6.25-7.25 d.
-- **Dial step cost**: Cauldron median 14 min, Mines 2 min, Dungeon 8 min, Styx 11 min, Spire
-  1 min (Bridge 27 min passes). Low dial levels are bought during the rebuild ramp.
+- **Cauldron week-1 cycles** average 1.2 days (the 1.5-3 day band is for weeks 2-4), so it takes
+  32-35% of the day-7 Dread (cap 35% for 7 departments). See Pass 5.
+- **Bridge and Spire on-screen ratios** 2.36x and 2.33x (bands 2.3-3.2x and 2.4-3.2x) on 25-40
+  baseline minutes; their hard active : offline bands pass in every seed.
+- **Dial step cost**: Cauldron median 15 min, Mines 2 min, Dungeon 8 min, Bridge 23 min, Styx
+  12 min, Spire 1 min. Low dial levels are bought during the rebuild ramp.
 
-30-day runs (`--days 30`) still show the structural late-cycle problem from the tuning log, now in
-all six departments: weeks 2-4 average 5.2-6.1 days, longest 7-10 days (see Pass 3, "Floor
-growth experiment").
+30-day runs (`--days 30`): every department's weeks 2-4 cycles now average 1.5-3 days (Pass 5).
+The active : offline drift over 30 days is listed under Pass 5, "Still open".
 
 ## Tuning log
 
@@ -549,3 +567,187 @@ Watch: the Spire's active:offline reads 4.57x median with one seed at 5.47x (har
 Glass widens the flask 6 px at L3, which helps the live bot more than Spark Fuel's +15% apprentice
 drops help idle; it sits on ~20 baseline minutes of a lumpy payout (see Pass 3), so it's noted, not
 retuned. The Mines' gated ratio reads 2.57x [2.52-2.76].
+
+### Pass 5: War Pit, long nodes, floor growth (7 departments)
+
+New adapter `sim/adapters/pit.ts` (see "How it works"), registered after the Spire; the Pit unlocks
+by Seal plus lifetime Dread 150 in `DEPT_ORDER`, so with seven adapters there are no phantom Seals
+left. Then the weeks 2-4 fix: one long multiplicative node per department, and a floor-growth
+decision re-made with those nodes in place. Every number below is a sim-tuned seed, commented where
+it lives. "Before" for week 1 is Pass 4's report (six departments, 3-seed medians); "before" for
+weeks 2-4 is a 30-day run with the Pit adapter but no long nodes at x3; "after" is the current tree.
+
+Harness changes:
+
+1. **`ratioScale`** (`sim/types.ts`, `meta.ts`): the long node multiplies active and idle income
+   alike, but it grows income ~1000x through a late cycle, so a ratio of summed seconds was decided
+   by the last hours and by single lumpy payouts (the Pit read 1x-30x across seeds). The ratio
+   metrics now divide the node's multiplier out of both sides. At level 0 nothing changes.
+2. **Ratio rows under 10 baseline minutes are INFO** (`metrics.ts`), and the single-department row
+   compares against the seed median of the reference first Fall, INFO when the reference has none
+   in the window (the Pit in 7 days). It used seed 1 alone.
+3. **Dry returns are logged** (`meta.ts`: a `dry` event names the department and its state).
+4. **30-day CI tier** (`BALANCE_LONG=1`, see "Reading the report").
+
+#### War Pit tuning
+
+The adapter measured a Pit far off its bands with the shipped seeds: the reference bot's line search
+beat an 8/14 Huntmaster ~85% of the time (Triumphs ~90% at the target Stakes), the economy gate
+filled within an hour of the Seal (econBase 4e4 against Late Recruit x2, Banners, Dread perks and
+offline Skirmishes at ~0.7), and late in a cycle the bot bought Stakes it couldn't win Runs at
+because the drilled Standing Warband still cleared all 12 Gauntlet rounds there. Changes:
+
+1. **Huntmaster** 8/14 -> 14/30 (`run.ts` `HUNT_ATK`/`HUNT_HP`), his own stats growing with
+   stakesStat^0.5 (`HUNT_STAKES_EXP`; his beasts keep the full x1.1^S). At the full growth the
+   reference bot won ~1 Stakes-10 Run in 3, and the last target stalled cycles past 5 days.
+   `PARAMS_VERSION` 1 -> 2.
+2. **Skill gate: 1 Pit Crown at Stakes >= target** (`def.ts` `PIT_CROWNS`, was 2), 07 open question
+   8's own fallback for when the sim can't meet "skill gate within 2.5 days of reference attention"
+   at the top of the 35-50% Triumph band. The reference player gives the Pit ~8 on-screen minutes a
+   day (~1 Run); two Crowns took 3-5 days a cycle. HUD and summary texts read `x/PIT_CROWNS`.
+3. **k_idle** 0.06 -> 0.05 (`K_IDLE`), **Showman** +10% -> +5% per level (`run.ts` `SHOWMAN_STEP`):
+   once the Standing Warband clears all 12 Gauntlet rounds Skirmish pay is capped
+   (~0.3 x 1.22^S x Teeth multipliers per s), while Showman kept growing Run pay; at +10% x 20 a
+   late cycle read ~6x on screen.
+4. **econBase** 4e4 -> 5e6, **rankRef** 0.15 -> 0.5, **rankTarget** 3 -> 12 (`def.ts`).
+5. **Seal** 3,000,000 kept (`src/core/meta.ts`): lifetime Dread 150 arrives on day 4-5, Tribute
+   binds, and the Pit opens on day 6 18:00 - day 7 08:00.
+
+| War Pit (band) | Shipped seeds | After |
+|---|---|---|
+| First upgrade (< 60 s) | 102 s (the bot saved the purse for Stakes 1) | 0 s (Tooth Pliers from the 120-Teeth purse) |
+| Unlock (00 §6 day 6-8) | 6.33 d | 5.75 d [5.75-6.33] (day 6 18:00 - day 7 08:00) |
+| First Fall (~3 days after the Seal) | 1.4 d after (econ gate in ~0.3 h AE) | 2.6-3.0 d after (day 9 08:00 - day 10 08:00) |
+| Triumphs at the target Stakes, reference (35-50%) | ~90% (Huntmaster ~100% when reached) | ~50% at Stakes 4, 46-73% over targets 4-10 in 30-day runs |
+| Novice / reference / expert at Stakes 4 | 50 / 90 / 100% | 17 / 52 / 67% |
+| Rounds 1-5 win rate (>= 75%) | 95% | 90-96% |
+| Run length (6-9 min) | 5.3-6 min | 6.5-6.7 min |
+| Active : on-screen idle (07 §3: >= 2.6x, centre 3.2x) | 0.8-7.6x in 12-day runs | 3.0-3.5x over days 6-16 (3 seeds); see "Still open" for 30 days |
+| Weeks 2-4 cycle (1.5-3 d) | 4.7 d (2 Crowns) | 2.85 / 3.08 / 3.79 d (seeds 1-3) |
+
+Drill Yard check (the task's late-cycle question): with the honest Stakes policy the bot's Run pay
+over Skirmish pay held 3.1-3.9x in the Drill 6-9 bucket across three 30-day seeds (before the long
+nodes, which made raw per-bucket sums meaningless). What broke the ratio was not Drill alone but a
+dial set above the bot's Run strength (the drilled warband kept clearing 12 rounds there): the bot
+now raises Stakes only after a Crown at its top, as a player who reads the scout would.
+
+#### The long nodes (weeks 2-4)
+
+Shared curve in `src/core/longnode.ts`, themed and priced per department: **income x1.15 per level,
+cost x1.18 per level** (cost growth >= effect growth, 00 §8), a new title every 10 levels (the
+visible milestone, shown in the row: "KETTLE X1.15 > X1.32", "NEXT: VAT X4.05"), **max 150**, a run
+upgrade (resets on Fall), **open after the department's 2nd Fall**. Each multiplies every local
+income path (inside `idleRate` and the scene's earn calls), so it moves active and idle together.
+
+| Department | Node | Effect | First level | Titles |
+|---|---|---|---|---|
+| Cauldron | Grander Cauldron (Pantry) | every ingredient's value x1.15^L (`ingValue`) | 1.5e10 Bile | POT, KETTLE, VAT, TUN, CISTERN, MOAT, LAKE |
+| Mines | Richer Seams (Shaft) | every rock's Nuggets x1.15^L (`oreMult`) | 2e9 Nuggets | COPPER ... DRAGONORE |
+| Dungeon | Hoard of Greed (Workshop) | all Plunder x1.15^L (`plunderMult`; the idle sim runs at greed 0 and scales after the memo) | 5e5 Plunder | COFFER ... MOUNTAIN |
+| Bridge | Royal Toll Charter (Bridge) | every fare, bounty, fine and goon toll x1.15^L (`fareMult`) | 8e4 Tollpence | WRIT ... EMPIRE |
+| Styx | Ferryman's Legend (Lures) | every soul, wisp and netted catch x1.15^L (`legendMult`) | 1.2e5 Obols | WHISPER ... LEGEND |
+| Spire | Arcane Amplifier (Alchemy) | all Arcana x1.15^L (in `potentMult`) | 1.5e8 Arcana | LENS ... APEX |
+| War Pit | Arena Renown (Spoils) | all Teeth, Runs and Skirmishes, x1.15^L (`teethMult` = Pliers x Renown) | 2e4 Teeth | BRAWL ... EPIC |
+
+Why these shapes (each was measured, then changed):
+
+- **The cap.** Each multiplicative node's income-per-spend elasticity is ln(effect)/ln(cost growth),
+  0.85 here, and they add: with Tooth Pliers (0.16), Fresher Stock or Tap Damage alongside, the
+  sum reaches ~1, i.e. exponential income. A Pit stalled on its skill gate for 7 days went from
+  1e8 to 1e22 Teeth/s. The cap bounds the node at x1.3e9; normal cycles use 40-80 levels, the
+  Styx up to ~120 (its Wrath dial costs x9 per Fall until the target caps at 20; at 100 and 120 a
+  Styx working its Wrath-20 gate had nothing left to buy on returns).
+- **2nd-Fall unlock.** Opening after the first Fall, the node arrived in cycle 1, where the greedy
+  buyers rightly preferred a universal multiplier to active-only nodes (Tap Damage, Batch nodes,
+  reels), which dragged the CI-gated week-1 ratios out of band (Mines 1.86x on screen, Styx 1.91x).
+  Pricing it later fixed the ratios but cost ~24 levels (~x28 income) in late cycles; the unlock
+  keeps cycles 0-1 as tuned and the low prices for weeks 2-4.
+- **Bases** ~1-2 h of a later cycle's plateau idle, then lowered where a department's weeks 2-4 still
+  ran long (Dungeon, Bridge, Styx, Pit: their skill gates and dials grow faster than the floor:
+  Wrath x9, Lure x9.4, Menace x6.3 per Fall).
+
+Side changes this needed (all to keep previously gated bands passing):
+
+1. **Mines FIST_TIER** 1.9 -> 2.0: the reference seed read 2.2-2.3x on screen (band 2.4-3.0x), and
+   its day-0/1 values moved with no Mines change at all (Tribute now also grows with Legend trophies
+   through the Trophy Hall group, which shifts Seal times and the slice rotation).
+2. **Styx NET_YIELD** 0.65 -> 0.6: the reference seed read 2.30x on screen (band 2.4-3.2x) after its
+   Seal moved from day 2 18:00 to 12:30.
+3. **Bridge OPENING_FLOAT** 0 -> 100 Tollpence: with an empty bank and no goons the Bridge earns
+   nothing until played, so a Fall in a slice's last second left 3 returns with nothing affordable
+   (hard band). 100 covers the first goon, like the Dungeon's 100 and the Pit's 120.
+4. **HUD** (`src/ui/hud.ts`): the economy-gate toast used `econBase * 3 ** n`; it now calls
+   `econFloor`.
+
+#### Floor-growth comparison (with the long nodes and Goods)
+
+30-day reference runs, 3 seeds each, seed medians, departments in the order Cauldron / Mines /
+Dungeon / Bridge / Styx / Spire / War Pit. The Dread/day yardstick is the 00 §6 arc for weeks 2-4
+(each department cycling every 3 days at Crush 0 to every 1.5 days at Crush 25% from its arc first
+Fall): 77-340 a day for seven departments, ~146 at 2.25-day cycles. The pre-Pass-5 29 a day was a
+symptom of the stretched cycles.
+
+| | Before (no long nodes, x3) | x3 | **x2.5 (shipped)** | x2 |
+|---|---|---|---|---|
+| Falls in 30 days | 9 / 5 / 5 / 4 / 4 / 3 / 3 | 14 / 12 / 10 / 10 / 9 / 9 / 6 | 15 / 13 / 10 / 10 / 9 / 10 / 7 | 18 / 15 / 10 / 10 / 9 / 10 / 7 |
+| Weeks 2-4 average cycle, days (1.5-3) | 4.75 / 6.00 / 5.63 / 5.33 / 8.27 / 5.27 / 4.67 | 2.61 / 2.46 / 2.77 / 2.82 / 2.98 / 2.90 / 3.59 | 2.26 / 2.15 / 2.82 / 2.73 / 2.92 / 2.60 / 3.08 | 1.81 / 1.91 / 2.82 / 2.86 / 2.90 / 2.49 / 3.08 |
+| Longest cycle incl. open, days (<= 5) | 7.8 / 10.0 / 9.2 / 9.7 / 14.0 / 13.4 / 9.7 | 3.0 / 3.0 / 3.5 / 3.9 / 4.0 / 3.8 / 7.0 | 2.6 / 2.6 / 3.2 / 3.9 / 4.0 / 3.4 / 4.4 | 2.2 / 2.4 / 3.4 / 4.0 / 3.8 / 3.2 / 3.8 |
+| Stalls (cycles > 5 d, median per dept) | 2 each | Pit 1 | 0 (one seed: a Pit 8.6 d) | 0 |
+| Lifetime Dread day 7 / 14 / 30 (day 7: 145-439) | 314 / 638 / 976 | 361 / 1,098 / 5,044 | 372 / 1,233 / 5,704 | 415 (one seed WARN) / 1,709 / 6,928 |
+| Dread per day, weeks 2-4 (arc 77-340) | 29 | 203 | 233 | 284 |
+| Dread share day 30, highest (<= 30%) | Cauldron 33% | Cauldron 21% | Cauldron 25% | Cauldron 31% (FAIL) |
+| Tribute share day 30, highest (<= 30%) | Spire 24% | Pit 22% | Styx 22% | Styx 24% |
+
+**Decision: x2.5** (`src/core/economy.ts` `FLOOR_GROWTH`). With the long nodes most departments are
+bound by their skill gates and dial prices rather than the floor (the Dungeon, Bridge, Styx and Spire
+barely move between variants), so the floor mostly sets the Cauldron's and Mines' pace and the
+Pit's. x2.5 is the only variant with all seven departments inside 1.5-3 days, while the day-7 Dread
+stays in its band and Dread per day stays inside the arc band; x3 leaves the Pit at 3.6 days with a
+7-day stall, and x2 breaks the day-7 band and puts the Cauldron above 30% of the Dread at day 30.
+
+#### Before -> after (7 days, 3 seeds, medians)
+
+| Metric (band) | Before (Pass 4, six departments) | After (seven) |
+|---|---|---|
+| Report | 96 pass / 29 warn / 0 fail (six departments) | 105 pass / 34 warn / 0 fail |
+| Active : offline C / M / D / B / S / Sp (3-5x) | 4.52 / 4.02 / 3.33 / 3.60 / 4.29 / 4.57 | 4.10 / 3.84 / 3.33 / 3.56 / 3.85 / 3.33 |
+| On-screen ratio C / M (drum) / D / B / S / Sp (dept bands) | 2.72 / 2.57 / 2.15 / 2.39 / 2.66 / 2.51 | 2.63 / 2.49 / 2.16 / 2.36 / 2.53 / 2.33 |
+| First Falls C / M / D / B / S / Sp (arc) | d1 19:14 / d3 08:00 / d4 08:00 / d5 08:05 / d5 12:30 / d7 08:00 | d1 19:14 / d3 08:00 / d4 08:00 / d5 08:05 / d5 12:30 / d7 08:05 |
+| Unlocks Styx / Spire / Pit (00 §6) | 1.52 / 3.52 / — | 1.52 / 3.52 / 5.75 d |
+| First upgrade, every department (< 60 s) | 0-20 s | 0-20 s (Bridge 0 s with its float, Pit 0 s) |
+| Lifetime Dread day 7 (145-439) | 338 | 372 [355-390] |
+| Dread share day 7, Cauldron (<= 35% at 7; 37.4% at 6) | 41% (WARN) | 33.6% [32-35%] |
+| Tribute shares day 7 | 15-17% each | 13-20% (Pit 1%, opened on day 6-7) |
+| Something affordable on returns (100%) | 100% | 100% (30-day: 100% at x2.5) |
+| `npm run sim` / CI test runtime | ~50 s / ~13 s | ~55 s / ~11 s |
+
+What changes how departments feel:
+
+- **A seventh door.** The War Pit opens late in week 1 and Falls ~3 days later. Its Huntmaster hits
+  much harder early (14/30 at Stakes 0, was 8/14) but grows more gently with Stakes; one Pit Crown
+  at the target now holds the skill gate; Showman pays half as much per level; Skirmishes pay
+  ~17% less per round cleared.
+- **Every department has a long node** that opens after its 2nd Fall: one row that keeps paying
+  x1.15 a level through the whole cycle, with a new title every 10 levels. Late in a cycle it's
+  where most of the bank goes, and income climbs steadily instead of plateauing; numbers get much
+  bigger late in a cycle (Dungeon and Styx idle rates reach 1e5-1e6/s by week 4, Ranks ~150-250).
+- **Shorter, steadier weeks 2-4**: 2.2-3.1 days per department instead of 5-8, and a Legend at the
+  gate somewhere most days. Dread arrives ~8x faster than before in weeks 2-4 (now what the 00 §6
+  arc implies), so Dread perks fill faster.
+- **Smaller tweaks**: Mines taps hit harder per Pick Tier (x2.0), the Styx's netters fetch a bit less
+  (0.6), the Bridge starts each cycle with 100 Tollpence.
+
+Still open after pass 5:
+
+- **War Pit attention.** Late Pit cycles hang on one Triumph at Stakes 10 with ~1 Run a day, so a
+  seed can still stall one cycle (8.6 days in 1 of 3). A reference player who opens the
+  department whose skill gate is lagging (00 §2.2: the HUD shows it) would fix most of it; that's
+  a profile change for all departments, not tried here.
+- **30-day active : offline drift** (not CI-gated): Mines ~5x (Tap Damage still grows in long
+  cycles), Dungeon ~2.1x (was ~2.8x: the buyer funds Hoard of Greed over defense, so the live floor
+  leaks at Lures the Cautious idle steps below), Pit 2-5x (lumpy Run payouts on ~1 Run a day),
+  Spire 2.7-3.8x.
+- **Rank inflation.** Rank is log-income, so the long nodes raise late Ranks (~+30 per 10 node
+  levels in the Pit) and Tribute; Seals and Banners absorb it so far (lifetime Tribute day 7
+  7.9M vs 7.1M).
+- **Cauldron week-1 Dread share** 32-35% (cap 35%): not gated.

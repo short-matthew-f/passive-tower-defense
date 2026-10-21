@@ -47,6 +47,10 @@ export interface DeptAdapter {
   dialCost(level: number): number;
   /** Optional sub-state label for splitting ratio metrics (e.g. Mines 'drum-on' / 'no-drum'). */
   ratioState?(save: DeptSave): string;
+  /** The long node's income multiplier (core/longnode.ts). It multiplies active and idle income
+   * alike, so the ratio metrics divide it out of both sides: otherwise the exponential growth late in
+   * a cycle lets the last hours (and single lumpy payouts) outweigh the rest. Default 1. */
+  ratioScale?(save: DeptSave): number;
   /** Department-local active:on-screen-idle bands per ratioState (from the department's spec). */
   localRatioBands?: Record<string, [number, number]>;
   /** Short state summary for the timeline. */

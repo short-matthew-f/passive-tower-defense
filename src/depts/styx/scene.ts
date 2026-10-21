@@ -840,7 +840,7 @@ export class StyxScene implements DeptScene {
     const band = s.band;
     const r = this.run;
     const gilded = r.bait === 'gilded';
-    const value = M.soulBase(s.sp, band) * M.comboMult(r.combo) * M.wrathActive(this.W) * (gilded ? M.gildedMult(this.ctx.save.imports?.potions ?? 0) : 1);
+    const value = M.soulBase(s.sp, band) * M.comboMult(r.combo) * M.wrathActive(this.W) * M.legendMult(r) * (gilded ? M.gildedMult(this.ctx.save.imports?.potions ?? 0) : 1);
     const first = !(this.per.codex[s.sp.id] > 0);
     s.state = 'fly';
     this.fly = { soul: s, x0: s.x, y0: this.depthY(s.d), t: 0, value, first };
@@ -1104,7 +1104,7 @@ export class StyxScene implements DeptScene {
     const w = this.wisps[i];
     this.wisps.splice(i, 1);
     const band = this.run.bands - 1;
-    const value = (M.COMMON_BASE[band] / 5) * M.wispMult(this.run.lv.wispnet) * M.wrathActive(this.W);
+    const value = (M.COMMON_BASE[band] / 5) * M.wispMult(this.run.lv.wispnet) * M.wrathActive(this.W) * M.legendMult(this.run);
     const got = this.ctx.earn(value);
     this.run.stats.wisps++;
     this.ctx.float(`+${formatNum(got, this.ctx.game.save.meta.settings.notation)}`, w.x, w.y - 8, '#a0f0f0');

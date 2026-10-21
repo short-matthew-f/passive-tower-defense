@@ -10,6 +10,8 @@
 //    damage (FIST_TIER), and idleRate models the goblins' hop between rocks (GOBLIN_HOP_S) instead
 //    of a flat 0.85 overkill factor.
 
+import { longCost, longMult } from '../../core/longnode';
+
 export interface MinesStats {
   taps: number;
   rocks: number;
@@ -46,6 +48,8 @@ export interface MinesRun {
   frenzy: number;
   fuse: number;
   drummers: number;
+  /** Richer Seams, the long node (core/longnode.ts): every rock pays x1.15 per level. */
+  seams: number;
   /** Rocks broken on screen per depth this cycle (Infamy skill gate: 50 at the target). */
   gate: Record<string, number>;
   stats: MinesStats;
@@ -63,6 +67,14 @@ export interface MinesPersistent {
 
 export const MAX_DEPTH = 60;
 export const MAX_GOBLINS = 8;
+
+/** Richer Seams (the long node, sim/README.md "Pass 5"): every rock's Nuggets x1.15 per level, a
+ * richer ore every 10 levels; opens after the 2nd Fall. SIM-TUNED base: ~2 h of a later cycle's
+ * plateau idle (~3e5/s). */
+export const SEAMS_BASE = 2e9;
+export const SEAMS = ['COPPER', 'SILVER', 'GOLD', 'MITHRIL', 'ADAMANT', 'STARMETAL', 'DRAGONORE'];
+export const seamsCost = (L: number) => longCost(SEAMS_BASE, L);
+export const oreMult = (r: MinesRun) => longMult(r.seams ?? 0);
 export const GRID = 5;
 export const TILES = GRID * GRID;
 export const GATE_ROCKS = 50;
@@ -93,6 +105,7 @@ export function defaultRun(): MinesRun {
     frenzy: 0,
     fuse: 0,
     drummers: 0,
+    seams: 0,
     gate: {},
     stats: defaultStats(),
   };
@@ -149,8 +162,11 @@ export const KEEN_MAX = 5;
  * tier 5), taps fell to ~5% of income and the drum-on on-screen ratio was 1.05x (02 §3: 2.4-3.0x).
  * The ratio is steep in this number (tier^5): x1.6 gives ~1.8x, x2.0 ~3.4x, x2.5 lets taps carry
  * the whole department (~10x the crew); x1.9 lands the drum-on reference bot at ~2.8x.
+ * SIM-TUNED 1.9 -> 2.0 (sim/README.md "Pass 5"): with seven departments sharing the reference
+ * player's minutes and Richer Seams (a universal multiplier the buyer rightly prefers to Tap
+ * Damage once it opens), the reference seed read 2.2-2.25x on screen.
  */
-export const FIST_TIER = 1.9;
+export const FIST_TIER = 2.0;
 export const fistTierMult = (T: number) => FIST_TIER ** T;
 /** Damage of one plain tap (no crit, beat or Frenzy) at the run's Tap Damage level and Pick Tier. */
 export const fistDamage = (r: MinesRun) => tapDamage(r.tap) * fistTierMult(r.tier);
@@ -282,7 +298,7 @@ export function crewRocksPerSec(r: MinesRun, p: MinesPersistent, d = r.depth, bo
  * regrow time), x the average reward of the spawn mix.
  */
 export function idleNuggets(r: MinesRun, p: MinesPersistent, bones = 0): number {
-  return crewRocksPerSec(r, p, r.depth, bones) * R(r.depth) * AVG_REWARD_F;
+  return crewRocksPerSec(r, p, r.depth, bones) * R(r.depth) * AVG_REWARD_F * oreMult(r);
 }
 
 /** Ingots (00 §4, 02 §16): 2% of Ore Veins yield one. Veins are VEIN_P of the non-keg spawn mix. */

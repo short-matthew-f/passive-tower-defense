@@ -18,6 +18,7 @@ import {
   rows,
   toadlings,
   UPGRADES,
+  upLocked,
   upCost,
   type CPersistent,
   type CRun,
@@ -347,6 +348,7 @@ export class CauldronScene implements DeptScene {
       max: u.max,
       cost: () => upCost(u, level()),
       currency: u.tokens ? 'Tokens' : undefined,
+      locked: () => upLocked(u, this.ctx.save.cycle.n),
       canAfford: () => (u.tokens ? per.tokens >= upCost(u, level()) : run.bank >= upCost(u, level())),
       buy: () => {
         const l = level();

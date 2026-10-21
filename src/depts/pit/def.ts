@@ -2,11 +2,13 @@
 // headless balance simulation and the scene all read this. index.ts spreads `pitEcon` into the
 // full DeptDef.
 import type { Commendation, DeptEcon } from '../../core/dept';
+import { LONG_GROWTH, LONG_MAX, longDesc, longLocked, longMult } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import { battle, battleSeed, hashStr, type Fighter } from './engine';
 import {
   BASE_GRIT,
   PARAMS_VERSION,
+  SHOWMAN_STEP,
   battleTeeth,
   lvlOf,
   newPet,
@@ -118,6 +120,8 @@ export interface UpDef {
   base: number;
   growth: number;
   max: number;
+  /** Locked until this department's 2nd Fall (the long node, core/longnode.ts). */
+  afterFall?: boolean;
   desc(l: number): string;
 }
 
@@ -128,7 +132,11 @@ export const UPGRADES: UpDef[] = [
   { id: 'freeroll', name: 'Free Roll', branch: 'pens', base: 1500, growth: 1, max: 1, desc: () => 'First roll each round free' },
   { id: 'scout', name: 'Scouting', branch: 'pens', base: 250, growth: 2, max: 2, desc: (l) => (l === 0 ? 'See rival stats' : 'See rival levels and items') },
   { id: 'pliers', name: 'Tooth Pliers', branch: 'spoils', base: 120, growth: 1.55, max: Infinity, desc: (l) => `Teeth x${pliersMult(l).toFixed(2)} > x${pliersMult(l + 1).toFixed(2)}` },
-  { id: 'showman', name: 'Showman', branch: 'spoils', base: 300, growth: 1.7, max: 20, desc: (l) => `Run-end bonus +${10 * l}% > +${10 * (l + 1)}%` },
+  // The long node (core/longnode.ts, sim/README.md "Pass 5"): the arena's renown, all Teeth (Runs
+  // and Skirmishes) x1.15 per level, a grander arena every 10 levels; opens after the 2nd Fall.
+  // SIM-TUNED base: ~2 h of a later cycle's plateau idle (~20/s).
+  { id: 'renown', name: 'Arena Renown', branch: 'spoils', base: 2e4, growth: LONG_GROWTH, max: LONG_MAX, afterFall: true, desc: (l) => longDesc(ARENAS, l) },
+  { id: 'showman', name: 'Showman', branch: 'spoils', base: 300, growth: 1.7, max: 20, desc: (l) => `Run-end bonus +${Math.round(100 * SHOWMAN_STEP * l)}% > +${Math.round(100 * SHOWMAN_STEP * (l + 1))}%` },
   { id: 'grit', name: 'Grit', branch: 'spoils', base: 800, growth: 5, max: 2, desc: (l) => `Grit hearts ${BASE_GRIT + l} > ${BASE_GRIT + l + 1}` },
   { id: 'pace', name: 'Skirmish Pace', branch: 'kennels', base: 60, growth: 1.9, max: 6, desc: (l) => `Gauntlet every ${intervalL(l)}s > ${intervalL(l + 1)}s` },
   { id: 'drill', name: 'Drill Yard', branch: 'kennels', base: 300, growth: 1.9, max: 15, desc: (l) => `Garrison +${l}/+${l} > +${l + 1}/+${l + 1}` },
@@ -143,6 +151,13 @@ export const lvOf = (run: PitRun, id: string) => run.lv?.[id] ?? 0;
 
 /** Tooth Pliers: +6% all Teeth per level, x2 at every 10th level (07 §6, W-01). */
 export const pliersMult = (l: number) => (1 + 0.06 * l) * 2 ** Math.floor(l / 10);
+/** Arena Renown milestone titles (one per 10 levels). */
+export const ARENAS = ['BRAWL', 'PIT', 'RING', 'ARENA', 'COLISEUM', 'SPECTACLE', 'EPIC'];
+export const renownMult = (l: number) => longMult(l);
+/** Every Teeth multiplier local to the Pit: Tooth Pliers x Arena Renown (Runs and Skirmishes). */
+export const teethMult = (run: PitRun) => pliersMult(lvOf(run, 'pliers')) * renownMult(lvOf(run, 'renown'));
+/** Lock reason for a node in cycle `n` (the long node opens after the 2nd Fall), or null. */
+export const upLocked = (u: UpDef, n: number): string | null => (u.afterFall ? longLocked(n) : null);
 export const intervalL = (l: number) => 40 - 2.5 * Math.min(6, l);
 
 /** Stakes level S+1 costs 300 x 2.2^S Teeth (07 §7). */
@@ -196,7 +211,17 @@ export function runOpts(save: PitSave): RunOpts {
 
 // ---------- Pit Crowns and the skill gate (07 §7) ----------
 
-/** Highest Stakes S with at least 2 Crowns won at Stakes >= S this cycle (-1 if none). */
+/**
+ * Pit Crowns the skill gate needs at Stakes >= the target (07 §7 default 2).
+ * SIM-TUNED 2 -> 1, 07 open question 8's own fallback ("if the sim can't meet the <= 2.5-day band
+ * with Triumphs at the top of 35-50%, drop to 1 Crown at Stakes >= target"): the reference player
+ * gives the Pit ~8 on-screen minutes a day (~1.5 Runs), so two Crowns at the target took 3-5 days
+ * per cycle and the Pit's weeks 2-4 cycles averaged ~4.4 days with stalls past 5 (sim/README.md
+ * "Pass 5").
+ */
+export const PIT_CROWNS = 1;
+
+/** Highest Stakes S with at least PIT_CROWNS Crowns won at Stakes >= S this cycle (-1 if none). */
 export function heldCrownLevel(crowns: Record<string, number>): number {
   const levels = Object.keys(crowns)
     .map(Number)
@@ -205,7 +230,7 @@ export function heldCrownLevel(crowns: Record<string, number>): number {
   let count = 0;
   for (const s of levels) {
     count += crowns[s];
-    if (count >= 2) return s;
+    if (count >= PIT_CROWNS) return s;
   }
   return -1;
 }
@@ -222,8 +247,14 @@ export function crownsAtOrAbove(crowns: Record<string, number>, S: number): numb
  * k_idle: Gauntlet Teeth relative to active battle Teeth, by construction (W-02).
  * TUNED with scripts/pit-bot.ts (greedy reference drafter, time model 8 s + 3 s/action per shop,
  * battles at 1x then 2x): a stationed Run warband earns ~1/2.7 of the bot's active Teeth/min.
+ * SIM-TUNED 0.06 -> 0.05 (sim/README.md "Pass 5"): in the balance sim the reference bot stations a
+ * warband that clears all 12 Gauntlet rounds within a day of each Fall, which caps Skirmish pay
+ * at ~0.3 x 1.22^S x Pliers per s; at 0.06 Skirmishes paid ~1/1.9 of active play on screen
+ * (07 §3 band 2.6-3.8x, centre 3.2x) early in the 30-day runs; later cycles add Run-only levels
+ * (Showman, Grit, Larder) and read higher. At 0.05 the reference profile reads ~3-4x on screen
+ * across 30 days (~4-5x active : offline at the Pit's ~0.75-0.8 factor).
  */
-export const K_IDLE = 0.06;
+export const K_IDLE = 0.05;
 export const GAUNTLETS = 8;
 export const GAUNTLET_ROUNDS = 12;
 
@@ -310,7 +341,7 @@ export function gauntletReport(save: DeptSave): GauntletReport {
 
 /** Skirmish Teeth per second for a given report (before core multipliers). */
 export function idleFromReport(run: PitRun, rep: GauntletReport): number {
-  return (K_IDLE * rep.mean * pliersMult(lvOf(run, 'pliers'))) / intervalL(lvOf(run, 'pace'));
+  return (K_IDLE * rep.mean * teethMult(run)) / intervalL(lvOf(run, 'pace'));
 }
 
 /** Preview for stationing: Teeth/s if `garrison` were the Standing Warband. */
@@ -365,9 +396,9 @@ export const pitEcon: DeptEcon = {
     count: (save) => (save.run as PitRun)?.stats?.captives ?? 0,
   },
 
-  // Infamy skill gate (07 §7, 00 §2.2): 2 Pit Crowns (Triumphs) at Stakes >= target.
+  // Infamy skill gate (07 §7, 00 §2.2): PIT_CROWNS Pit Crowns (Triumphs) at Stakes >= target.
   skillTarget: (n) => Math.min(4 + 2 * n, 10),
-  skillLabel: (t) => `2 CROWNS AT STAKES ${t}+`,
+  skillLabel: (t) => `${PIT_CROWNS} CROWN${PIT_CROWNS > 1 ? 'S' : ''} AT STAKES ${t}+`,
 
   // SEEDS (the Pit unlocks ~day 6-8, 00 §6), from scripts/pit-bot.ts (greedy drafter, Stakes
   // stepped up as it wins, time model 8 s + 3 s per shop action):
@@ -377,9 +408,16 @@ export const pitEcon: DeptEcon = {
   //    (~20 min/day on screen + offline Skirmishes at 0.75): 4e4 Teeth.
   //  - rankRef: on-screen idle ~10 min in (first Run stationed, Skirmish Pace 1-2): ~0.15/s.
   //  - rankTarget: idle at the first 100% Infamy (Stakes 4 warband, Pliers ~10, Pace 6): ~3/s.
-  econBase: 4e4,
-  rankRef: 0.15,
-  rankTarget: 3,
+  // SIM-TUNED (sim/README.md "Pass 5", sim/adapters/pit.ts on the reference profile, Pit open day 7
+  // 08:00 with ~8 on-screen min a day): the core multiplier (Banners, Dread perks, Goods, Late
+  // Recruit x2) and offline Skirmishes at ~0.7 fill 4e4 in under an hour of active-equivalent
+  // play, so the skill gate alone set a first Fall ~1.5 days after the Seal. Cycle earnings run
+  // ~1e6 a day after the unlock and ~5e6 after ~2.5 days, so econBase 4e4 -> 5e6 puts the first
+  // Fall ~3 days after the Seal (day 10 08:00 for a day-6/7 Seal) (00 §6 arc, like departments 4-6). rankRef 0.15 -> 0.5 (idle once the
+  // first Run is stationed), rankTarget 3 -> 12 (idle at the first 100% Infamy).
+  econBase: 5e6,
+  rankRef: 0.5,
+  rankTarget: 12,
   commendations,
 };
 

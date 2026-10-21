@@ -122,11 +122,11 @@ function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.ba
     const pLand = 1 - (1 - (1 - qThr) ** thr) * (1 - M.barbChance(r.lv.barb));
     const tCycle = depth / M.SINK_PX_S + tWait + pHook * tReel + FLY_S + sk.think;
     const streak = Math.min(20, (pHook * pLand) / Math.max(0.05, 1 - pLand));
-    const val = ev * M.comboMult(streak * 0.8) * M.wrathActive(w) * (bait === 'gilded' ? 2 : 1);
+    const val = ev * M.comboMult(streak * 0.8) * M.wrathActive(w) * M.legendMult(r) * (bait === 'gilded' ? 2 : 1);
     const rate = (pHook * pLand * val) / tCycle;
     if (rate > best.rate) best = { rate, band: b };
   }
-  const wisp = (sk.wisp / M.wispEvery(r.lv.wispnet)) * (M.COMMON_BASE[r.bands - 1] / 5) * M.wispMult(r.lv.wispnet) * M.wrathActive(w);
+  const wisp = (sk.wisp / M.wispEvery(r.lv.wispnet)) * (M.COMMON_BASE[r.bands - 1] / 5) * M.wispMult(r.lv.wispnet) * M.wrathActive(w) * M.legendMult(r);
   return { rate: best.rate + wisp, band: best.band };
 }
 
@@ -418,7 +418,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function land(): void {
-      const value = M.soulBase(sp, band) * M.comboMult(r.combo) * M.wrathActive(W()) * (r.bait === 'gilded' ? M.gildedMult(save.imports?.potions ?? 0) : 1);
+      const value = M.soulBase(sp, band) * M.comboMult(r.combo) * M.wrathActive(W()) * M.legendMult(r) * (r.bait === 'gilded' ? M.gildedMult(save.imports?.potions ?? 0) : 1);
       landFirst = !(p.codex[sp.id] > 0);
       landValue = value;
       r.combo++;
@@ -462,7 +462,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         if ((phase === 'sink' || phase === 'wait' || phase === 'seek' || phase === 'idle') && rnd() < sk.wisp) {
           wisps.pop();
           r.stats.wisps++;
-          env.earn((M.COMMON_BASE[r.bands - 1] / 5) * M.wispMult(r.lv.wispnet) * M.wrathActive(W()));
+          env.earn((M.COMMON_BASE[r.bands - 1] / 5) * M.wispMult(r.lv.wispnet) * M.wrathActive(W()) * M.legendMult(r));
         }
       }
       for (let i = wisps.length - 1; i >= 0; i--) {
@@ -632,7 +632,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         // Baits (persistent stock): Unpaid Debt for the gate's rare, Gilded Obol once a catch is
         // worth well over its 200-Obol share.
         if (!opts.passive) {
-          const catchVal = M.bandEV(r.bands - 1) * M.wrathActive(r.wrath);
+          const catchVal = M.bandEV(r.bands - 1) * M.wrathActive(r.wrath) * M.legendMult(r);
           const entries = shop(save);
           const buyBait = (id: M.BaitId) => {
             const e = entries.find((x) => x.id === `bait.${id}`)!;
@@ -671,9 +671,10 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     dialLevel: (save) => run(save).wrathMax ?? 0,
     // 03 §3: active ~2.8x on-screen idle (~4.3x offline at the Styx's unlock factor).
     localRatioBands: { all: [2.4, 3.2] },
+    ratioScale: (save) => M.legendMult(run(save)),
     describe(save) {
       const r = run(save);
-      return `wrath ${r.wrathMax} bands ${r.bands} netters ${r.lv.netter} nets ${r.lv.nets} reel ${r.lv.reel}`;
+      return `wrath ${r.wrathMax} bands ${r.bands} legend ${r.lv.legend ?? 0} netters ${r.lv.netter} nets ${r.lv.nets} reel ${r.lv.reel}`;
     },
   };
 };

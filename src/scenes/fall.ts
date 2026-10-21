@@ -1,6 +1,7 @@
 // "Sacked & Avenged": the static Fall card with the one-tap Crush timing bar (specs/00 §2.3).
 import { Container, Graphics, type Ticker } from 'pixi.js';
-import type { DeptDef } from '../core/dept';
+import type { DeptDef, LastStandCtx } from '../core/dept';
+import { legendsBane } from '../core/perks';
 import type { Game } from '../core/game';
 import type { DeptSave } from '../core/types';
 import { dreadPayout } from '../core/economy';
@@ -34,7 +35,8 @@ export function showFallCard(game: Game, def: DeptDef, d: DeptSave, inf: number,
   add(new PixelText(flavor, '#c8b8d0'), y + 32);
   const fh = measure(flavor).h;
 
-  const base = dreadPayout(d, inf, 0);
+  const bane = legendsBane(game.save, def.id);
+  const base = dreadPayout(d, inf, 0, bane);
   const info = wrap(
     `INFAMY ${Math.floor(inf)}%. LETTING THEM IN RESETS ${def.name.toUpperCase()} (${def.currency.toUpperCase()} AND UPGRADES). YOU KEEP RARE FINDS. THEN YOU CRUSH THEM FOR ${base}+ DREAD.`,
     w - 16,
@@ -46,7 +48,7 @@ export function showFallCard(game: Game, def: DeptDef, d: DeptSave, inf: number,
   const crushLabel = new PixelText('');
   root.addChild(crushLabel);
 
-  let phase: 'ask' | 'crush' | 'done' = 'ask';
+  let phase: 'ask' | 'crush' | 'stand' | 'done' = 'ask';
   let t = 0;
   let crush = 0;
   const barY = y + h - 64;
@@ -64,16 +66,13 @@ export function showFallCard(game: Game, def: DeptDef, d: DeptSave, inf: number,
         infoText.set(wrap('SACKED! NOW THE OVERLORD DESCENDS. TAP WHEN THE MARKER HITS THE CENTER.', w - 16));
         letIn.setLabel('CRUSH!');
         wait.visible = false;
+        stand.visible = !!def.lastStand;
       } else if (phase === 'crush') {
         phase = 'done';
+        stand.visible = false;
         const pos = (Math.sin(t * 3.2) + 1) / 2;
         crush = 0.25 * Math.max(0, 1 - Math.abs(pos - 0.5) * 2.5);
-        const total = dreadPayout(d, inf, crush);
-        infoText.set(wrap(`AVENGED! ${def.legend.name.toUpperCase()} IS CAPTURED. WORD SPREADS.`, w - 16));
-        crushLabel.set(`CRUSH +${Math.round(crush * 100)}%  =  ${total} DREAD`, C.goldText);
-        crushLabel.position.set(x + Math.floor((w - crushLabel.width) / 2), barY + 12);
-        letIn.setLabel('REBUILD, BIGGER AND MEANER');
-        game.haptic(30);
+        avenged();
       } else {
         game.app.ticker.remove(tick);
         root.destroy({ children: true });
@@ -98,6 +97,85 @@ export function showFallCard(game: Game, def: DeptDef, d: DeptSave, inf: number,
   });
   wait.position.set(x + 12, y + h - 24);
   root.addChild(wait);
+
+  const avenged = () => {
+    const total = dreadPayout(d, inf, crush, bane);
+    infoText.set(wrap(`AVENGED! ${def.legend.name.toUpperCase()} IS CAPTURED. WORD SPREADS.`, w - 16));
+    crushLabel.set(`CRUSH +${Math.round(crush * 100)}%  =  ${total} DREAD`, C.goldText);
+    crushLabel.position.set(x + Math.floor((w - crushLabel.width) / 2), barY + 12);
+    letIn.setLabel('REBUILD, BIGGER AND MEANER');
+    game.haptic(30);
+  };
+
+  // Interactive Last Stand (00 §2.3): the department's own mini-scene instead of the Crush bar.
+  const stand = new Button({
+    w: w - 24,
+    h: 16,
+    label: '{skull}LAST STAND',
+    color: C.gold,
+    shade: 0x9a7a20,
+    onTap: () => {
+      if (phase !== 'crush' || !def.lastStand) return;
+      phase = 'stand' as typeof phase;
+      root.visible = false;
+      const layer = new Container();
+      const ticks: ((dt: number) => void)[] = [];
+      const standTick = (tk: Ticker) => {
+        const dt = Math.min(0.1, tk.deltaMS / 1000);
+        for (const f of ticks) {
+          try {
+            f(dt);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      };
+      game.app.ticker.add(standTick);
+      game.modalLayer.addChild(layer);
+      const ctx: LastStandCtx = {
+        game,
+        def,
+        save: d,
+        layout: game.layout,
+        infamy: inf,
+        root: layer,
+        onTick: (fn) => ticks.push(fn),
+        haptic: (ms = 10) => game.haptic(ms),
+      };
+      const finish = (value: number | null) => {
+        game.app.ticker.remove(standTick);
+        layer.destroy({ children: true });
+        if (root.destroyed) return;
+        root.visible = true;
+        stand.visible = false;
+        if (value === null) {
+          phase = 'crush'; // fall back to the static Crush bar
+          return;
+        }
+        phase = 'done';
+        crush = Math.max(0, Math.min(0.25, Number.isFinite(value) ? value : 0));
+        avenged();
+      };
+      let p: Promise<number>;
+      try {
+        p = def.lastStand(ctx);
+      } catch (err) {
+        console.error(err);
+        finish(null);
+        return;
+      }
+      Promise.resolve(p).then(
+        (v) => finish(v),
+        (err) => {
+          console.error(err);
+          finish(null);
+        },
+      );
+    },
+  });
+  stand.position.set(x + 12, y + h - 24);
+  stand.visible = false;
+  root.addChild(stand);
 
   const tick = (tk: Ticker) => {
     if (phase !== 'crush') return;

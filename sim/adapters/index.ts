@@ -4,6 +4,7 @@ import { createBridge, type BridgeOpts } from './bridge';
 import { createCauldron, type CauldronOpts } from './cauldron';
 import { createDungeon, type DungeonOpts } from './dungeon';
 import { createMines, type MinesOpts } from './mines';
+import { createPit, type PitOpts } from './pit';
 import { createSpire, type SpireOpts } from './spire';
 import { createStyx, type StyxOpts } from './styx';
 
@@ -14,6 +15,7 @@ export interface AdapterOpts {
   bridge?: BridgeOpts;
   styx?: StyxOpts;
   spire?: SpireOpts;
+  pit?: PitOpts;
 }
 
 export function allAdapters(opts: AdapterOpts = {}): AdapterFactory[] {
@@ -24,5 +26,6 @@ export function allAdapters(opts: AdapterOpts = {}): AdapterFactory[] {
     createBridge(opts.bridge),
     createStyx(opts.styx),
     createSpire(opts.spire),
+    createPit(opts.pit),
   ];
 }

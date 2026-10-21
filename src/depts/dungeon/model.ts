@@ -17,6 +17,8 @@
 //  - The idle sim measures 10 consecutive parties (always one Champion party) on 2 seeds, run
 //    synchronously and debounced 1.5 s after a change (spec: 300 s on 3 seeds in a Worker).
 
+import { LONG_GROWTH, LONG_MAX, longMult } from '../../core/longnode';
+
 export type TowerKind = 'arrow' | 'brazier' | 'ballista';
 export type LairKind = 'crypt' | 'ogre';
 export type RuneKind = 'mire' | 'spikes';
@@ -40,6 +42,8 @@ export interface Workshop {
   slots: number;
   ledger: number;
   gaze: number;
+  /** Hoard of Greed, the long node (core/longnode.ts): all Plunder x1.15 per level. */
+  greed: number;
 }
 
 export interface DStats {
@@ -185,13 +189,19 @@ export const WS: Record<keyof Workshop, WsDef> = {
   ledger: { name: 'Greedy Ledger', base: 200, growth: 1.7, max: 25 },
   gaze: { name: "Overlord's Gaze", base: 250, growth: 1.8, max: 20 },
   slots: { name: 'Rune Slots', base: 500, growth: 4, max: 5 },
+  // The long node (sim/README.md "Pass 5"): opens after the 2nd Fall. SIM-TUNED base: ~2 h of a
+  // later cycle's plateau idle (~900/s).
+  greed: { name: 'Hoard of Greed', base: 5e5, growth: LONG_GROWTH, max: LONG_MAX },
 };
+/** Hoard of Greed milestone titles (one per 10 levels). */
+export const GREED = ['COFFER', 'CHEST', 'STRONGBOX', 'VAULT', 'TREASURY', 'HOARD', 'MOUNTAIN'];
+export const greedMult = (w: Workshop) => longMult(w.greed ?? 0);
 export const wsCost = (k: keyof Workshop, n: number) => WS[k].base * WS[k].growth ** n;
 
 export const towerMult = (w: Workshop) => 1 + 0.05 * w.whet;
 export const summonMult = (w: Workshop) => 1 + 0.08 * w.necro;
 export const runeMult = (w: Workshop) => 1 + 0.06 * w.insc;
-export const plunderMult = (w: Workshop) => 1 + 0.04 * w.ledger;
+export const plunderMult = (w: Workshop) => (1 + 0.04 * w.ledger) * greedMult(w);
 
 // ---------- active verbs (01 §5.3) ----------
 
@@ -229,7 +239,7 @@ export function defaultRun(): DungeonRun {
     ],
     nextId: 3,
     chests: [0, 0],
-    ws: { whet: 0, necro: 0, insc: 0, slots: 0, ledger: 0, gaze: 0 },
+    ws: { whet: 0, necro: 0, insc: 0, slots: 0, ledger: 0, gaze: 0, greed: 0 },
     stats: defaultStats(),
     champs: [],
     party: 0,

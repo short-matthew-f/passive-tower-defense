@@ -19,11 +19,13 @@ import {
   rows,
   upCost,
   UPGRADES,
+  upLocked,
   type CPersistent,
   type CRun,
 } from '../../src/depts/cauldron/econ';
 import { CauldronCore } from '../../src/depts/cauldron/logic';
 import { Board, BALL_R, BOARD_W, BUCKETS, CENTER_X, COL_W, ROW_H, type SimEvents } from '../../src/depts/cauldron/sim';
+import { longMult } from '../../src/core/longnode';
 import type { DeptSave } from '../../src/core/types';
 import { childSeed, makeRng } from '../rng';
 import type { ActiveSession, AdapterFactory, BotGoals, SessionEnv } from '../types';
@@ -290,7 +292,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
           const v0 = value(run);
           let best: { id: string; cost: number; ratio: number; gain: number } | null = null;
           for (const u of UPGRADES) {
-            if (u.tokens) continue;
+            if (u.tokens || upLocked(u, save.cycle.n)) continue;
             const l = lvOf(run, u.id);
             if (l >= u.max) continue;
             const cost = upCost(u, l);
@@ -335,6 +337,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
     def: cauldronEcon,
     dialMax: MALICE_MAX,
     dialId: 'malice',
+    ratioScale: (save) => longMult(lvOf(save.run as CRun, 'size')),
     dialCost: (k) => maliceCost(k),
     startSession,
     anyAffordable(save) {
@@ -343,7 +346,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
       if (run.maliceBought < MALICE_MAX && run.bank >= maliceCost(run.maliceBought)) return true;
       for (const u of UPGRADES) {
         const l = u.tokens ? rlvOf(per, u.id) : lvOf(run, u.id);
-        if (l >= u.max) continue;
+        if (l >= u.max || upLocked(u, save.cycle.n)) continue;
         if ((u.tokens ? per.tokens : run.bank) >= upCost(u, l)) return true;
       }
       return false;
@@ -353,7 +356,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
     localRatioBands: { all: [2, 3] },
     describe(save) {
       const run = save.run as CRun;
-      return `malice ${run.maliceBought} toads ${1 + lvOf(run, 'hire')} fresh ${lvOf(run, 'fresh')} rows ${rows(run)}`;
+      return `malice ${run.maliceBought} toads ${1 + lvOf(run, 'hire')} fresh ${lvOf(run, 'fresh')} size ${lvOf(run, 'size')} rows ${rows(run)}`;
     },
   };
 };

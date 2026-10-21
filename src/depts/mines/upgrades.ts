@@ -1,6 +1,7 @@
 // The Mines' upgrade tree (02 §6) as shared-sheet groups: Fist, Crew, Shaft, Drum, Gems.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import { formatNum } from '../../core/format';
+import { LONG_MAX, longDesc, longLocked } from '../../core/longnode';
 import * as M from './model';
 
 const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
@@ -149,6 +150,16 @@ export function buildGroups(ctx: DeptCtx, hooks: { onDig(): void; onDrum(): void
         r().depth = r().maxDepth;
         hooks.onDig();
       },
+    }),
+    nug(ctx, {
+      id: 'seams',
+      name: 'Richer Seams',
+      max: LONG_MAX,
+      level: () => r().seams ?? 0,
+      cost: () => M.seamsCost(r().seams ?? 0),
+      desc: () => longDesc(M.SEAMS, r().seams ?? 0),
+      locked: () => longLocked(ctx.save.cycle.n),
+      apply: () => (r().seams = (r().seams ?? 0) + 1),
     }),
     nug(ctx, {
       id: 'supports',

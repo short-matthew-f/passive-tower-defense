@@ -132,7 +132,7 @@ function expectedPerTraveler(r: M.BridgeRun, sk: (typeof SKILL)[Skill]): number 
   let v = mcCache.get(key);
   if (v !== undefined) return v;
   const rnd = makeRng(0x5eed);
-  const fm = { ...r, lv: { ...L, signage: 0 }, menace: r.menace };
+  const fm = { ...r, lv: { ...L, signage: 0, charter: 0 }, menace: r.menace };
   let total = 0;
   let streak = 0;
   for (let i = 0; i < MC_N; i++) {
@@ -178,7 +178,7 @@ function expectedPerTraveler(r: M.BridgeRun, sk: (typeof SKILL)[Skill]): number 
 }
 
 function value(r: M.BridgeRun, sk: (typeof SKILL)[Skill]): number {
-  const active = M.TRAFFIC * expectedPerTraveler(r, sk) * M.signageMult(r.lv.signage);
+  const active = M.TRAFFIC * expectedPerTraveler(r, sk) * M.signageMult(r.lv.signage) * M.charterMult(r.lv.charter);
   return M.idleTollpence(r) + ACTIVE_W * active;
 }
 
@@ -441,7 +441,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       buy(goals: BotGoals) {
         const bought: string[] = [];
         for (let guard = 0; guard < 200; guard++) {
-          const entries = shop(save).filter((e) => e.level() < e.max);
+          const entries = shop(save).filter((e) => e.level() < e.max && !e.locked?.());
           const menace = entries.find((e) => e.id === 'menace');
           const dialNeeded = !!menace && r.menaceMax < Math.min(goals.dialGoal, M.MENACE_MAX);
           const v0 = value(r, sk);
@@ -490,15 +490,16 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     startSession,
     anyAffordable(save) {
       M.normalize(run(save), per(save));
-      return shop(save).some((e) => e.level() < e.max && e.canAfford());
+      return shop(save).some((e) => e.level() < e.max && !e.locked?.() && e.canAfford());
     },
     dialLevel: (save) => run(save).menaceMax ?? 0,
     // 06 §3: active ≈ 2.3-3.2x on-screen idle.
     localRatioBands: { all: [2.3, 3.2] },
+    ratioScale: (save) => M.charterMult(run(save).lv?.charter ?? 0),
     describe(save) {
       const r = run(save);
       const L = r.lv;
-      return `menace ${r.menace}/${r.menaceMax} goons ${L.goons} sign ${L.signage} price ${L.pricing} sense ${L.sense} held ${M.heldMenace(r.ev)}`;
+      return `menace ${r.menace}/${r.menaceMax} goons ${L.goons} sign ${L.signage} charter ${L.charter ?? 0} price ${L.pricing} sense ${L.sense} held ${M.heldMenace(r.ev)}`;
     },
   };
 };

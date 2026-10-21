@@ -20,6 +20,7 @@
 // Δ(idleRate + ACTIVE_W x expected active Arcana/s)/cost, the expectation the 04 §4 formula
 // (cadence x EV_drop at the Distill Ceiling x ~0.7 realization x Resonance); Tomes are bought
 // with Grimoire Pages, Mirror first.
+import { longMult } from '../../src/core/longnode';
 import type { DeptSave } from '../../src/core/types';
 import {
   arcanaMult,
@@ -37,6 +38,7 @@ import {
   TIERS,
   tomeOf,
   upCost,
+  upLocked,
   UPGRADES,
   VOL_MAX,
   volCost,
@@ -302,7 +304,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
           const v0 = value();
           let best: { id: string; cost: number; ratio: number; gain: number } | null = null;
           for (const u of UPGRADES) {
-            if (u.pages) continue;
+            if (u.pages || upLocked(u, save.cycle.n)) continue;
             if (opts.passive && u.branch !== 'apprentices') continue;
             const l = lvOf(r, u.id);
             if (l >= u.max) continue;
@@ -366,15 +368,16 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
       if (r.volBought < VOL_MAX && r.bank >= volCost(r.volBought)) return true;
       return UPGRADES.some((u) => {
         const l = u.pages ? tomeOf(p, u.id) : lvOf(r, u.id);
-        return l < u.max && (u.pages ? p.pages : r.bank) >= upCost(u, l);
+        return l < u.max && !upLocked(u, save.cycle.n) && (u.pages ? p.pages : r.bank) >= upCost(u, l);
       });
     },
     dialLevel: (save) => run(save).volBought ?? 0,
+    ratioScale: (save) => longMult(lvOf(run(save), 'amp')),
     // 04 §4: active ~2.8x on-screen idle at the apprentice cap (~4.0x offline at the Spire's factor).
     localRatioBands: { all: [2.4, 3.2] },
     describe(save) {
       const r = run(save);
-      return `vol ${r.volBought} ceil T${r.ceiling} feat ${r.featBest} appr ${lvOf(r, 'hire')} potent ${lvOf(r, 'potent')} orbs ${r.flask.length / 3}`;
+      return `vol ${r.volBought} ceil T${r.ceiling} feat ${r.featBest} appr ${lvOf(r, 'hire')} potent ${lvOf(r, 'potent')} amp ${lvOf(r, 'amp')} orbs ${r.flask.length / 3}`;
     },
   };
 };

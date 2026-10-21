@@ -10,6 +10,7 @@ import {
   coreMult,
   commendationReward,
   dreadPayout,
+  FLOOR_GROWTH,
   infamy,
   offlineCapSeconds,
   offlineFactor,
@@ -121,7 +122,7 @@ export interface SimConfig {
   /** Start from this meta state (Throne, Dread perks, lifetime Dread): the 00 §8.1 single-department
    * fixture for departments 5-7 (W-23), the reference player's meta at that department's unlock. */
   initialMeta?: SaveRoot['meta'];
-  /** Experiment: economy floor growth per Fall for every department (shipped default x3). */
+  /** Experiment: economy floor growth per Fall for every department (shipped default FLOOR_GROWTH). */
   floorGrowth?: number;
   /** Turn the Goods system off (no accrual, no imports, no Black Market or Roads): the pre-Goods
    * baseline for before/after comparisons (`--no-goods`). */
@@ -700,6 +701,8 @@ export function simulate(cfg: SimConfig): SimResult {
     const d = s.depts[cur]!;
     const tr = tracks[cur];
     const idle = defs[cur].idleRate(d);
+    // Ratio metrics net of the long node, which scales active and idle alike (sim/types.ts).
+    const scale = byId[cur]!.ratioScale?.(d) ?? 1;
     const state = byId[cur]!.ratioState?.(d) ?? 'all';
     const phase = tr.aeCycleS >= BASELINE_S ? 'base' : 'early';
     baseThisStep = 0;
@@ -710,14 +713,14 @@ export function simulate(cfg: SimConfig): SimResult {
     tr.onScreenCycleS += 1;
     tr.aeCycleS += 1;
     const agg = (tr.ratio[`${phase}:${state}`] ??= { base: 0, idle: 0, secs: 0, factorSecs: 0 });
-    agg.base += baseThisStep;
-    agg.idle += idle;
+    agg.base += baseThisStep / scale;
+    agg.idle += idle / scale;
     agg.secs += 1;
     agg.factorSecs += offlineFactor(s);
     if (phase === 'base') {
       const dd = (tr.ratioByDay[day()] ??= { base: 0, idle: 0, secs: 0, factorSecs: 0 });
-      dd.base += baseThisStep;
-      dd.idle += idle;
+      dd.base += baseThisStep / scale;
+      dd.idle += idle / scale;
       dd.secs += 1;
       dd.factorSecs += offlineFactor(s);
     }
@@ -763,6 +766,7 @@ export function simulate(cfg: SimConfig): SimResult {
         if (tracks[id].firstEntryAt === null) continue;
         tracks[id].returns++;
         if (byId[id]!.anyAffordable(s.depts[id]!)) tracks[id].returnsAffordable++;
+        else log('dry', `${id}: nothing affordable on return (${byId[id]!.describe(s.depts[id]!)})`, id);
       }
     }
     throne();
@@ -829,7 +833,7 @@ export function simulate(cfg: SimConfig): SimResult {
   for (const [id, sess] of Object.entries(sessionStats)) adapterStats[id] = sess.stats?.() ?? {};
 
   return {
-    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? 3, noGoods: !!cfg.noGoods },
+    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? FLOOR_GROWTH, noGoods: !!cfg.noGoods },
     goods: goodsTrack,
     tracks,
     snaps,

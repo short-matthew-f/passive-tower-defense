@@ -8,7 +8,7 @@
 //   --skill S     bot skill: novice | reference | expert
 //   --live        run the Cauldron's live core every second (no activeRate table)
 //   --quick       reference profile only, 1 seed
-//   --floor-growth X  experiment: economy floor growth per Fall (shipped default 3)
+//   --floor-growth X  experiment: economy floor growth per Fall (shipped default FLOOR_GROWTH, 2.5)
 //   --no-goods    turn the Goods system off (the pre-Goods baseline for before/after tables)
 import { SEAL_DREAD } from '../src/core/meta';
 import { allAdapters, type AdapterOpts } from './adapters';
@@ -36,7 +36,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   const live = argv.includes('--live');
   const floorGrowth = arg(argv, 'floor-growth') ? Number(arg(argv, 'floor-growth')) : undefined;
   const noGoods = argv.includes('--no-goods');
-  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill }, styx: { skill }, spire: { skill, liveOnly: live } };
+  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill }, styx: { skill }, spire: { skill, liveOnly: live }, pit: { skill } };
 
   // ----- reference profile, N seeds -----
   const runs: SimResult[] = [];
@@ -100,19 +100,22 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
       const a = f(0);
       const fixture = SEAL_DREAD[a.id] ? runs[0].tracks[a.id]?.metaAtUnlock : undefined;
       const solo = simulate({ ...DEFAULT_CONFIG, noGoods, days, adapters: [f], initialMeta: fixture });
-      const ref = runs[0].tracks[a.id]?.falls[0];
+      // Reference: the seed median of the department's first-Fall AE (like the other rows).
+      const refs = runs.map((r) => r.tracks[a.id]?.falls[0]?.cycleAEH).filter((x): x is number => x !== undefined).sort((x, y) => x - y);
+      const ref = refs.length ? refs[Math.floor(refs.length / 2)] : null;
       const s0 = solo.tracks[a.id]?.falls[0];
-      const ok = !!s0 && !!ref && s0.cycleAEH <= 1.5 * ref.cycleAEH;
+      const ok = !!s0 && ref !== null && s0.cycleAEH <= 1.5 * ref;
       side.push({
         id: 'singleDept',
         dept: a.id,
         label: 'Single-department main: first Fall vs reference',
         value: s0 ? s0.cycleAEH : null,
-        display: s0 ? `${s0.cycleAEH.toFixed(2)} h AE vs reference ${ref ? ref.cycleAEH.toFixed(2) : 'n/a'} h${fixture ? ' (fixture: reference meta at unlock)' : ''}` : 'no Fall',
+        display: s0 ? `${s0.cycleAEH.toFixed(2)} h AE vs reference ${ref !== null ? ref.toFixed(2) : 'n/a'} h${fixture ? ' (fixture: reference meta at unlock)' : ''}` : 'no Fall',
         band: '<= 1.5x reference',
         level: 'hard',
         ci: false,
-        status: ok ? 'PASS' : 'FAIL',
+        // No reference first Fall in this window (the War Pit in a 7-day run): nothing to compare.
+        status: ref === null ? 'INFO' : ok ? 'PASS' : 'FAIL',
       });
     }
 

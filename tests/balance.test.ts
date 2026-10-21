@@ -2,7 +2,7 @@
 // Fails on the CI-flagged hard bands in sim/metrics.ts (integrity, first upgrade < 60 s, offline
 // factor cap, Fall reachability, every department reaching its first Fall) and on the tuned bands
 // listed in TUNED_GATES below; everything else is printed as a warning. The full report is
-// `npm run sim`.
+// `npm run sim`. A 30-day tier (weeks 2-4 cycle lengths, ~30 s) runs with BALANCE_LONG=1.
 import { describe, expect, it } from 'vitest';
 import { allAdapters } from '../sim/adapters';
 import { DEFAULT_CONFIG, PROFILES, simulate } from '../sim/meta';
@@ -34,6 +34,10 @@ const DAYS = 7;
  *  - firstFallDay|spire: the first Spire Fall lands on day 7 08:00 or 18:00 (6.3-6.8 d) or just
  *    after the run, depending on whether the Seal opens on day 4 12:30 or 21:00.
  *  - dialStep|styx, |spire: as for the other departments.
+ *  - War Pit (pass 5): the Seal opens on day 6-7 (5.5-6.3 d), so a 7-day run holds < 1.5 days of
+ *    it. Its first Fall (~3 days after the Seal), cycles and active : offline (~5-30 baseline
+ *    minutes here) are measured by `npm run sim -- --days 30` and the BALANCE_LONG tier, not here.
+ *    firstUpgrade|pit is a CI-hard metric anyway.
  */
 const TUNED_GATES = [
   'firstFallAE|cauldron',
@@ -73,6 +77,8 @@ const TUNED_GATES = [
   'cycleMin|spire',
   'cycleMax|spire',
   'returnAffordable|spire',
+  'unlockDay|pit',
+  'returnAffordable|pit',
 ];
 
 /**
@@ -111,6 +117,24 @@ const SUITE_GATES: Record<string, string[]> = {
     'dreadShare|bridge',
     'dreadShare|styx',
     'dreadShare|spire',
+    'dreadPacing|',
+  ],
+  // Seven departments (pass 5). Shares cap at 35% (00 §8.1's own number at 7). dreadShare|cauldron
+  // stays a warning: 32-35% by day 7 across seeds (it was ~41% of six), too close to gate.
+  'cauldron,mines,dungeon,bridge,styx,spire,pit': [
+    'tributeShare|cauldron',
+    'tributeShare|mines',
+    'tributeShare|dungeon',
+    'tributeShare|bridge',
+    'tributeShare|styx',
+    'tributeShare|spire',
+    'tributeShare|pit',
+    'dreadShare|mines',
+    'dreadShare|dungeon',
+    'dreadShare|bridge',
+    'dreadShare|styx',
+    'dreadShare|spire',
+    'dreadShare|pit',
     'dreadPacing|',
   ],
 };
@@ -166,5 +190,25 @@ describe('balance simulation (fast tier)', () => {
     const day1 = (r: typeof result) => JSON.stringify(r.events.filter((e) => e.t < 86400));
     expect(b.events.length).toBeGreaterThan(5);
     expect(day1(b)).toEqual(day1(result));
+  });
+});
+
+/**
+ * Long tier (00 §8.1 "weeks 2-4"): one seeded 30-day run, ~30 s, so it runs only with
+ * BALANCE_LONG=1 (`BALANCE_LONG=1 npx vitest run tests/balance.test.ts`). Pass 5 brought every
+ * department's weeks 2-4 cycles into 1.5-3 days (long nodes, floor growth x2.5); this gates that
+ * band and the hard 5-day ceiling on seed 1. Known risk (sim/README.md "Pass 5"): the War Pit's
+ * late cycles hang on one Triumph at Stakes 10 with ~1 Run a day, so other seeds can stall it.
+ */
+const LONG = !!(globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env.BALANCE_LONG;
+describe.skipIf(!LONG)('balance simulation (30-day tier)', () => {
+  it('keeps weeks 2-4 cycles in 1.5-3 days and every cycle under 5 days', { timeout: 120_000 }, () => {
+    // Inside the test: a skipped describe still runs its body when the file is collected.
+    const factories = allAdapters();
+    const result = simulate({ ...DEFAULT_CONFIG, days: 30, seed: 1, adapters: factories });
+    const metrics = evaluate(result, factories.map((f) => f(0)));
+    const problems = metrics.filter((m) => (m.id === 'cycleLate' || m.id === 'cycleMax') && m.status !== 'PASS').map(show);
+    expect(metrics.filter((m) => m.id === 'cycleLate').length).toBe(result.config.depts.length);
+    expect(problems).toEqual([]);
   });
 });

@@ -61,7 +61,7 @@ export const UNITS: Record<UnitId, UnitDef> = {
   brood: U({ id: 'brood', name: 'Brood', tier: 1, atk: 2, hp: 2, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
   head: U({ id: 'head', name: 'Hydra Head', tier: 1, atk: 3, hp: 3, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
   shade: U({ id: 'shade', name: 'Shade', tier: 1, atk: 1, hp: 1, trig: 'none', front: 0, token: true, text: () => 'A RESTLESS SPIRIT' }),
-  hunt: U({ id: 'hunt', name: 'The Huntmaster', tier: 6, atk: 8, hp: 14, trig: 'start', front: -5, token: true, text: () => 'START: NETS YOUR TOP ATTACKER, BEASTS +1 ATK. ARMOR 2' }),
+  hunt: U({ id: 'hunt', name: 'The Huntmaster', tier: 6, atk: 14, hp: 30, trig: 'start', front: -5, token: true, text: () => 'START: NETS YOUR TOP ATTACKER, BEASTS +1 ATK. ARMOR 2' }),
 };
 
 /** The 23 shop units, in tier order. */

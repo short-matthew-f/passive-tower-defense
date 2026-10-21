@@ -119,7 +119,7 @@ function estimateAt(r: M.MinesRun, p: M.MinesPersistent, depth: number, taps: nu
   const crew = M.crewRocksPerSec(rr, p);
   const tapRocks = Math.min(taps, (tap * 0.95) / hp);
   const rocks = Math.min(crew + tapRocks, M.TILES / M.regrowTime(rr.regrow));
-  return rocks * M.R(depth) * M.AVG_REWARD_F;
+  return rocks * M.R(depth) * M.AVG_REWARD_F * M.oreMult(r);
 }
 
 function bestDepth(r: M.MinesRun, p: M.MinesPersistent, taps: number, drum: boolean): number {
@@ -215,7 +215,7 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
       t.regrow = M.regrowTime(r.regrow);
       for (const g of gobs) if (g.tile === t.i) g.tile = -1;
       if (kind === 'rubble') return;
-      let reward = M.R(r.depth) * M.KIND_REWARD[kind];
+      let reward = M.R(r.depth) * M.KIND_REWARD[kind] * M.oreMult(r);
       if (by === 'tap' && (kind === 'vein' || kind === 'geode')) reward *= 1 + 0.1 * r.keen;
       env.earn(reward);
       r.stats.rocks++;
@@ -528,9 +528,10 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
     ratioState: (save) => (drumActive(per(save)) ? 'drum' : 'no-drum'),
     // 02 §3: before the drum 1.8-2.5x on-screen idle; with the drum (85% on-beat) 2.4-3.0x.
     localRatioBands: { 'no-drum': [1.8, 2.5], drum: [2.4, 3.0] },
+    ratioScale: (save) => M.oreMult(run(save)),
     describe(save) {
       const r = run(save);
-      return `depth ${r.depth}/${r.maxDepth} gob ${M.goblins(r)} tier ${r.tier} picks ${r.picks} tap ${r.tap} drum ${per(save).drum ? 'Y' : 'n'}`;
+      return `depth ${r.depth}/${r.maxDepth} gob ${M.goblins(r)} tier ${r.tier} picks ${r.picks} seams ${r.seams ?? 0} tap ${r.tap} drum ${per(save).drum ? 'Y' : 'n'}`;
     },
   };
 };

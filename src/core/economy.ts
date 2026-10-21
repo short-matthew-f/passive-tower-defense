@@ -2,6 +2,7 @@
 // shared by the game and the headless balance simulation.
 import { bannerId, ruinbornId } from './meta';
 import { importAdd } from './goods';
+import { edictOfflineAdd, edictTributeAdd, rushSeconds, trophyAdd } from './perks';
 import type { DeptEcon } from './dept';
 import { DEPT_ORDER, type DeptId, type DeptSave, type SaveRoot } from './types';
 
@@ -13,8 +14,10 @@ export const REBUILD_RUSH_S = 30 * 60;
 const perk = (s: SaveRoot, id: string) => s.meta.dreadPerks[id] ?? 0;
 const throne = (s: SaveRoot, id: string) => s.meta.throne[id] ?? 0;
 
-export function offlineFactor(s: SaveRoot): number {
-  return Math.min(OFFLINE_CAP_FACTOR, OFFLINE_BASE + 0.05 * perk(s, 'empire.idleHands'));
+/** Offline factor; pass the department to include Iron Discipline (the Edict, +0.1 there). The
+ * 0.9 hard cap holds either way (00 §7). */
+export function offlineFactor(s: SaveRoot, id?: DeptId): number {
+  return Math.min(OFFLINE_CAP_FACTOR, OFFLINE_BASE + 0.05 * perk(s, 'empire.idleHands') + edictOfflineAdd(s, id));
 }
 
 export function offlineCapSeconds(s: SaveRoot): number {
@@ -25,11 +28,12 @@ export function tributeCapSeconds(s: SaveRoot): number {
   return (8 + 2 * throne(s, 'treasury')) * 3600;
 }
 
-/** Temp multiplier: Rebuild Rush (x3 for 30 min after a Fall) or Late Recruit (x2), never both. */
+/** Temp multiplier: Rebuild Rush (x3 for 30 min after a Fall, +15 min per Swift Rebuild) or Late
+ * Recruit (x2), never both. */
 export function tempMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, now: number): number {
   const d = s.depts[id];
   if (!d) return 1;
-  if (d.cycle.n > 0 && now - d.cycle.startedAt < REBUILD_RUSH_S * 1000) return 3;
+  if (d.cycle.n > 0 && now - d.cycle.startedAt < rushSeconds(s) * 1000) return 3;
   if (lateRecruit(s, id, defs)) return 2;
   return 1;
 }
@@ -76,12 +80,21 @@ export function rankEff(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>)
 export function tributeRate(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, onScreen: boolean): number {
   if (!s.depts[id]) return 0;
   const r = rankEff(s, id, defs);
-  const perMin = 0.5 * (1 + r) ** 1.5 * (1 + 0.15 * perk(s, 'empire.tithe')) * (onScreen ? 1.5 : 1);
+  // Tribute group (00 §3.1): Tithe Collector + Dark Tithe (Edict) + Trophy Hall (<= +25%).
+  const group = 1 + 0.15 * perk(s, 'empire.tithe') + edictTributeAdd(s) + trophyAdd(s);
+  const perMin = 0.5 * (1 + r) ** 1.5 * group * (onScreen ? 1.5 : 1);
   return perMin / 60;
 }
 
-/** Economy floors grow x3 per Fall (00 §8, anti-domination rule 4). */
-export const FLOOR_GROWTH = 3;
+/**
+ * Economy floor growth per Fall (00 §8, anti-domination rule 4: spec seed x3).
+ * SIM-TUNED x3 -> x2.5 (sim/README.md "Pass 5", floor-growth comparison): with each department's
+ * long node (core/longnode.ts) income keeps growing through a cycle, and x2.5 is the only variant
+ * that puts all seven departments' weeks 2-4 cycles inside 1.5-3 days (x3 left the War Pit at ~3.6)
+ * while lifetime Dread stays inside the day-7 band (x2 overshot it) and no department passes 30%
+ * of the Dread at day 30. Infamy 100-200% spans one more step of this factor.
+ */
+export const FLOOR_GROWTH = 2.5;
 
 /** Per-department floor growth: the shipped FLOOR_GROWTH unless a balance-sim experiment overrides
  * it on the definition (DeptEcon.floorGrowth; the game never sets it). */
@@ -109,11 +122,14 @@ export function infamy(def: DeptEcon, d: DeptSave): { value: number; skill: numb
   return { value, skill: skillFrac, econ: econFrac };
 }
 
-/** Dread payout for a Fall, specs/00 §2.3. */
-export function dreadPayout(d: DeptSave, infamyValue: number, crush: number): number {
+/** Dread payout for a Fall, specs/00 §2.3. `bane` = that department's Legend's Bane level
+ * (perks.legendsBane), +10% each. */
+export function dreadPayout(d: DeptSave, infamyValue: number, crush: number, bane = 0): number {
   const n = d.cycle.n;
   const fresh = d.lifetime.falls === 0 ? 2 : 1;
-  return Math.floor(10 * (1 + 0.5 * n) * (infamyValue / 100) ** 1.5 * fresh * (1 + Math.max(0, Math.min(0.25, crush))));
+  return Math.floor(
+    10 * (1 + 0.5 * n) * (infamyValue / 100) ** 1.5 * fresh * (1 + 0.1 * Math.max(0, bane)) * (1 + Math.max(0, Math.min(0.25, crush))),
+  );
 }
 
 export function commendationReward(i: number): number {

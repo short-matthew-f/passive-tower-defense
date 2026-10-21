@@ -23,7 +23,7 @@ import {
 } from './units';
 
 /** Bumped when battle or shop rules change; a paused Run keeps the version it started with. */
-export const PARAMS_VERSION = 1;
+export const PARAMS_VERSION = 2; // 2: the Huntmaster 8/14 -> 14/30, gentler Stakes growth (sim pass 5)
 
 export const UNIT_COST = 3;
 export const ROLL_COST = 1;
@@ -589,7 +589,22 @@ export function rival(r: number, S: number, seed: number): RivalInfo {
   return { arch: b.arch, line: toFighters(b.line, S) };
 }
 
-/** The Huntmaster bout: 4 beasts drafted at budget rB plus the Huntmaster (8/14, Armor 2) at the back. */
+/** The Huntmaster's own stats at Stakes 0 (07 §5.2 seed 8/14, Armor 2).
+ * SIM-TUNED 8/14 -> 14/30 (sim/README.md "Pass 5"): the reference draft bot, which judges up to 8
+ * line orders per shop against what the scout shows, beat an 8/14 Huntmaster ~85% of the time it
+ * reached him and Triumphed in ~85% of Runs at the Infamy target (07 §14.1 bands: 50-70% and
+ * 35-50%). At 12/26 (x1.1^S like his beasts): ~60% and ~50%; rounds 1-5 still ~90% (band
+ * >= 75%), Runs ~6.5 min. See HUNT_STAKES_EXP for the 14/30 base. */
+export const HUNT_ATK = 14;
+export const HUNT_HP = 30;
+/** The Huntmaster's own stats grow as stakesStat(S)^HUNT_STAKES_EXP (his beasts take the full
+ * stakesStat). SIM-TUNED 1 -> 0.5 with the base 12/26 -> 14/30 (same bout at Stakes 4, the first
+ * target): at the full x1.1^S the reference bot beat him in ~1 of 3 Runs at Stakes 10, the MVP's
+ * last target, and the Pit's late cycles stalled past 5 days on the skill gate (sim/README.md
+ * "Pass 5"). */
+export const HUNT_STAKES_EXP = 0.5;
+
+/** The Huntmaster bout: 4 beasts drafted at budget rB plus the Huntmaster (HUNT_ATK/HUNT_HP, Armor 2) at the back. */
 export function huntmaster(rB: number, S: number, seed: number): RivalInfo {
   const arch = pickArch(rB, hashStr('hunt', seed));
   let team = ghostDraft(arch, rB, hashStr('huntdraft', seed, rB));
@@ -602,7 +617,8 @@ export function huntmaster(rB: number, S: number, seed: number): RivalInfo {
   }
   const m = stakesStat(S);
   const line = toFighters(orderLine(team), S);
-  line.push({ kind: 'hunt', lvl: 1, atk: r5(8 * m), hp: r5(14 * m), armor: 2 });
+  const mh = m ** HUNT_STAKES_EXP;
+  line.push({ kind: 'hunt', lvl: 1, atk: r5(HUNT_ATK * mh), hp: r5(HUNT_HP * mh), armor: 2 });
   return { arch: 'hunt', line };
 }
 
@@ -621,8 +637,15 @@ export function battleTeeth(r: number, S: number): number {
   return 8 * 1.12 ** (r - 1) * payout(S);
 }
 
+/** Showman: run-end bonus per level (07 §6 seed +10%).
+ * SIM-TUNED +10% -> +5% (sim/README.md "Pass 5"): Showman is a Run-only multiplier on ~55% of a
+ * Run's pay, and Skirmish pay tops out once the Standing Warband clears all 12 Gauntlet rounds, so
+ * at +10% x 20 levels a late-cycle reference player read ~6x active : on-screen idle (07 §3 band
+ * 2.6-3.8x). */
+export const SHOWMAN_STEP = 0.05;
+
 export function runEndBonus(rs: RunState, showman: number): number {
-  return 0.5 * rs.wins * battleTeeth(Math.max(1, rs.round), rs.stakes) * (rs.ended === 'triumph' ? 2 : 1) * (1 + 0.1 * showman);
+  return 0.5 * rs.wins * battleTeeth(Math.max(1, rs.round), rs.stakes) * (rs.ended === 'triumph' ? 2 : 1) * (1 + SHOWMAN_STEP * showman);
 }
 
 // ---------- round resolution ----------

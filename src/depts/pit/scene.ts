@@ -16,6 +16,7 @@ import {
   STAKES_MAX,
   TACTICS,
   crownsAtOrAbove,
+  PIT_CROWNS,
   garrisonFighters,
   gauntletReport,
   heldCrownLevel,
@@ -23,7 +24,7 @@ import {
   lvOf,
   normalize,
   pitEcon,
-  pliersMult,
+  teethMult,
   runOpts,
   runGauntletLog,
   stakesCost,
@@ -1080,7 +1081,7 @@ export class PitScene implements DeptScene {
     const base = rs.pend ?? 0;
     rs.pend = 0;
     if (base <= 0) return 0;
-    const got = this.ctx.earn(base * pliersMult(lvOf(this.run, 'pliers')));
+    const got = this.ctx.earn(base * teethMult(this.run));
     rs.earned = (rs.earned ?? 0) + got;
     return got;
   }
@@ -1117,7 +1118,7 @@ export class PitScene implements DeptScene {
     this.creditBattle(rs);
     const run = this.run;
     const per = this.per;
-    rs.bonus = this.ctx.earn(runEndBonus(rs, lvOf(run, 'showman')) * pliersMult(lvOf(run, 'pliers')));
+    rs.bonus = this.ctx.earn(runEndBonus(rs, lvOf(run, 'showman')) * teethMult(run));
     run.stats.runs++;
     run.stats.bestWins = Math.max(run.stats.bestWins, rs.wins);
     // Captives (Goods): the Huntmaster and two handlers on a Triumph, one prisoner at 6+ wins.
@@ -1178,7 +1179,7 @@ export class PitScene implements DeptScene {
       `RUN BONUS  +${formatNum(rs.bonus ?? 0)} TEETH${tri ? ' (X2)' : ''}`,
     ];
     if (rs.crestsWon) lines.push(`CRESTS +${rs.crestsWon}  (NOW ${this.per.crests})`);
-    if (rs.crown) lines.push(`PIT CROWN! ${crownsAtOrAbove(this.run.crowns, target)}/2 AT STAKES ${target}+`);
+    if (rs.crown) lines.push(`PIT CROWN! ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+`);
     else if (tri) lines.push('');
     const band = rs.line.filter((p): p is Pet => !!p);
     const now = this.idlePerMin();
@@ -1517,7 +1518,7 @@ export class PitScene implements DeptScene {
       }
       this.tacticLabels.forEach((t, i) => t.set(`${TACTICS[i].at}`, S >= TACTICS[i].at ? '#ffd0c0' : '#6a5a78'));
       const target = pitEcon.skillTarget(this.save.cycle.n);
-      this.crownText.set(`PIT CROWNS ${Math.min(2, crownsAtOrAbove(this.run.crowns, target))}/2 AT STAKES ${target}+`);
+      this.crownText.set(`PIT CROWNS ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+`);
       const cur = this.run.cur;
       this.startBtn.setLabel(cur ? `RESUME RUN (RD ${cur.round}, ${cur.wins}W)` : 'START RUN');
       this.startBtn.visible = true;

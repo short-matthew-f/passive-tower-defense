@@ -796,7 +796,8 @@ export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonIm
   for (let k = 0; k < IDLE_SEEDS; k++) {
     const seed = fnv(`${hash}#${k}`);
     const start = seed % 10;
-    const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: r.ws, lure: T, party: start, seed, live: false, ap: imp.ap, caged: imp.caged });
+    // Hoard of Greed scales every haul; idleRateOf applies it after the memo (not in the hash).
+    const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: { ...r.ws, greed: 0 }, lure: T, party: start, seed, live: false, ap: imp.ap, caged: imp.caged });
     const first = start + WARM_PARTIES;
     const last = first + IDLE_PARTIES - 1;
     const maxSteps = Math.round(IDLE_MAX_S / STEP);
@@ -848,7 +849,7 @@ let lastVal = 0;
 
 export function idleRateOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): number {
   const ik = `${imp.ap},${imp.caged}`;
-  if (r === lastRun && r.rev === lastRev && ik === lastImp) return lastVal;
+  if (r === lastRun && r.rev === lastRev && ik === lastImp) return lastVal * M.greedMult(r.ws);
   const key = layoutHash(r, imp);
   let v = memo.get(key);
   if (v === undefined) {
@@ -860,5 +861,5 @@ export function idleRateOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): n
   lastRev = r.rev;
   lastImp = ik;
   lastVal = v;
-  return v;
+  return v * M.greedMult(r.ws);
 }

@@ -7,6 +7,8 @@
 //  - Netters reach a share of the *unlocked* depth (Longer Poles), as 03 §6.3 says, but every
 //    band's value counts at its own band multiplier, so idle grows with each band unlock.
 
+import { LONG_GROWTH, LONG_MAX, longMult } from '../../core/longnode';
+
 export type Rarity = 'common' | 'uncommon' | 'rare' | 'legendary';
 export type Behavior = 'drift' | 'zigzag' | 'heavy' | 'circle' | 'twin' | 'teleport' | 'sinker' | 'singer' | 'king' | 'echo';
 export type BaitId = 'worm' | 'promise' | 'debt' | 'gilded';
@@ -92,14 +94,21 @@ export const NODES = {
   netter: { base: 50, growth: 1.28, max: 20 },
   nets: { base: 150, growth: 1.2, max: 40 },
   poles: { base: 1000, growth: 1.6, max: 4 },
+  // The long node (sim/README.md "Pass 5"): the Ferryman's Legend, every soul, wisp and netted
+  // catch x1.15 per level; opens after the 2nd Fall. SIM-TUNED base: ~2 h of a later cycle's
+  // plateau idle (~330/s).
+  legend: { base: 1.2e5, growth: LONG_GROWTH, max: LONG_MAX },
 } satisfies Record<string, NodeDef>;
+/** Ferryman's Legend milestone titles (one per 10 levels). */
+export const LEGENDS = ['WHISPER', 'RUMOR', 'TALE', 'BALLAD', 'SAGA', 'MYTH', 'LEGEND'];
+export const legendMult = (r: { lv: Levels }) => longMult(r.lv.legend ?? 0);
 export type NodeId = keyof typeof NODES;
 export type Levels = Record<NodeId, number>;
 
 export const nodeCost = (id: NodeId, lvl: number) => NODES[id].base * NODES[id].growth ** lvl;
 
 export function defaultLevels(): Levels {
-  return { reel: 0, line: 0, steady: 0, strike: 0, barb: 0, lantern: 0, scent: 0, wispnet: 0, netter: 0, nets: 0, poles: 0 };
+  return { reel: 0, line: 0, steady: 0, strike: 0, barb: 0, lantern: 0, scent: 0, wispnet: 0, netter: 0, nets: 0, poles: 0, legend: 0 };
 }
 
 // ---------- Wrath (03 §7) ----------
@@ -138,7 +147,7 @@ export const comboMult = (streak: number) => 1 + 0.05 * Math.min(streak, 20);
 
 export const PILK_NETTERS = 30 / 45; // Pilk's skiff: 1 soul / 45 s, in netter-equivalents
 export const NET_S = 30; // one soul per 30 s per netter
-export const NET_YIELD = 0.65; // TUNED: share of ledger value the netters' stragglers fetch (balance sim pass 3: kept, 2.5-2.7x on screen at baseline)
+export const NET_YIELD = 0.6; // TUNED: share of ledger value the netters' stragglers fetch (balance sim pass 3: kept 0.65, 2.5-2.7x on screen; pass 5: 0.6, the reference seed read 2.3x with seven departments)
 export const netMult = (lv: number) => 1 + 0.1 * lv;
 export const poleFrac = (lv: number) => Math.min(0.6, 0.2 + 0.1 * lv);
 
@@ -212,7 +221,7 @@ export const netSoulsPerH = (r: StyxRun) => netRate(r) * 3600 * SOULS_PER_CATCH;
 
 /** On-screen idle Obols/s (03 §3): R_idle x EV(netDepth) x 1.10^W x yield. Pure and cheap. */
 export function idleObols(r: StyxRun): number {
-  return netRate(r) * netEV(r.bands, r.lv.poles) * wrathIdle(r.wrath) * NET_YIELD;
+  return netRate(r) * netEV(r.bands, r.lv.poles) * wrathIdle(r.wrath) * NET_YIELD * legendMult(r);
 }
 
 // ---------- save state ----------
