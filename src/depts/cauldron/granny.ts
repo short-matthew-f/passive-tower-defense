@@ -1,12 +1,11 @@
 // Granny Gristle, the Cauldron's manager (05 §18): portrait, lines, onboarding and Commendations.
-import type { Commendation, ManagerDef, OnboardingStep } from '../../core/dept';
+import type { ManagerDef, OnboardingStep } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
 import { GRANNY_PAL, GRANNY_PORTRAIT } from './art';
 import type { CRun } from './econ';
 
 const run = (s: DeptSave) => s.run as CRun;
 const stats = (s: DeptSave) => run(s).stats ?? ({} as CRun['stats']);
-const lv = (s: DeptSave, id: string) => run(s).lv?.[id] ?? 0;
 
 export const granny: ManagerDef = {
   name: 'Granny Gristle',
@@ -56,13 +55,5 @@ export const onboarding: OnboardingStep[] = [
   { id: 'gold', line: 'Clip the shiny gold peg, dearie. Extra Bile!', done: (s) => (stats(s).goldHits ?? 0) >= 1 },
 ];
 
-export const commendations: Commendation[] = [
-  { id: 'batch1', label: 'FIRST BATCH', test: (s) => (stats(s).batches ?? 0) >= 1 },
-  { id: 'toads4', label: 'FOUR WARTY HANDS', test: (s) => lv(s, 'hire') >= 3 },
-  { id: 'jackpot', label: 'SWEET MIDDLE', test: (s) => lv(s, 'jackpot') >= 1 },
-  { id: 'drops1k', label: '1,000 DROPS', test: (s) => (stats(s).drops ?? 0) >= 1000 },
-  { id: 'goldTriple', label: 'GOLDEN TRIPLE', test: (s) => (stats(s).goldTriples ?? 0) >= 1 },
-  { id: 'malice1', label: 'A NASTIER BOARD', test: (s) => (run(s).maliceBought ?? 0) >= 1 },
-  { id: 'batch10', label: 'TEN BATCHES', test: (s) => (stats(s).batches ?? 0) >= 10 },
-  { id: 'million', label: 'A MILLION BILE', test: (s) => s.cycle.earnings >= 1e6 },
-];
+// Commendations live in def.ts (pure, shared with the balance sim).
+export { commendations } from './def';

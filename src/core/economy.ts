@@ -1,7 +1,7 @@
 // Suite-wide economy math (specs/00 §2, §3.1, §5.1, §7). Pure functions over the save,
 // shared by the game and the headless balance simulation.
 import { bannerId, ruinbornId } from './meta';
-import type { DeptDef } from './dept';
+import type { DeptEcon } from './dept';
 import { DEPT_ORDER, type DeptId, type DeptSave, type SaveRoot } from './types';
 
 export const OFFLINE_BASE = 0.6;
@@ -25,7 +25,7 @@ export function tributeCapSeconds(s: SaveRoot): number {
 }
 
 /** Temp multiplier: Rebuild Rush (x3 for 30 min after a Fall) or Late Recruit (x2), never both. */
-export function tempMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>, now: number): number {
+export function tempMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, now: number): number {
   const d = s.depts[id];
   if (!d) return 1;
   if (d.cycle.n > 0 && now - d.cycle.startedAt < REBUILD_RUSH_S * 1000) return 3;
@@ -33,7 +33,7 @@ export function tempMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>,
   return 1;
 }
 
-function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>): boolean {
+function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): boolean {
   const others = DEPT_ORDER.filter((o) => o !== id && s.depts[o] && defs[o]);
   if (!others.length) return false;
   const avg = others.reduce((a, o) => a + rankEff(s, o, defs), 0) / others.length;
@@ -41,14 +41,14 @@ function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>): bo
 }
 
 /** Core multiplier (Throne group x Dread group x temp), specs/00 §3.1. Goods arrive in v0.3. */
-export function coreMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>, now: number): number {
+export function coreMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, now: number): number {
   const throneGroup = 1 + 0.1 * throne(s, bannerId(id));
   const dreadGroup = 1 + 0.1 * perk(s, 'empire.ironFist') + 0.25 * perk(s, ruinbornId(id));
   return throneGroup * dreadGroup * tempMult(s, id, defs, now);
 }
 
 /** Rank without temp multipliers so catch-up bonuses don't feed back into Tribute. */
-export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>): number {
+export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): number {
   const d = s.depts[id];
   const def = defs[id];
   if (!d || !def) return 0;
@@ -59,26 +59,26 @@ export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>): nu
   return Math.max(0, Math.floor((40 * Math.log10(idle / def.rankRef)) / Math.log10(def.rankTarget / def.rankRef)));
 }
 
-export function rankEff(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>): number {
+export function rankEff(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): number {
   const d = s.depts[id];
   if (!d) return 0;
   return Math.max(rank(s, id, defs), Math.floor(0.6 * d.lifetime.peakRank));
 }
 
 /** Tribute per second from one department. */
-export function tributeRate(s: SaveRoot, id: DeptId, defs: Record<string, DeptDef>, onScreen: boolean): number {
+export function tributeRate(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, onScreen: boolean): number {
   if (!s.depts[id]) return 0;
   const r = rankEff(s, id, defs);
   const perMin = 0.5 * (1 + r) ** 1.5 * (1 + 0.15 * perk(s, 'empire.tithe')) * (onScreen ? 1.5 : 1);
   return perMin / 60;
 }
 
-export function econFloor(def: DeptDef, n: number): number {
+export function econFloor(def: DeptEcon, n: number): number {
   return def.econBase * 3 ** n;
 }
 
 /** Infamy 0-200, specs/00 §2.2. */
-export function infamy(def: DeptDef, d: DeptSave): { value: number; skill: number; econ: number } {
+export function infamy(def: DeptEcon, d: DeptSave): { value: number; skill: number; econ: number } {
   const n = d.cycle.n;
   const target = def.skillTarget(n);
   const floor = econFloor(def, n);

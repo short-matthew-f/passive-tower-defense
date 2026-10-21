@@ -28,12 +28,12 @@ export interface Commendation {
   test(save: DeptSave): boolean;
 }
 
-export interface DeptDef {
+/**
+ * The pure, render-free part of a department: everything the shared economy and the headless
+ * balance simulation (sim/) need. Keep it in a module with no Pixi imports (e.g. `<dept>/def.ts`).
+ */
+export interface DeptEcon {
   id: DeptId;
-  name: string;
-  currency: string; // display name of the local currency
-  currencyColor: string;
-  doorColor: number;
   version: number;
   defaultRun(): { bank: number } & Record<string, any>;
   defaultPersistent(): Record<string, any>;
@@ -48,6 +48,13 @@ export interface DeptDef {
   rankRef: number;
   rankTarget: number;
   commendations: Commendation[];
+}
+
+export interface DeptDef extends DeptEcon {
+  name: string;
+  currency: string; // display name of the local currency
+  currencyColor: string;
+  doorColor: number;
   manager: ManagerDef;
   onboarding: OnboardingStep[];
   legend: { name: string; line: string };
