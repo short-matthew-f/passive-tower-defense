@@ -3,7 +3,8 @@ import { cauldron } from './cauldron';
 import { mines } from './mines';
 import { dungeon } from './dungeon';
 import { bridge } from './bridge';
+import { styx } from './styx';
 import { spire } from './spire';
 
 // Departments built so far, in unlock order.
-export const DEPARTMENTS: DeptDef[] = [cauldron, mines, dungeon, bridge, spire];
+export const DEPARTMENTS: DeptDef[] = [cauldron, mines, dungeon, bridge, styx, spire];

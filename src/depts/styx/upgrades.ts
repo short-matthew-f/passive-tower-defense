@@ -1,0 +1,99 @@
+// The Styx upgrade tree (03 §6) as shared-sheet groups: Line & Reel, Lures, Imp Crew, Bait.
+// Wrath lives on the dock (in-scene dial), not here.
+import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
+import * as M from './model';
+
+export interface Hooks {
+  onBuy(id: string): void;
+}
+
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
+  const r = () => ctx.save.run as M.StyxRun;
+  const p = () => ctx.save.persistent as M.StyxPersistent;
+  const node = (id: M.NodeId, name: string, desc: (l: number) => string): UpgradeEntry => ({
+    id,
+    name,
+    desc: () => desc(r().lv[id]),
+    max: M.NODES[id].max,
+    level: () => r().lv[id],
+    cost: () => M.nodeCost(id, r().lv[id]),
+    canAfford: () => r().lv[id] < M.NODES[id].max && r().bank >= M.nodeCost(id, r().lv[id]),
+    buy: () => {
+      if (r().lv[id] >= M.NODES[id].max) return;
+      if (ctx.spend(M.nodeCost(id, r().lv[id]))) {
+        r().lv[id]++;
+        hooks.onBuy(id);
+      }
+    },
+  });
+
+  const line: UpgradeEntry[] = [
+    node('reel', 'Reel Speed', (l) => `REEL ${M.reelSpeed(l).toFixed(1)} -> ${M.reelSpeed(l + 1).toFixed(1)} PX/S`),
+    node('line', 'Braided Sinew Line', (l) => `TENSION CAP ${pct(M.lineCap(l))} -> ${pct(M.lineCap(l + 1))}`),
+    node('steady', 'Steady Hand', (l) => `EASE-OFF DRAIN ${Math.round(M.drainRate(l))} -> ${Math.round(M.drainRate(l + 1))}%/S`),
+    node('strike', 'Quick Strike', (l) => `HOOK WINDOW ${600 + 40 * l} -> ${640 + 40 * l} MS`),
+    node('barb', 'Barbed Hook', (l) => `SLIP BECOMES LAND ${pct(M.barbChance(l))} -> ${pct(M.barbChance(l + 1))}`),
+  ];
+
+  const deeper: UpgradeEntry = {
+    id: 'deeper',
+    name: 'Deeper Cast',
+    max: M.MAX_BANDS - 1,
+    level: () => r().bands - 1,
+    cost: () => M.BANDS[Math.min(M.MAX_BANDS - 1, r().bands)].cost,
+    desc: () => (r().bands < M.MAX_BANDS ? `OPENS THE ${M.BANDS[r().bands].name} (X${M.BANDS[r().bands].mult} SOULS)` : 'ALL MVP DEPTHS OPEN'),
+    canAfford: () => r().bands < M.MAX_BANDS && r().bank >= M.BANDS[r().bands].cost,
+    buy: () => {
+      if (r().bands >= M.MAX_BANDS) return;
+      if (ctx.spend(M.BANDS[r().bands].cost)) {
+        r().bands++;
+        hooks.onBuy('deeper');
+      }
+    },
+  };
+  const lures: UpgradeEntry[] = [
+    deeper,
+    node('lantern', 'Lantern Glow', (l) => `BITE WAIT ${M.biteWait(l).toFixed(1)} -> ${M.biteWait(l + 1).toFixed(1)}S`),
+    node('scent', 'Soul Scent', (l) => `RARE BITES X${M.scentMult(l).toFixed(2)} -> X${M.scentMult(l + 1).toFixed(2)}`),
+    node('wispnet', 'Wisp Net', (l) => `WISPS X${M.wispMult(l).toFixed(1)} -> X${M.wispMult(l + 1).toFixed(1)}, MORE OFTEN`),
+  ];
+
+  const crew: UpgradeEntry[] = [
+    node('netter', 'Hire Imp Netter', (l) => `NETTERS ${l} -> ${l + 1} (1 SOUL / 30S EACH)`),
+    node('nets', 'Bigger Nets', (l) => `NET RATE X${M.netMult(l).toFixed(1)} -> X${M.netMult(l + 1).toFixed(1)}`),
+    node('poles', 'Longer Poles', (l) => `NET DEPTH ${pct(M.poleFrac(l))} -> ${pct(M.poleFrac(l + 1))} OF RIVER`),
+  ];
+
+  const bait = (id: M.BaitId): UpgradeEntry => ({
+    id: `bait.${id}`,
+    name: `${M.BAITS[id].name} x${M.BAITS[id].pack}`,
+    max: Infinity,
+    level: () => p().baits[id] ?? 0,
+    cost: () => M.BAITS[id].cost,
+    desc: () => M.BAITS[id].desc,
+    canAfford: () => r().bank >= M.BAITS[id].cost,
+    locked: () => (id === 'debt' && r().bands < 2 ? 'MURK FIRST' : null),
+    buy: () => {
+      if (id === 'debt' && r().bands < 2) return;
+      if (ctx.spend(M.BAITS[id].cost)) {
+        p().baits[id] = (p().baits[id] ?? 0) + M.BAITS[id].pack;
+        r().stats.baitsCrafted++;
+        hooks.onBuy(`bait.${id}`);
+      }
+    },
+  });
+
+  return [
+    { name: 'Line', entries: line },
+    { name: 'Lures', entries: lures },
+    { name: 'Imps', entries: crew },
+    { name: 'Bait', entries: [bait('promise'), bait('debt'), bait('gilded')] },
+  ];
+}
+
+export function anyAffordable(groups: UpgradeGroup[]): boolean {
+  // Baits are consumables: they don't light the "something to buy" badge.
+  return groups.some((g) => g.name !== 'Bait' && g.entries.some((e) => e.level() < e.max && !e.locked?.() && e.canAfford()));
+}
