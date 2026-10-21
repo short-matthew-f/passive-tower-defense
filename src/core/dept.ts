@@ -365,6 +365,9 @@ export interface UpgradeEntry {
   maxLabel?: string;
   /** Button sub-label instead of the formatted cost (e.g. 'ON' / '25%'). */
   costText?(): string;
+  /** Hold the button to buy again and again. Default: only plain levelled rows (no buyLabel or
+   * costText, max > 1), so a toggle or cycle row (ON/OFF, a reserve step) never flips while held. */
+  repeat?: boolean;
 
   // ----- bulk buying (Buy x1 / x10 / MAX, sheet-wide mode) -----
   /**

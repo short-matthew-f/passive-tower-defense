@@ -252,6 +252,11 @@ export interface BridgeRun {
   /** Evidence-backed Unmasks per Menace level this cycle (Infamy skill gate). */
   ev: Record<string, number>;
   stats: BridgeStats;
+  /** D-bridge-01: a Showdown earned by 5 Whisper pips, waiting for its traveler. */
+  showdown?: boolean;
+  /** D-bridge-02: the travelers on the bench, and the one at the gate with its haggle so far. */
+  bench?: Traveler[];
+  gate?: { t: Traveler; h: Haggle; searched: boolean; looks: number } | null;
 }
 
 export interface BridgePersistent {

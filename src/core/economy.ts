@@ -24,6 +24,18 @@ export function offlineCapSeconds(s: SaveRoot): number {
   return (8 + throne(s, 'curfewBells') + perk(s, 'empire.longReach')) * 3600;
 }
 
+/** The present-but-idle rule (00 §7): seconds of an offline credit a department gets when `live`
+ * seconds of the same span were already paid to it on screen (one cap for both). */
+export function offlineSecondsFor(elapsed: number, cap: number, live = 0): number {
+  return Math.max(0, Math.min(elapsed, cap) - Math.max(0, live));
+}
+
+/** Whether the on-screen department may still earn while present but idle (00 §7): only inside
+ * the offline cap, counted from the start of the idle span. */
+export function idleEarnAllowed(idleSince: number, now: number, capSeconds: number): boolean {
+  return (now - idleSince) / 1000 < capSeconds;
+}
+
 export function tributeCapSeconds(s: SaveRoot): number {
   return (8 + 2 * throne(s, 'treasury')) * 3600;
 }
@@ -33,16 +45,48 @@ export function tributeCapSeconds(s: SaveRoot): number {
 export function tempMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, now: number): number {
   const d = s.depts[id];
   if (!d) return 1;
-  if (d.cycle.n > 0 && now - d.cycle.startedAt < rushSeconds(s) * 1000) return 3;
+  // A future startedAt (clock corrected after a Fall) never stretches the Rush (save.repairClock).
+  if (d.cycle.n > 0 && now >= d.cycle.startedAt && now - d.cycle.startedAt < rushSeconds(s) * 1000) return 3;
   if (lateRecruit(s, id, defs)) return 2;
   return 1;
 }
 
-function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): boolean {
+/** Late Recruit state: `on` = x2 applies now; `done` = it can never apply again (latch). */
+export function lateRecruitState(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): { on: boolean; done: boolean } {
+  const d = s.depts[id];
+  if (!d) return { on: false, done: false };
+  if (d.lateRecruitDone || d.cycle.n > 0) return { on: false, done: true };
   const others = DEPT_ORDER.filter((o) => o !== id && s.depts[o] && defs[o]);
-  if (!others.length) return false;
+  // Only a department unlocked after another one is a recruit (the first department never is).
+  if (!others.some((o) => s.depts[o]!.unlockedAt < d.unlockedAt)) return { on: false, done: true };
   const avg = others.reduce((a, o) => a + rankEff(s, o, defs), 0) / others.length;
-  return rank(s, id, defs) < 0.6 * avg;
+  const r = rank(s, id, defs);
+  if (r < 0.6 * avg) return { on: true, done: false };
+  // Reaching 60% of the average ends it for good; an all-zero average decides nothing yet.
+  return { on: false, done: avg > 0 };
+}
+
+/** Late Recruit (00 §6): a newly unlocked department earns x2 until its Rank first reaches 60% of
+ * the other departments' average, during its first cycle only. Latched by updateLateRecruit. */
+function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): boolean {
+  return lateRecruitState(s, id, defs).on;
+}
+
+/** Latches Late Recruit off once its end condition is met (game and sim checkProgress). */
+export function updateLateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): void {
+  const d = s.depts[id];
+  if (d && !d.lateRecruitDone && lateRecruitState(s, id, defs).done) d.lateRecruitDone = true;
+}
+
+/** A department's idle rate, or 0 when its hook throws or returns NaN/Infinity: one broken
+ * department never poisons Rank, Tribute or the peak rank of the suite. */
+export function safeIdleRate(def: DeptEcon, d: DeptSave): number {
+  try {
+    const v = def.idleRate(d);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** Core multiplier (Throne group x Dread group x Goods group x temp), specs/00 §3.1. */
@@ -65,15 +109,17 @@ export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): n
   const def = defs[id];
   if (!d || !def) return 0;
   const dreadGroup = 1 + 0.1 * perk(s, 'empire.ironFist') + 0.25 * perk(s, ruinbornId(id));
-  const idle = def.idleRate(d) * dreadGroup;
-  if (idle <= def.rankRef) return 0;
-  return Math.max(0, Math.floor((40 * Math.log10(idle / def.rankRef)) / Math.log10(def.rankTarget / def.rankRef)));
+  const idle = safeIdleRate(def, d) * dreadGroup;
+  if (!Number.isFinite(idle) || idle <= def.rankRef) return 0;
+  const r = Math.floor((40 * Math.log10(idle / def.rankRef)) / Math.log10(def.rankTarget / def.rankRef));
+  return Number.isFinite(r) ? Math.max(0, r) : 0;
 }
 
 export function rankEff(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): number {
   const d = s.depts[id];
   if (!d) return 0;
-  return Math.max(rank(s, id, defs), Math.floor(0.6 * d.lifetime.peakRank));
+  const peak = Number.isFinite(d.lifetime.peakRank) ? d.lifetime.peakRank : 0;
+  return Math.max(rank(s, id, defs), Math.floor(0.6 * peak));
 }
 
 /** Tribute per second from one department. */
@@ -83,7 +129,8 @@ export function tributeRate(s: SaveRoot, id: DeptId, defs: Record<string, DeptEc
   // Tribute group (00 §3.1): Tithe Collector + Dark Tithe (Edict) + Trophy Hall (<= +25%).
   const group = 1 + 0.15 * perk(s, 'empire.tithe') + edictTributeAdd(s) + trophyAdd(s);
   const perMin = 0.5 * (1 + r) ** 1.5 * group * (onScreen ? 1.5 : 1);
-  return perMin / 60;
+  const v = perMin / 60;
+  return Number.isFinite(v) ? v : 0;
 }
 
 /**

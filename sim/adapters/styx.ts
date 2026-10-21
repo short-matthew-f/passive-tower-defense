@@ -616,7 +616,9 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function tick(dt: number): void {
-      // Netters (the scene credits idleObols on screen, once a second).
+      // Netters (the scene credits idleObols on screen, once a second); the Chum Barrel uses its
+      // bait as they net (M.settleChum, as the scene does every frame).
+      M.settleChum(r, p, dt);
       idleAcc += M.idleObols(r, p) * dt;
       if (idleAcc > 0 && (idleAcc >= 1 || dt >= 1)) {
         env.earn(idleAcc);
@@ -759,9 +761,10 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
           } else if (buyWrath()) bought.push('wrath');
         }
         // Baits (persistent stock): Unpaid Debt for the gate's rare, Gilded Obol once a catch is
-        // worth well over its 200-Obol share.
+        // worth well over its share of a pack (3x; band-scaled prices, D-styx-02).
         if (!opts.passive) {
           const catchVal = M.bandEV(r.bands - 1) * M.wrathActive(r.wrath) * M.legendMult(r);
+          const gildedEach = M.baitCost('gilded', 0, r.bands) / M.BAITS.gilded.pack;
           const entries = shop(save);
           const buyBait = (id: M.BaitId) => {
             const e = entries.find((x) => x.id === `bait.${id}`)!;
@@ -771,7 +774,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
             }
           };
           if (r.wrathMax >= 1 && (p.baits.debt ?? 0) < 5) buyBait('debt');
-          if (catchVal > 600 && (p.baits.gilded ?? 0) < 5) buyBait('gilded');
+          if (catchVal > 3 * gildedEach && (p.baits.gilded ?? 0) < 5) buyBait('gilded');
         }
         return bought;
       },

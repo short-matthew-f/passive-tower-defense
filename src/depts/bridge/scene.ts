@@ -13,6 +13,7 @@ import * as M from './model';
 import { drawTraveler, goonArt, GOLD, grummArt, icon, OUTLINE, particle, TRAV_H, TRAV_W, WOOD, WOOD_D, WOOD_L, type GrummExpr } from './art';
 import { sfx } from './sfx';
 import { anyAffordable, buildGroups } from './upgrades';
+import { destroyTree } from '../../ui/destroy';
 
 const HOLD_S = 0.3;
 const IDLE_GATE_S = 10;
@@ -273,7 +274,6 @@ export class BridgeScene implements DeptScene {
   private respMsg = '';
   private respColor = '#2a1a3a';
   private falseInRow = 0;
-  private showdownQueued = false;
   private gateOpen = 0;
   private slowT = 0;
   private shownBank = -1;
@@ -373,9 +373,18 @@ export class BridgeScene implements DeptScene {
     this.posterC.on('pointertap', () => this.openBoard());
 
     this.buildLayout();
-    // The bench starts full (06 §9: "process the 3 travelers on the bench").
-    for (let i = 0; i < M.benchCap(this.run.lv.bench); i++) this.bench.push(this.gen());
-    this.pullNext();
+    // D-bridge-02: the bench and the traveler at the gate are saved in the run, so leaving and
+    // coming back finds the same travelers (no free reroll of a hard read).
+    const cap = M.benchCap(this.run.lv.bench);
+    if (Array.isArray(this.run.bench)) this.bench = this.run.bench.slice(0, cap);
+    else {
+      // The bench starts full (06 §9: "process the 3 travelers on the bench").
+      for (let i = 0; i < cap; i++) this.bench.push(this.gen());
+    }
+    this.run.bench = this.bench;
+    const g = this.run.gate;
+    if (g?.t) this.startTraveler(g.t, { ...g.h }, !!g.searched, g.looks ?? 0);
+    else this.pullNext();
   }
 
   // ---------- layout ----------
@@ -415,7 +424,7 @@ export class BridgeScene implements DeptScene {
     this.travHit.hitArea = new Rectangle(this.travX - 4, this.deckY - this.th - 2, this.tw + 8, this.th + 4);
 
     // ---- controls ----
-    this.ui.removeChildren().forEach((ch) => ch.destroy({ children: true }));
+    this.ui.removeChildren().forEach((ch) => destroyTree(ch));
     this.tickLabels = [];
     this.status = new PixelText('', C.inkDim);
     this.statusR = new PixelText('', C.inkDim);
@@ -684,12 +693,17 @@ export class BridgeScene implements DeptScene {
       t = this.gen(M.CARD_FORCE[card]);
     } else if (step === 'unmask') t = this.gen('heroLesson');
     else if (step === 'search') t = this.gen('smugglerLesson');
-    else if (this.showdownQueued && Math.random() < 0.4) {
-      this.showdownQueued = false;
+    else if (this.run.showdown && Math.random() < 0.4) {
+      // D-bridge-01: the queued Showdown is saved (run.showdown) until its traveler comes.
+      this.run.showdown = false;
       t = this.gen('showdown');
     } else t = this.bench.shift();
     if (!t) return;
     this.run.stats.travelers++;
+    this.startTraveler(t, { round: 0, counter: 0, offended: false }, false, 0);
+  }
+
+  private startTraveler(t: M.Traveler, h: M.Haggle, searched: boolean, looks: number): void {
     const fromX = this.benchX + 4;
     this.cur = {
       t,
@@ -698,15 +712,16 @@ export class BridgeScene implements DeptScene {
       x: fromX,
       fromX,
       toX: this.travX,
-      h: { round: 0, counter: 0, offended: false },
-      face: 'calm',
+      h,
+      face: h.offended ? 'angry' : 'calm',
       revealed: false,
       lidOpen: false,
-      searched: false,
+      searched,
       goonT: 0,
-      looks: 0,
+      looks,
       shiftT: 0,
     };
+    this.syncGate();
     this.notch = 10;
     this.gateOpen = 0;
     this.drawGate();
@@ -749,8 +764,8 @@ export class BridgeScene implements DeptScene {
       return;
     }
     this.run.whisper = Math.min(5, this.run.whisper + 1);
-    if (this.run.whisper >= 5 && !this.showdownQueued) {
-      this.showdownQueued = true;
+    if (this.run.whisper >= 5 && !this.run.showdown) {
+      this.run.showdown = true;
       this.run.whisper = 0;
       this.grummSay(['poster', 'bang', 'mask'], 'squint');
       this.ctx.say('showdown', { type: 'tier_reached', key: 'showdown' });
@@ -1333,14 +1348,30 @@ export class BridgeScene implements DeptScene {
   }
 
   private closeBoard(): void {
-    this.modal.removeChildren().forEach((ch) => ch.destroy({ children: true }));
+    this.modal.removeChildren().forEach((ch) => destroyTree(ch));
   }
 
   // ---------- frame ----------
 
+  /** D-bridge-02: the traveler at the gate, saved until its outcome is settled (reveal, leave). A
+   * search in progress is saved as not searched (its result hasn't landed yet). */
+  private syncGate(): void {
+    const c = this.cur;
+    const open = c && (c.phase === 'walkIn' || c.phase === 'wait' || c.phase === 'counter' || c.phase === 'search');
+    if (!open) {
+      if (this.run.gate) this.run.gate = null;
+      return;
+    }
+    const g = this.run.gate;
+    const searched = c.phase === 'search' ? false : c.searched;
+    if (g && g.t === c.t && g.h === c.h && g.searched === searched && g.looks === c.looks) return;
+    this.run.gate = { t: c.t, h: c.h, searched, looks: c.looks };
+  }
+
   update(dt: number): void {
     this.time += dt;
     const r = this.run;
+    this.syncGate();
 
     // Nap countdown.
     if (this.napT > 0) {
@@ -1910,6 +1941,6 @@ export class BridgeScene implements DeptScene {
   destroy(): void {
     this.endRitual();
     this.stack.removeAllListeners();
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

@@ -75,7 +75,8 @@ export const onboarding: OnboardingStep[] = [
     line: 'Tap a nail, dearie. Curse it!',
     target: 'peg',
     gesture: 'tap',
-    done: (s) => (stats(s).ladledLands ?? 0) >= 1,
+    // U-07: the first curse completes it (a ladled drop landing in the middle was luck-bound).
+    done: (s) => (stats(s).curses ?? 0) >= 1 || (stats(s).ladledLands ?? 0) >= 1,
   },
   {
     id: 'upgrade',

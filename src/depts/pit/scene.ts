@@ -72,6 +72,7 @@ import {
 import { sfx } from './sfx';
 import { ARCHES, FOODS, UNITS, type UnitId } from './units';
 import { anyAffordable, buildGroups } from './upgrades';
+import { destroyTree } from '../../ui/destroy';
 
 type Mode = 'home' | 'shop' | 'battle' | 'result' | 'summary';
 type Group = 'shop' | 'food' | 'line' | 'rival';
@@ -110,9 +111,12 @@ interface Drag {
   t: number; // press time (performance.now ms)
   moving: boolean;
 }
-const W178 = 5 * STEP - 2;
 
 export class PitScene implements DeptScene {
+  /** Card pitch and row width (U-15): 36 px cards-plus-gap, tightened to 35 at the 180 px minimum
+   * width so the rows keep a 3 px side gutter. */
+  private step = STEP;
+  private wRow = 5 * STEP - 2;
   root = new Container();
   private ctx: DeptCtx;
   private save: PitSave;
@@ -271,7 +275,7 @@ export class PitScene implements DeptScene {
     this.pauseBtn = new Button({ w: 50, h: 14, label: 'PAUSE', onTap: () => this.pauseRun(), ...dark });
     this.speedBtn = new Button({ w: 52, h: 20, label: '1X', onTap: () => this.toggleSpeed(), ...dark });
     this.skipBtn = new Button({ w: 74, h: 20, label: 'SKIP', onTap: () => this.skipBattle(), ...dark });
-    this.startBtn = new Button({ w: W178, h: 22, label: 'START RUN', onTap: () => this.startOrResume() });
+    this.startBtn = new Button({ w: this.wRow, h: 22, label: 'START RUN', onTap: () => this.startOrResume() });
     this.forfeitBtn = new Button({ w: 50, h: 22, label: 'FORFEIT', onTap: () => this.confirmForfeit(), color: C.red, shade: 0x7a2020, textColor: C.ink });
     this.upBtn = new Button({ w: 88, h: 18, label: 'UPGRADES', onTap: () => ctx.openUpgrades(this.groups), color: C.gold, shade: 0x9a7a20 });
     this.bandsBtn = new Button({ w: 88, h: 18, label: 'WARBANDS', onTap: () => this.openWarbands(), ...dark });
@@ -359,7 +363,9 @@ export class PitScene implements DeptScene {
     this.y0 = c.y;
     this.w = c.w;
     this.h = c.h;
-    this.xL = c.x + Math.max(0, Math.floor((c.w - W178) / 2));
+    this.step = c.w >= 5 * STEP - 2 + 8 ? STEP : STEP - 1;
+    this.wRow = 5 * this.step - 2;
+    this.xL = c.x + Math.max(0, Math.floor((c.w - this.wRow) / 2));
     this.lh = this.ctx.leftHanded();
     this.T = Math.max(12, Math.min(44, c.h - 258));
     const gx = Math.max(0, Math.min(64, c.h - (this.T + 245)));
@@ -378,13 +384,13 @@ export class PitScene implements DeptScene {
     }
     for (let i = 0; i < 6; i++) {
       // Up to 5 slots in a row; a 6th (level-up bonus) squeezes in over the food row's right side.
-      const cx = i < 5 ? xL + i * STEP : xL + 4 * STEP;
+      const cx = i < 5 ? xL + i * this.step : xL + 4 * this.step;
       const cy = i < 5 ? this.yShop : this.yFood;
       this.shopCards[i].bx = cx;
       this.shopCards[i].by = cy;
     }
     for (let i = 0; i < 2; i++) {
-      this.foodCards[i].bx = xL + i * STEP;
+      this.foodCards[i].bx = xL + i * this.step;
       this.foodCards[i].by = this.yFood;
     }
     for (const s of this.strips) {
@@ -401,25 +407,25 @@ export class PitScene implements DeptScene {
     this.brandBtn.position.set(xL + 74, this.yFood + 13);
     this.pauseBtn.position.set(xL + 128, this.yFood + 13);
     // Mirrored in left-handed mode: x -> the same distance from the right edge.
-    const mx = (x: number, w: number) => (this.lh ? xL + W178 - (x - xL) - w : x);
+    const mx = (x: number, w: number) => (this.lh ? xL + this.wRow - (x - xL) - w : x);
     this.rollBtn.position.set(mx(xL, 52), this.yAct);
     this.sellBtn.position.set(mx(xL + 56, 46), this.yAct);
-    this.fightBtn.position.set(mx(xL + W178 - 74, 74), this.yAct);
+    this.fightBtn.position.set(mx(xL + this.wRow - 74, 74), this.yAct);
     this.speedBtn.position.set(mx(xL, 52), this.yAct);
-    this.skipBtn.position.set(mx(xL + W178 - 74, 74), this.yAct);
+    this.skipBtn.position.set(mx(xL + this.wRow - 74, 74), this.yAct);
     // Home panel.
     const ys = this.yShop;
     this.stakesText.position.set(xL + 2, ys + 4);
     this.stakesDown.position.set(xL + 60, ys);
     this.stakesUp.position.set(xL + 78, ys);
-    this.stakesBuy.position.set(xL + W178 - 62, ys);
-    this.dropBtn.position.set(xL + W178 - 62, ys + 17);
+    this.stakesBuy.position.set(xL + this.wRow - 62, ys);
+    this.dropBtn.position.set(xL + this.wRow - 62, ys + 17);
     this.tacticBox.position.set(xL, ys + 17);
     this.crownText.position.set(xL + 2, ys + 34);
     this.startBtn.position.set(xL, ys + 46);
-    this.forfeitBtn.position.set(xL + W178 - 50, ys + 46);
+    this.forfeitBtn.position.set(xL + this.wRow - 50, ys + 46);
     this.upBtn.position.set(xL, ys + 74);
-    this.bandsBtn.position.set(xL + W178 - 88, ys + 74);
+    this.bandsBtn.position.set(xL + this.wRow - 88, ys + 74);
     this.homeHint.position.set(xL, ys + 96);
     this.bgKey = '';
   }
@@ -449,7 +455,7 @@ export class PitScene implements DeptScene {
     g.rect(0, sandTop, L.w, 1).fill(PAL.sandHi);
     // Clash line.
     const mid = Math.floor((this.yRival + 40 + this.yLine) / 2);
-    for (let x = this.xL; x < this.xL + W178; x += 6) g.rect(x, mid, 3, 1).fill(PAL.sandLo);
+    for (let x = this.xL; x < this.xL + this.wRow; x += 6) g.rect(x, mid, 3, 1).fill(PAL.sandLo);
     // Shop counter (wood) below the info line.
     g.rect(0, this.yInfo - 1, L.w, L.h - this.yInfo + 1).fill(0x2a1a14);
     g.rect(0, this.yInfo - 1, L.w, 1).fill(0x5a3a24);
@@ -1017,7 +1023,7 @@ export class PitScene implements DeptScene {
   private setInfo(text: string, hold: number): void {
     this.infoText = text;
     this.infoHold = hold;
-    this.info.set(wrap(text.toUpperCase(), W178) || ' ', '#f4e8c1');
+    this.info.set(wrap(text.toUpperCase(), this.wRow) || ' ', '#f4e8c1');
   }
 
   // ---------- fighting ----------
@@ -1241,7 +1247,7 @@ export class PitScene implements DeptScene {
     this.bannerText.position.set(Math.floor((w - measure(title).w) / 2), 5);
     this.bannerSub.position.set(Math.floor((w - measure(sub).w) / 2), 14);
     const mid = Math.floor((this.yRival + 40 + this.yLine) / 2);
-    this.banner.position.set(this.xL + Math.floor((W178 - w) / 2), mid - 12);
+    this.banner.position.set(this.xL + Math.floor((this.wRow - w) / 2), mid - 12);
     this.banner.hitArea = new Rectangle(-20, -20, w + 40, h + 40);
     this.banner.visible = true;
   }
@@ -1447,7 +1453,7 @@ export class PitScene implements DeptScene {
   private closePanel(): void {
     this.summaryRects = {};
     if (this.overlay) {
-      this.overlay.destroy({ children: true });
+      destroyTree(this.overlay);
       this.overlay = null;
     }
   }
@@ -1489,9 +1495,13 @@ export class PitScene implements DeptScene {
   update(dt: number): void {
     this.time += dt;
     const rs = this.run.cur;
-    if (rs && (this.mode === 'shop' || this.mode === 'battle')) rs.playMs += dt * 1000;
-    // Skirmishes pay only when no Run is on screen (07 §3, decided OQ 31).
-    if (this.mode === 'home') {
+    // D-pit-01 (07 §3 m4): a Run left open with no input for 10 min counts as offline time. The core
+    // marks the span (game.idleSince) and ctx.earn pays at the offline factor inside the offline
+    // cap, so the Skirmishes resume behind the open Run.
+    const idle = this.ctx.game.idleSince != null;
+    if (rs && !idle && (this.mode === 'shop' || this.mode === 'battle')) rs.playMs += dt * 1000;
+    // Skirmishes pay only when no Run is on screen (07 §3, decided OQ 31), or while it sits idle.
+    if (this.mode === 'home' || idle) {
       this.idleAcc += pitEcon.idleRate(this.save) * dt;
       this.idleT += dt;
       if (this.idleT >= 1) {
@@ -1499,7 +1509,7 @@ export class PitScene implements DeptScene {
         if (this.idleAcc > 0) this.ctx.earn(this.idleAcc);
         this.idleAcc = 0;
       }
-      if (!this.play && !this.overlay && !this.ritual) {
+      if (this.mode === 'home' && !this.play && !this.overlay && !this.ritual) {
         this.skirmish.wait -= dt;
         if (this.skirmish.wait <= 0) this.nextSkirmish();
       }
@@ -1543,7 +1553,7 @@ export class PitScene implements DeptScene {
       this.infoHold -= dt;
       if (this.infoHold <= 0) this.infoText = '';
     }
-    if (!this.infoText) this.info.set(wrap(this.hint(), W178) || ' ', '#9c8aa8');
+    if (!this.infoText) this.info.set(wrap(this.hint(), this.wRow) || ' ', '#9c8aa8');
     // Flavor lines only when calm.
     this.flavorT -= dt;
     if (this.flavorT <= 0) {
@@ -1738,8 +1748,8 @@ export class PitScene implements DeptScene {
       this.startBtn.setLabel(cur ? `RESUME RUN (RD ${cur.round}, ${cur.wins}W)` : 'START RUN');
       this.startBtn.visible = true;
       this.forfeitBtn.visible = !!cur;
-      if (cur) this.startBtnWidth(W178 - 54);
-      else this.startBtnWidth(W178);
+      if (cur) this.startBtnWidth(this.wRow - 54);
+      else this.startBtnWidth(this.wRow);
       this.homeHint.set(' ');
       // UPGRADES pulses when something is affordable.
       const any = anyAffordable(this.groups);
@@ -1749,13 +1759,13 @@ export class PitScene implements DeptScene {
   }
 
   private tacticLabels: PixelText[] | null = null;
-  private startW = W178;
+  private startW = this.wRow;
 
   private startBtnWidth(w: number): void {
     if (this.startW === w) return;
     this.startW = w;
     const label = this.run.cur ? `RESUME RUN (RD ${this.run.cur.round}, ${this.run.cur.wins}W)` : 'START RUN';
-    this.startBtn.destroy({ children: true });
+    destroyTree(this.startBtn);
     this.startBtn = new Button({ w, h: 22, label, onTap: () => this.startOrResume() });
     this.startBtn.position.set(this.xL, this.yShop + 46);
     this.ui.addChild(this.startBtn);
@@ -1824,14 +1834,14 @@ export class PitScene implements DeptScene {
   /** The line slot under (x, y), with a little slack, or -1. */
   private slotAt(x: number, y: number): number {
     if (y < this.yLine - 6 || y > this.yLine + CH + 6) return -1;
-    const k = Math.floor((x - this.xL + 1) / STEP);
+    const k = Math.floor((x - this.xL + 1) / this.step);
     if (k < 0 || k >= 5) return -1;
     return this.lh ? 4 - k : k;
   }
 
   /** Left x of line / rival slot j (slot 0 = the front: left, or right when left-handed). */
   private slotX(j: number): number {
-    return this.xL + (this.lh ? 4 - j : j) * STEP;
+    return this.xL + (this.lh ? 4 - j : j) * this.step;
   }
 
   private overSell(x: number, y: number): boolean {
@@ -1977,7 +1987,7 @@ export class PitScene implements DeptScene {
       case 'brand':
         return shop ? this.btnRect(this.brandBtn, 50, 14) : null;
       case 'rival':
-        return shop ? { x: this.xL, y: this.yRival - 9, w: W178, h: 49 } : null;
+        return shop ? { x: this.xL, y: this.yRival - 9, w: this.wRow, h: 49 } : null;
       case 'shop.twin':
       case 'line.twin': {
         if (!shop) return null;
@@ -2022,6 +2032,12 @@ export class PitScene implements DeptScene {
   }
 
   /** 07 §18: a battle animating, a drag in progress, or the return ritual. */
+  /** U-09: the Grit / CRESTS / TRIUMPHS / RUNS row over the rival line. The manager strip folds
+   * instead of covering it on short screens. */
+  avoidRects(): Rect[] {
+    return [{ x: this.xL, y: this.y0 + this.T - 11, w: this.wRow, h: 9 }];
+  }
+
   isIntense(): boolean {
     return !!(this.play && !this.play.home) || !!this.drag?.moving || !!this.ritual;
   }
@@ -2051,7 +2067,7 @@ export class PitScene implements DeptScene {
         const log = runGauntletLog(this.save, team, bestG, bestR, S);
         const resume = !!this.run.cur && !this.run.cur.ended;
         if (this.mode !== 'home') this.setMode('home');
-        const btn = new Button({ w: W178, h: 22, label: 'THUMBS DOWN!', color: C.red, shade: 0x7a2020, textColor: C.ink, onTap: () => {
+        const btn = new Button({ w: this.wRow, h: 22, label: 'THUMBS DOWN!', color: C.red, shade: 0x7a2020, textColor: C.ink, onTap: () => {
           const rt = this.ritual;
           if (!rt || rt.tapped >= 0) return;
           rt.tapped = rt.t;
@@ -2060,7 +2076,7 @@ export class PitScene implements DeptScene {
           btn.setEnabled(false);
         } });
         btn.position.set(this.xL, this.yShop + 46);
-        const label = new PixelText(wrap("SNARL'S REPLAY: TAP AS THE LAST RIVAL FALLS.", W178), '#e8c04a');
+        const label = new PixelText(wrap("SNARL'S REPLAY: TAP AS THE LAST RIVAL FALLS.", this.wRow), '#e8c04a');
         label.position.set(this.xL, this.yShop + 30);
         this.ui.addChild(btn, label);
         const finish = () => {
@@ -2073,9 +2089,9 @@ export class PitScene implements DeptScene {
             const off = Math.abs(rt.tapped - rt.end);
             score = off <= 0.25 ? 1 : Math.max(0, 1 - (off - 0.25));
           }
-          this.ctx.float(score >= 1 ? 'PERFECT! *TWEET*' : score > 0 ? 'CLOSE ENOUGH' : 'MISSED', this.xL + W178 / 2, this.yRival + 20, score > 0 ? '#e8c04a' : '#9c8aa8');
+          this.ctx.float(score >= 1 ? 'PERFECT! *TWEET*' : score > 0 ? 'CLOSE ENOUGH' : 'MISSED', this.xL + this.wRow / 2, this.yRival + 20, score > 0 ? '#e8c04a' : '#9c8aa8');
           if (score > 0) sfx.cackle(this.vol());
-          btn.destroy({ children: true });
+          destroyTree(btn);
           label.destroy();
           this.ritual = null;
           this.play = null;
@@ -2143,6 +2159,6 @@ export class PitScene implements DeptScene {
     const rs = this.run.cur;
     if (rs && rs.pend) this.creditBattle(rs);
     this.closePanel();
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

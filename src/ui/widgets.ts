@@ -39,6 +39,8 @@ export interface ButtonOpts {
   onTap: () => void;
   /** Hold to repeat (for buying many levels). */
   repeat?: boolean;
+  /** Extra touch margin around the drawn button, in game pixels (small buttons, U-14). */
+  hitPad?: number;
 }
 
 /** A chunky pressable button with a 1px drop "lip". */
@@ -63,7 +65,7 @@ export class Button extends Container {
     this.on('pointerup', this.up, this);
     this.on('pointerupoutside', this.cancel, this);
     this.on('pointerleave', this.cancel, this);
-    // Draw once up front: setLabel() skips no-op changes, and the first label is one.
+    // Draw now: setLabel() skips a label equal to the current one, which opts.label already is (U-01).
     this.redraw();
   }
 
@@ -114,7 +116,8 @@ export class Button extends Container {
     const top = Math.floor((h - 1 - total) / 2) + off;
     this.labelText.position.set(Math.floor((w - lm.w) / 2), top);
     this.subText.position.set(Math.floor((w - sm.w) / 2), top + lm.h + 2);
-    this.hitArea = new Rectangle(0, 0, w, h + 1);
+    const p = this.opts.hitPad ?? 0;
+    this.hitArea = new Rectangle(-p, -p, w + 2 * p, h + 1 + 2 * p);
   }
 
   private down(e: FederatedPointerEvent): void {

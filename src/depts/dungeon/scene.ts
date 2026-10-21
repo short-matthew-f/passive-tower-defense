@@ -28,6 +28,7 @@ import {
   sackArt,
 } from './art';
 import { anyAffordable, buildGroups } from './upgrades';
+import { destroyTree } from '../../ui/destroy';
 
 const BOARD_W = COLS * TILE;
 const BOARD_H = ROWS * TILE;
@@ -308,7 +309,7 @@ export class DungeonScene implements DeptScene {
     this.placeBoardArt();
 
     // UI.
-    this.ui.removeChildren().forEach((ch) => ch.destroy({ children: true }));
+    this.ui.removeChildren().forEach((ch) => destroyTree(ch));
     this.btnCache.clear();
     this.previewTexts = [];
     this.previewIcons = [];
@@ -1413,9 +1414,10 @@ export class DungeonScene implements DeptScene {
           s.greedKills++;
           this.sparkle(e.x, e.y - 0.3);
         }
+        // D-dungeon-01: the recovery bonus is a share of the bounty (the kill paid the rest).
+        const bonus = e.recover > 0 ? this.ctx.earn(e.recover) : 0;
         if (e.sack > 0) {
           this.run.bank += e.sack;
-          const bonus = this.ctx.earn(e.sack * M.RECOVER_BONUS);
           s.recovered++;
           this.floatAt(e.x, e.y - 1.6, `SACK +${fm(e.sack + bonus)}`, '#fff0a0');
           this.sparkle(e.x, e.y);
@@ -2174,6 +2176,12 @@ export class DungeonScene implements DeptScene {
 
   /** 01 §18: a Champion on the field, a thief carrying a sack, a Glare or Trapdoor being aimed, a
    * party within 4 tiles of the Hoard, or the 3 s before a party enters (the preview is changing). */
+  /** U-09: the top row (NEXT party preview, the Lure dial) and the status line under it. The
+   * manager strip folds instead of covering them on short screens. */
+  avoidRects(): Rect[] {
+    return [{ x: this.x0, y: this.topY - 1, w: this.uw, h: 23 }];
+  }
+
   isIntense(): boolean {
     if (this.aim || this.trapArmed || this.glareArmed || this.dragPiece !== null || this.ritual) return true;
     if (this.sim.partyTimer < 3) return true;
@@ -2386,6 +2394,6 @@ export class DungeonScene implements DeptScene {
     this.hit.removeAllListeners();
     this.coinPool.forEach((g) => g.destroy());
     this.coinPool = [];
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

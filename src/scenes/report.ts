@@ -8,6 +8,7 @@ import { formatNum, formatTime } from '../core/format';
 import { PixelText, wrap } from '../ui/font';
 import { Button, drawPanel, drawSprite } from '../ui/widgets';
 import { satchelLevel } from '../core/perks';
+import { destroyTree } from '../ui/destroy';
 
 export interface ReportLine {
   id: DeptId;
@@ -99,7 +100,7 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
   root.addChild(title, sub);
 
   const close = () => {
-    root.destroy({ children: true });
+    destroyTree(root);
     onClose?.();
   };
   const maxChars = Math.floor((w - 30) / 4);
@@ -167,5 +168,7 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
   const btn = new Button({ w: w - 20, h: 18, label: 'COLLECT ALL', onTap: close });
   btn.position.set(x + 10, y + h - 26);
   root.addChild(btn);
+  // A resize re-opens the report for the new layout, keeping its continuation (C-11).
+  game.trackModal(root, { reopen: () => showReport(game, r, onClose) });
   game.modalLayer.addChild(root);
 }

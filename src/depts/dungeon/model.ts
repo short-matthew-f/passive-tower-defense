@@ -93,6 +93,9 @@ export interface DungeonRun {
   champs: number[];
   party: number; // parties launched this cycle (Champions every 10th)
   rev: number; // bumped on every change the idle sim depends on
+  /** Last idle-sim result and its layout hash (sim.ts idleOf): a reload or a queued re-run answers
+   * from it at once (P-03). */
+  idleMemo?: { key: string; pps: number; leak: number; tier: number };
   /** Active floor (0-2). */
   floor: number;
   /** Layouts of the other floors this cycle. */

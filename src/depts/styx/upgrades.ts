@@ -73,21 +73,23 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('chum', 'Chum Barrel', (l) => `NETTERS USE YOUR BAIT ${pct(M.chumEff(l))} -> ${pct(M.chumEff(l + 1))}`),
   ];
 
-  // Debt Collectors (Contraband import) discounts Unpaid Debt.
-  const baitCost = (id: M.BaitId) => M.baitCost(id, ctx.save.imports?.contraband ?? 0);
+  // Debt Collectors (Contraband import) discounts Unpaid Debt. Prices follow the deepest open band
+  // and stock is capped (D-styx-02).
+  const baitCost = (id: M.BaitId) => M.baitCost(id, ctx.save.imports?.contraband ?? 0, r().bands);
+  const full = (id: M.BaitId) => (p().baits[id] ?? 0) + M.BAITS[id].pack > M.BAIT_CAP[id];
   const bait = (id: M.BaitId): UpgradeEntry => ({
     id: `bait.${id}`,
     name: `${M.BAITS[id].name} x${M.BAITS[id].pack}`,
-    max: Infinity,
+    max: M.BAIT_CAP[id],
     level: () => p().baits[id] ?? 0,
     cost: () => baitCost(id),
     desc: () => M.BAITS[id].desc,
-    canAfford: () => r().bank >= baitCost(id),
-    locked: () => (id === 'debt' && r().bands < 2 ? 'MURK FIRST' : null),
+    canAfford: () => !full(id) && r().bank >= baitCost(id),
+    locked: () => (id === 'debt' && r().bands < 2 ? 'MURK FIRST' : full(id) ? 'STOCK FULL' : null),
     buy: () => {
-      if (id === 'debt' && r().bands < 2) return;
+      if ((id === 'debt' && r().bands < 2) || full(id)) return;
       if (ctx.spend(baitCost(id))) {
-        p().baits[id] = (p().baits[id] ?? 0) + M.BAITS[id].pack;
+        p().baits[id] = Math.min(M.BAIT_CAP[id], (p().baits[id] ?? 0) + M.BAITS[id].pack);
         r().stats.baitsCrafted++;
         hooks.onBuy(`bait.${id}`);
       }

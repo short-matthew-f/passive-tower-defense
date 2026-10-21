@@ -15,6 +15,7 @@ import * as M from './model';
 import { BAIT_COLOR, EEL, EEL_PAL, IMP, IMP_PAL, JAR, OVERLORD, OVERLORD_PAL, PILK_IDLE, PILK_PAL, PLAQUE, soulArt, soulSize, soulTint } from './art';
 import { sfx } from './sfx';
 import { anyAffordable, buildGroups } from './upgrades';
+import { destroyTree } from '../../ui/destroy';
 
 const SURF = 48;
 const CTRL = 90;
@@ -300,6 +301,8 @@ export class StyxScene implements DeptScene {
     this.run = ctx.save.run as M.StyxRun;
     this.per = ctx.save.persistent as M.StyxPersistent;
     M.normalize(this.run, this.per);
+    // Chum Barrel (D-styx-01): bait the netters used while this department was off screen.
+    this.settleChum(Date.now(), 12 * 3600);
     this.groups = buildGroups(ctx, { onBuy: (id) => this.onBuy(id) });
 
     this.ownedG.push(this.bg, this.skiff, this.raft, this.fog, this.lineG, this.fx, this.over, this.worldMask);
@@ -372,7 +375,7 @@ export class StyxScene implements DeptScene {
 
     // ---- control bar ----
     this.ownedG = this.ownedG.filter((g) => g !== this.disk && g !== this.badge && g !== this.uiG);
-    this.ui.removeChildren().forEach((ch) => (ch instanceof Graphics ? ch.destroy() : ch.destroy({ children: true })));
+    this.ui.removeChildren().forEach((ch) => destroyTree(ch));
     this.status = new PixelText('', C.ink);
     this.comboText = new PixelText('', C.goldText);
     this.gateText = new PixelText('', C.inkDim);
@@ -1422,7 +1425,15 @@ export class StyxScene implements DeptScene {
     }
   }
 
+  /** Chum Barrel bait use since the last settle (wall clock, at most `maxS` seconds). */
+  private settleChum(now: number, maxS: number): void {
+    const at = this.run.chumAt;
+    if (at != null && now > at) M.settleChum(this.run, this.per, Math.min(maxS, (now - at) / 1000));
+    this.run.chumAt = now;
+  }
+
   private updateIdle(dt: number): void {
+    this.settleChum(Date.now(), dt + 1);
     const rate = M.idleObols(this.run, this.per);
     this.idleAcc += rate * dt;
     this.idleTick += dt;
@@ -2392,7 +2403,7 @@ export class StyxScene implements DeptScene {
   private closeCodex(): void {
     if (!this.codexOpen) return;
     this.codexOpen = false;
-    this.modal.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.modal.removeChildren().forEach((c) => destroyTree(c));
   }
 
   // ---------- lifecycle ----------
@@ -2424,6 +2435,6 @@ export class StyxScene implements DeptScene {
       g.parent?.removeChild(g);
       g.destroy();
     }
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

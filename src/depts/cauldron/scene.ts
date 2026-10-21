@@ -37,6 +37,7 @@ import {
 import { CauldronCore, CHARGE_S, MAX_LIVE } from './logic';
 import { sfx } from './sfx';
 import { BOARD_W, BUCKETS, COL_W, LAYOUTS, ROW_H, ROW_SLOTS, SPECIALS, type Ball, type IngId } from './sim';
+import { destroyTree } from '../../ui/destroy';
 
 const RAIL_H = 12;
 const BOARD_H = 10 + (ROW_SLOTS - 1) * ROW_H + 12; // rail bottom -> landing line
@@ -476,7 +477,8 @@ export class CauldronScene implements DeptScene {
       level,
       max: u.max,
       cost: () => upCost(u, level()),
-      currency: u.tokens ? 'Tokens' : undefined,
+      // U-13: the token glyph, never a bare "T" (T reads as Tribute in the Throne sheets).
+      currency: u.tokens ? '{coin}Tokens' : undefined,
       locked: () => upLocked(u, this.ctx.save.cycle.n),
       // Specials show one at a time: the next one appears once the one before is in the flow.
       visible: si > 0 ? () => lvOf(run, SPECIALS[si - 1]) > 0 || lvOf(run, u.id) > 0 : u.id === 'odds' ? () => lvOf(run, 'mandrake') > 0 : undefined,
@@ -1329,6 +1331,6 @@ export class CauldronScene implements DeptScene {
   destroy(): void {
     // A ritual still waiting resolves with nothing (never required).
     this.endHopper(0);
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

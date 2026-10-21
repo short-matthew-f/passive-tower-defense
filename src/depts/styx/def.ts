@@ -39,7 +39,9 @@ export const styxEcon: DeptEcon = {
   idleRate(save) {
     const r = run(save);
     if (!r || !r.lv) return 0;
-    return M.idleObols(r, per(save));
+    // Partial / older saves: read missing levels as 0 without writing to the save.
+    const full: M.StyxRun = { ...r, lv: { ...M.defaultLevels(), ...r.lv }, bands: Math.max(1, Math.min(M.MAX_BANDS, r.bands ?? 1)), wrath: r.wrath ?? 0 };
+    return M.idleObols(full, per(save));
   },
 
   // Souls (00 §4, 03 §16): rare+ catch = 1, every 10th other catch = 1; netters on idle.
@@ -70,9 +72,25 @@ export const styxEcon: DeptEcon = {
   // v1.1 (bands 4-5, Twin Hooks, the Chum Barrel, CLEAN reels): the plateau now comes after the
   // Lethe Bottom at ~x20 the income, so econBase 1.2e8 -> 2.5e9 (first Fall day 5 again, ~4.9-5.1 d) and
   // rankTarget 250 -> 4800 (idle at the first 100% Infamy). rankRef stays (early game unchanged).
-  econBase: 2.5e9,
+  // D-styx-01/02 retune: econBase 2.5e9 -> 1.4e9. The reference profile's netters had been
+  // fishing with a never-used-up Gilded Obol (the Chum Barrel bug), and its active catches with
+  // flat-priced ones; with the barrel eating stock and band-priced bait the first Fall slipped to
+  // day 6 21:00. 1.4e9 puts it back at day 5 18:00 (4.75 d).
+  econBase: 1.4e9,
   rankRef: 12,
   rankTarget: 4800,
+
+  // Chum Barrel bait use (D-styx-01) for the absence just credited (at the offline factor) and
+  // the in-session time off screen before it (known only when the absence was not capped).
+  onOffline(save, elapsedSeconds, factor, info) {
+    const r = run(save);
+    const p = per(save);
+    if (!r?.lv || !p?.baits) return;
+    const t = Math.max(0, elapsedSeconds);
+    const before = r.chumAt != null && t < info.capSeconds ? Math.max(0, Math.min(12 * 3600, (info.now - r.chumAt) / 1000 - t)) : 0;
+    M.settleChum(r, p, before + t * Math.max(0, factor));
+    r.chumAt = info.now;
+  },
 
   // ----- advancement hooks (00 §2.5, §5.2) -----
 

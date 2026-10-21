@@ -88,7 +88,7 @@ export interface WallHooks {
   raiseSkill(level: number): void;
   rnd(): number;
   /** A kind the onboarding wants on the next spawn (scripted Ore Vein), or null. */
-  forceKind?(t: Tile): M.RockKind | null;
+  forceKind?(t: Tile, tiles: readonly Tile[]): M.RockKind | null;
   onHit?(t: Tile, dmg: number, by: By): void;
   onBreak?(t: Tile, kind: M.RockKind, by: By, got: number, gems: number): void;
   onShell?(t: Tile, got: number): void;
@@ -209,7 +209,7 @@ export class Wall {
   }
 
   private spawn(t: Tile, initial = false): void {
-    const kind = this.h.forceKind?.(t) ?? t.next ?? this.roll(initial);
+    const kind = this.h.forceKind?.(t, this.tiles) ?? t.next ?? this.roll(initial);
     t.next = null;
     t.kind = kind;
     t.shell = kind === 'hollow' ? 2 : 0;
@@ -327,7 +327,7 @@ export class Wall {
       if (t.kind === null) {
         t.regrow -= dt;
         // Keen Eye: the next rock is rolled a moment early so a shiny one can glint (02 §6A).
-        if (t.next === null && t.regrow <= M.KEEN_GLINT_S) t.next = this.h.forceKind?.(t) ?? this.roll(false);
+        if (t.next === null && t.regrow <= M.KEEN_GLINT_S) t.next = this.h.forceKind?.(t, this.tiles) ?? this.roll(false);
         if (t.regrow <= 0) this.spawn(t);
       } else if (t.kind === 'keg') {
         if (t.fuse >= 0) {

@@ -329,6 +329,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
           env.earn(amount);
         }
         dropAcc += (row.drops / row.liveS) * dt;
+        core.creditHold(dt); // the bot is playing: active time at the dial (D-spire-01)
         while (dropAcc >= 1) {
           dropAcc -= 1;
           r.stats.drops++;

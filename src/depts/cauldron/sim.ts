@@ -518,57 +518,101 @@ export interface LandingStats {
  * so only the board changes between upgrade states. `chute` < 0 drops at uniformly random x (the
  * toadling rain); a chute index drops down that chute (Tosses, Taught Toadlings, Scrying Ladle).
  * The moving gold pegs ride along (sim-tuned: idleRate counts what the board earns with no
- * input, gold included).
+ * input, gold included). `flowMix` (D-cauldron-03) drops the run's own value-weighted pour,
+ * specials included, instead of the base mix.
+ *
+ * D-cauldron-02: resumable, so the EV cache can spread a cold board over several frames
+ * (`run(deadline)` stops at the deadline and picks up where it left off; same result either way).
  */
-export function landingStats(cfg: BoardConfig, n = 1500, chute = -1): LandingStats {
-  const counts = new Array(BUCKETS).fill(0);
-  const hits = new Array(BUCKETS).fill(0);
-  const runes = new Array(BUCKETS).fill(0);
-  let spill = 0;
-  let pegHits = 0;
-  const xs = mulberry32(chute < 0 ? 0xc0ffee : 0xc0ffee + 101 * (chute + 1));
-  const board = new Board(cfg, chute < 0 ? 12345 : 12345 + chute);
-  const ev: SimEvents = {
-    land: (b, k) => {
-      counts[k] += b.scale;
-      hits[k] += b.goldHits * b.scale;
-      if (b.rune) runes[k] += b.scale;
-      pegHits += b.hits * b.scale;
-    },
-    spill: (b) => {
-      spill += b.scale;
-      pegHits += b.hits * b.scale;
-    },
-  };
-  // Ingredients fall differently (bounce, gravity), so drop the value-weighted mix (weight x value)
-  // the payout actually sees, not Newts only.
-  const mix = ING_ORDER.map((i) => INGREDIENTS[i].weight * INGREDIENTS[i].value);
-  const mixW = mix.reduce((a, b) => a + b, 0);
-  const pick = (r: number): IngId => {
-    let x = r * mixW;
-    for (let i = 0; i < ING_ORDER.length; i++) if ((x -= mix[i]) <= 0) return ING_ORDER[i];
-    return ING_ORDER[0];
-  };
-  let dropped = 0;
-  // Keep ~20 balls in flight so the run is cheap but still uses the real step.
-  while (dropped < n || board.balls.length) {
-    if (dropped < n && board.balls.length < 20) {
-      const x = chute < 0 ? BALL_R + xs() * (BOARD_W - 2 * BALL_R) : chute * COL_W + COL_W / 2 + (xs() - 0.5) * 2;
-      board.drop(pick(xs()), x, chute >= 0);
-      dropped++;
-    }
-    board.step(ev);
+export class LandingJob {
+  private counts = new Array(BUCKETS).fill(0);
+  private hits = new Array(BUCKETS).fill(0);
+  private runes = new Array(BUCKETS).fill(0);
+  private spill = 0;
+  private pegHits = 0;
+  private dropped = 0;
+  private xs: () => number;
+  private board: Board;
+  private ev: SimEvents;
+  private order: IngId[];
+  private mix: number[];
+  private mixW: number;
+  private res: LandingStats | null = null;
+
+  constructor(
+    cfg: BoardConfig,
+    private n = 1500,
+    private chute = -1,
+    flowMix?: { ing: IngId; w: number }[],
+  ) {
+    this.xs = mulberry32(chute < 0 ? 0xc0ffee : 0xc0ffee + 101 * (chute + 1));
+    this.board = new Board(cfg, chute < 0 ? 12345 : 12345 + chute);
+    this.ev = {
+      land: (b, k) => {
+        this.counts[k] += b.scale;
+        this.hits[k] += b.goldHits * b.scale;
+        if (b.rune) this.runes[k] += b.scale;
+        this.pegHits += b.hits * b.scale;
+      },
+      spill: (b) => {
+        this.spill += b.scale;
+        this.pegHits += b.hits * b.scale;
+      },
+    };
+    // Ingredients fall differently (bounce, gravity), so drop the value-weighted mix (weight x
+    // value) the payout actually sees, not Newts only.
+    this.order = flowMix ? flowMix.map((m) => m.ing) : ING_ORDER;
+    this.mix = flowMix ? flowMix.map((m) => m.w) : ING_ORDER.map((i) => INGREDIENTS[i].weight * INGREDIENTS[i].value);
+    this.mixW = this.mix.reduce((a, b) => a + b, 0);
   }
-  const landed = counts.reduce((a, b) => a + b, 0);
-  const total = landed + spill || 1;
-  return {
-    dist: counts.map((c) => c / total),
-    goldHits: hits.map((h, k) => (counts[k] ? h / counts[k] : 0)),
-    rune: runes.map((h, k) => (counts[k] ? h / counts[k] : 0)),
-    spill: spill / total,
-    hits: pegHits / total,
-    pegs: board.pegs.filter((p) => p.kind === 'iron' || p.kind === 'bone').length,
-  };
+
+  get done(): boolean {
+    return this.res !== null;
+  }
+
+  private pick(r: number): IngId {
+    let x = r * this.mixW;
+    for (let i = 0; i < this.order.length; i++) if ((x -= this.mix[i]) <= 0) return this.order[i];
+    return this.order[0];
+  }
+
+  /** Steps until finished, or until `deadline` (performance.now() ms) passes. True when done. */
+  run(deadline = Infinity): boolean {
+    if (this.res) return true;
+    const { board, ev, n, chute } = this;
+    let k = 0;
+    // Keep ~20 balls in flight so the run is cheap but still uses the real step.
+    while (this.dropped < n || board.balls.length) {
+      if (this.dropped < n && board.balls.length < 20) {
+        const x = chute < 0 ? BALL_R + this.xs() * (BOARD_W - 2 * BALL_R) : chute * COL_W + COL_W / 2 + (this.xs() - 0.5) * 2;
+        board.drop(this.pick(this.xs()), x, chute >= 0);
+        this.dropped++;
+      }
+      board.step(ev);
+      if (++k % 32 === 0 && deadline !== Infinity && performance.now() >= deadline) return false;
+    }
+    const { counts, hits, runes, spill } = this;
+    const landed = counts.reduce((a, b) => a + b, 0);
+    const total = landed + spill || 1;
+    this.res = {
+      dist: counts.map((c) => c / total),
+      goldHits: hits.map((h, i) => (counts[i] ? h / counts[i] : 0)),
+      rune: runes.map((h, i) => (counts[i] ? h / counts[i] : 0)),
+      spill: spill / total,
+      hits: this.pegHits / total,
+      pegs: board.pegs.filter((p) => p.kind === 'iron' || p.kind === 'bone').length,
+    };
+    return true;
+  }
+
+  result(): LandingStats {
+    this.run();
+    return this.res!;
+  }
+}
+
+export function landingStats(cfg: BoardConfig, n = 1500, chute = -1, flowMix?: { ing: IngId; w: number }[]): LandingStats {
+  return new LandingJob(cfg, n, chute, flowMix).result();
 }
 
 export function landingDistribution(rows: number, malice: number, n = 1500): number[] {

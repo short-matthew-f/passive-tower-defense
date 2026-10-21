@@ -28,6 +28,8 @@ export interface DeptSave<Run = any, Persistent = any> {
   pendingTips?: string[];
   /** A high-priority manager line that expired unseen; replaces the next report line (00 §5.4.4). */
   reportCarry?: string;
+  /** Late Recruit (00 §6) ended for good: reached 60% of the average Rank, or a Fall. */
+  lateRecruitDone?: boolean;
   /** Local haul from the last absence not yet "ritualised" (return rituals, 00 §5.3). */
   haul?: number;
 }
@@ -80,6 +82,9 @@ export interface SaveRoot {
     managerClock: { lastLineAt: number; lastAmbientAt: number; lastThroneCameoDay: string };
   };
   depts: Partial<Record<DeptId, DeptSave>>; // absent = locked
+  /** Present-but-idle time (00 §7) already paid live to the on-screen department, in seconds,
+   * while `lastSeen` stays at the start of the idle span; the next offline credit skips it there. */
+  idleLive?: { id: DeptId; seconds: number };
 }
 
 export const SCHEMA = 1;

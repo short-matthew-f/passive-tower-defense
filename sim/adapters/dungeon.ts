@@ -1,7 +1,7 @@
 // Dungeon adapter. The Dungeon ships a deterministic 20 Hz path sim (src/depts/dungeon/sim.ts):
 // the scene runs it live and idleRate runs it headless (Cautious Mode). This adapter runs that same
 // Sim on screen and ports the scene's thin layer around it (scene.ts is tangled with Pixi): coins
-// and the greedy grab (+10%), steals from the bank (2% cap) and recovered sacks (+25%), Glare,
+// and the greedy grab (+10%), steals from the bank (2% cap) and recovered sacks (+25% of the bounty, carved from the kill; D-dungeon-01), Glare,
 // the Trapdoor, the Gong, Champion kills feeding the leak-gated skill gate, Lure management, the
 // blueprint snapshot and the post-Fall starter kit (10% of last cycle's layout value).
 // Placement, upgrade, branch and chest prices are model.ts's; the Workshop and the Rumor Mill go
@@ -420,10 +420,10 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
               env.earn(e.amount * (grab ? 1 + M.GRAB_BONUS : 1));
               if (grab) s.grabs++;
             }
-            if (e.sack > 0) {
+            if (e.sack > 0 || e.recover > 0) {
               r.bank += e.sack;
-              env.earn(e.sack * M.RECOVER_BONUS);
-              s.recovered++;
+              if (e.recover > 0) env.earn(e.recover);
+              if (e.sack > 0) s.recovered++;
             }
             if (e.hero === 'champ') {
               s.champs++;

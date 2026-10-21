@@ -2,7 +2,7 @@
 // balance simulation (sim/) read this; index.ts spreads it into the full DeptDef.
 import type { DeptEcon, StewardCandidate } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
-import { longLocked } from '../../core/longnode';
+import { LONG_MAX, longLocked } from '../../core/longnode';
 import * as M from './model';
 
 const run = (s: DeptSave) => s.run as M.MinesRun;
@@ -44,7 +44,8 @@ function buys(s: DeptSave): Buy[] {
   add('regrow', 'Rock Regrowth', r.regrow < M.REGROW_MAX, M.regrowCost(r.regrow), (x) => x.regrow++, true);
   add('lanterns', 'Lanterns', r.lanterns < M.LANTERNS_MAX && everOf(s) >= M.GAS_DEPTH - 5, M.lanternsCost(r.lanterns), (x) => x.lanterns++, true);
   add('drummers', 'Drummer', p.drum && r.drummers < M.DRUMMERS_MAX, M.drummerCost(r.drummers), (x) => x.drummers++, true);
-  add('seams', 'Richer Seams', !longLocked(s.cycle.n), M.seamsCost(r.seams ?? 0), (x) => (x.seams = (x.seams ?? 0) + 1), true);
+  // D-mines-01: capped at the sheet's LONG_MAX like every other long node.
+  add('seams', 'Richer Seams', !longLocked(s.cycle.n) && (r.seams ?? 0) < LONG_MAX, M.seamsCost(r.seams ?? 0), (x) => (x.seams = Math.min(LONG_MAX, (x.seams ?? 0) + 1)), true);
   add('tap', 'Tap Damage', true, M.tapCost(r.tap), (x) => x.tap++);
   add('critC', 'Crit Chance', r.critC < M.CRIT_C_MAX, M.critCost(r.critC), (x) => x.critC++);
   add('critP', 'Crit Power', r.critP < M.CRIT_P_MAX, M.critPowerCost(r.critP), (x) => x.critP++);

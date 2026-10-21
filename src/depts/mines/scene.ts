@@ -29,6 +29,7 @@ import {
 import { audioNow, sfx } from './sfx';
 import { anyAffordable, buildGroups, maxDepthEver } from './upgrades';
 import { U, Wall, type By, type Tile } from './wall';
+import { destroyTree } from '../../ui/destroy';
 
 const SOFT_CAP = 8;
 const HARD_CAP = 15;
@@ -205,7 +206,7 @@ export class MinesScene implements DeptScene {
       steady: () => this.opt('steady'),
       raiseSkill: (l) => ctx.raiseSkill(l),
       rnd: rand,
-      forceKind: () => this.forceKind(),
+      forceKind: (_t, tiles) => this.forceKind(tiles),
       onHit: (t, d, by) => this.onHit(t, d, by),
       onBreak: (t, kind, by, got, gems) => this.onBreak(t, kind, by, got, gems),
       onShell: (t, got) => this.onShell(t, got),
@@ -307,7 +308,7 @@ export class MinesScene implements DeptScene {
     const right = c.x + c.w - 4;
     this.btnCache.clear();
     this.ui.removeChildren().forEach((ch) => {
-      if (ch !== this.uiG && ch !== this.status && ch !== this.statusR && ch !== this.depthText && ch !== this.hintText && ch !== this.badge) ch.destroy({ children: true });
+      if (ch !== this.uiG && ch !== this.status && ch !== this.statusR && ch !== this.depthText && ch !== this.hintText && ch !== this.badge) destroyTree(ch);
     });
     this.ui.addChild(this.uiG, this.status, this.statusR, this.depthText, this.hintText);
     this.status.position.set(x0, this.statusY);
@@ -326,7 +327,9 @@ export class MinesScene implements DeptScene {
     this.upBtn = mk({ w: 15, h: 15, label: '{uarr}', ...dark, onTap: () => this.setDepth(this.run.depth + 1) }, x0 + 67, depthY);
     this.hintText.position.set(x0 + 86, depthY + 5);
     const digW = 50;
-    this.digBtn = mk({ w: digW, h: 15, label: 'DIG', color: C.gold, shade: 0x9a7a20, onTap: () => this.buyDig() }, right - digW, depthY);
+    // U-11: 19 px tall (rising 4 px into the gap under the status line) so its two-line label
+    // clears the button's top highlight.
+    this.digBtn = mk({ w: digW, h: 19, label: 'DIG', color: C.gold, shade: 0x9a7a20, onTap: () => this.buyDig() }, right - digW, depthY - 4);
 
     const total = right - x0;
     const drumW = this.per.drum ? 36 : 0;
@@ -520,9 +523,11 @@ export class MinesScene implements DeptScene {
     return this.ctx.game.save.meta.settings.sfx ?? 0.6;
   }
 
-  private forceKind(): M.RockKind | null {
+  private forceKind(tiles: readonly Tile[]): M.RockKind | null {
     // Onboarding beat 4: once a goblin is hired, make sure a vein shows up to teach "shiny first".
-    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !(this.wall?.tiles ?? []).some((o) => o.kind === 'vein' || o.next === 'vein')) return 'vein';
+    // P-02: the Wall calls this from its own constructor (before this.wall is set), so it passes
+    // its tiles in.
+    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !tiles.some((o) => o.kind === 'vein' || o.next === 'vein')) return 'vein';
     return null;
   }
 
@@ -1334,7 +1339,7 @@ export class MinesScene implements DeptScene {
     // Beat lamp: a small square left of the DIG button (gold on the beat).
     if (this.drumActive()) {
       const lx = this.digBtn.x - 8;
-      const ly = this.digBtn.y + 5;
+      const ly = this.digBtn.y + 9;
       g.rect(lx, ly, 5, 5).fill(OUTLINE);
       g.rect(lx + 1, ly + 1, 3, 3).fill(this.beatPulse > 0 ? 0xffe060 : 0x5a3a20);
     }
@@ -1639,6 +1644,6 @@ export class MinesScene implements DeptScene {
     if (this.ritual) this.endRitual(0);
     this.calib = null;
     this.hit.removeAllListeners();
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }

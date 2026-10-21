@@ -108,6 +108,8 @@ export class ManagerDirector extends Container {
   private textSprite = new PixelText('', '#2a1a3a', null);
   private chips: { root: Container; bg: Graphics; text: PixelText; kind: Showing['chips'][number] | null }[] = [];
   private bubbleRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Collapsed chips sit under the portrait instead of beside it (the highlight is there, U-10). */
+  private chipsBelow = false;
   /** Guidance overlays (never interactive); the Game stacks this above the modal layer. */
   readonly guide = new Container();
   private hl = new Graphics();
@@ -689,8 +691,10 @@ export class ManagerDirector extends Container {
     const chipsW = chipW.reduce((a, b) => a + b + 2, 0);
     let bw: number;
     let bh: number;
-    if (s.collapsed || s.peek) {
-      bw = PW + 6 + (chipsW ? chipsW + 2 : 0);
+    const small = s.collapsed || s.peek;
+    if (small) {
+      // Collapsed: the portrait's own small panel; chips sit beside it, not in an empty box (U-10).
+      bw = PW + 6;
       bh = PW + 6;
       this.textSprite.visible = false;
     } else {
@@ -703,6 +707,18 @@ export class ManagerDirector extends Container {
       this.textSprite.set(full, '#2a1a3a');
       this.textSprite.position.set(PW + 8, 4);
       this.textSprite.visible = true;
+      // U-09: a full strip over the scene's key controls (DeptScene.avoidRects) folds away: a beat
+      // with a target keeps its caption beside the highlight, anything else peeks with a dodging
+      // caption beside the portrait.
+      const strip: Rect = { x: L.safe.l + 2, y: L.safe.t + HUD_H + 2, w: bw, h: bh };
+      this.avoidAcc = AVOID_CHECK_S;
+      this.refreshAvoid(0);
+      if (s.text && this.avoidCache.some((r) => overlaps(strip, r))) {
+        if (s.pinned && s.target) s.collapsed = true;
+        else s.peek = true;
+        this.layoutBubble();
+        return;
+      }
     }
     const g = this.bg.clear();
     drawPanel(g, 0, 0, bw, bh, 0xf4e8c1, C.outline);
@@ -714,9 +730,10 @@ export class ManagerDirector extends Container {
     this.anchorY = this.readAnchor();
     const by = this.anchorY !== null && !s.pinned ? Math.max(top, Math.min(L.h - L.safe.b - bh - 2, this.anchorY - bh)) : top;
     this.bubble.position.set(bx, by);
-    this.bubbleRect = { x: bx, y: by, w: bw, h: bh };
-    // Chips at the bottom-right corner.
+    this.bubbleRect = { x: bx, y: by, w: small && chipsW && !this.chipsBelow ? bw + 2 + chipsW : bw, h: bh };
+    // Chips: at the bottom-right corner of the full strip; to the right of a collapsed portrait.
     let cx = bw - 2;
+    let lx = bw + 2;
     this.chips.forEach((c, i) => {
       const label = chipLabels[i];
       c.kind = s.chips[i] ?? null;
@@ -724,13 +741,22 @@ export class ManagerDirector extends Container {
       if (!label) return;
       c.text.set(label);
       const cw = chipW[i];
-      cx -= cw;
-      c.bg.clear().rect(0, 0, cw, 10).fill(c.kind === 'show' || c.kind === 'offer' ? C.greenDark : C.edge);
-      c.text.position.set(3, 2);
-      c.root.position.set(cx, bh - 12);
+      const fill = c.kind === 'show' || c.kind === 'offer' ? C.greenDark : C.edge;
+      if (small) {
+        c.bg.clear().rect(0, 0, cw, 11).fill(C.outline).rect(1, 1, cw - 2, 9).fill(fill);
+        c.text.position.set(3, 3);
+        if (this.chipsBelow) c.root.position.set(lx - bw - 2, bh + 2);
+        else c.root.position.set(lx, Math.floor((bh - 11) / 2));
+        lx += cw + 2;
+      } else {
+        cx -= cw;
+        c.bg.clear().rect(0, 0, cw, 10).fill(fill);
+        c.text.position.set(3, 2);
+        c.root.position.set(cx, bh - 12);
+        cx -= 2;
+      }
       // Touch target >= 12 logical px around the small chip.
       c.root.hitArea = new Rectangle(-2, -4, cw + 4, 16);
-      cx -= 2;
     });
     this.bubble.visible = true;
     this.drawPortrait();
@@ -775,6 +801,13 @@ export class ManagerDirector extends Container {
     }
   }
 
+  /** The right edge of the chips row beside a collapsed portrait. */
+  private chipsRight(): number {
+    let right = this.bubbleRect.x + PW + 6;
+    for (const c of this.chips) if (c.root.visible) right += c.bg.width + 2;
+    return right;
+  }
+
   private draw(now: number): void {
     const s = this.showing;
     if (s) {
@@ -806,6 +839,16 @@ export class ManagerDirector extends Container {
       r = this.resolve(s.target);
     }
     if (!r) return;
+    // U-10: never outline through the collapsed bubble's chips (SKIP): move them under the portrait.
+    if ((s.collapsed || s.peek) && s.chips.length && this.bubble.visible) {
+      const b = this.bubbleRect;
+      const beside: Rect = { x: b.x + PW + 6, y: b.y, w: Math.max(0, this.chipsRight() - (b.x + PW + 6)), h: b.h };
+      const want = overlaps(beside, { x: r.x - 2, y: r.y - 2, w: r.w + 4, h: r.h + 4 });
+      if (want !== this.chipsBelow) {
+        this.chipsBelow = want;
+        this.layoutBubble();
+      }
+    }
     // Pulsing 1 px outline (pixel-art pulse: two colours alternating, plus a corner blink).
     const on = Math.floor(this.t * 3) % 2 === 0;
     const col = on ? C.gold : 0xf4e8c1;

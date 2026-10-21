@@ -51,7 +51,11 @@ const SETTLED_V = 10;
 const VENT_REFUND = 0.25;
 /** A full-flask vent ejects at least this many orbs. */
 const MIN_VENTED = 10;
-const V_IDLE_HOLD_MS = 10 * 60_000;
+/** D-spire-01 (04 §4): idle uses the lowest Volatility set in the last 10 min of *active play*
+ * (seconds with a drop or a touch in the last V_ACTIVE_S), kept as a log of [setting, seconds]
+ * runs in `run.vAct`. Wall-clock time away from the Spire no longer counts. */
+export const V_IDLE_HOLD_S = 10 * 60;
+const V_ACTIVE_S = 5;
 
 export interface CoreHooks {
   earn(base: number): number;
@@ -113,6 +117,8 @@ export class SpireCore {
   /** No Hex Stones are drawn (the onboarding's first drops, the Last Stand). */
   noHex = false;
   private acc = 0;
+  /** Game seconds since the last drop or touch (D-spire-01 active-play clock). */
+  private sinceActive = 99;
   private falling: Orb | null = null;
   private ticks = 0;
 
@@ -282,8 +288,40 @@ export class SpireCore {
     run.stats.dropsSinceVent++;
     run.volLog.push(run.vol);
     if (run.volLog.length > 60) run.volLog.splice(0, run.volLog.length - 60);
+    this.sinceActive = 0;
     this.hooks.drop?.(o);
     return o;
+  }
+
+  /** A touch on the Spire (D-spire-01): counts as active play for the Volatility hold. */
+  noteInput(): void {
+    this.sinceActive = 0;
+  }
+
+  /** Credits `dt` seconds of active play at the live setting to the Volatility log, then sets
+   * vIdle to the lowest setting of the last V_IDLE_HOLD_S active seconds (until a full window is
+   * logged, vIdle can only fall). The scene's frames do it through update(); the balance sim's
+   * table mode calls it directly. */
+  creditHold(dt: number): void {
+    const run = this.run;
+    if (!(dt > 0)) return;
+    const log = (run.vAct ??= []);
+    const last = log[log.length - 1];
+    if (last && last[0] === run.vol) last[1] += dt;
+    else log.push([run.vol, dt]);
+    let total = 0;
+    for (const seg of log) total += seg[1];
+    while (log.length > 1 && total - log[0][1] >= V_IDLE_HOLD_S) total -= log.shift()![1];
+    if (total > V_IDLE_HOLD_S && log.length) {
+      const trim = Math.min(log[0][1], total - V_IDLE_HOLD_S);
+      log[0][1] -= trim;
+      total -= trim;
+    }
+    if (total >= V_IDLE_HOLD_S - 1e-6) {
+      let lo = Infinity;
+      for (const seg of log) if (seg[1] > 0) lo = Math.min(lo, seg[0]);
+      if (Number.isFinite(lo)) run.vIdle = Math.min(lo, run.vol);
+    }
   }
 
   /** The setting the knob points at (a pending lower setting, else the live one). */
@@ -338,9 +376,10 @@ export class SpireCore {
     if (this.acc > STEP) this.acc = 0; // fell behind: drop the backlog rather than spiral
     const run = this.run;
     if (run.volPending >= 0 && now - run.volPendAt >= VOL_LOWER_MS) this.applyPendingVol();
-    // Idle uses the lowest Volatility of the last 10 min.
+    // Idle uses the lowest Volatility of the last 10 min of active play (D-spire-01).
+    this.sinceActive += dt;
+    if (this.sinceActive <= V_ACTIVE_S) this.creditHold(dt);
     if (run.vol < run.vIdle) run.vIdle = run.vol;
-    else if (run.vol > run.vIdle && now - run.volSetAt >= V_IDLE_HOLD_MS) run.vIdle = run.vol;
   }
 
   private tick(): void {

@@ -34,6 +34,7 @@ import { PixelText, wrap } from '../ui/font';
 import { Button, C, drawBar, drawPanel, drawSprite } from '../ui/widgets';
 import { openSettings } from './settings';
 import { openArmory } from '../ui/goods';
+import { destroyTree } from '../ui/destroy';
 
 export const NAMES: Record<DeptId, string> = {
   cauldron: 'CAULDRON',
@@ -295,6 +296,14 @@ export class ThroneScene {
       max: u.max,
       cost,
       currency: 'Tribute',
+      // Exact X10 / MAX prices against the Tribute purse (U-06).
+      costFor: (n: number) => {
+        const l = s.meta.throne[u.id] ?? 0;
+        let c = 0;
+        for (let k = 0; k < n; k++) c += Math.ceil(u.cost(l + k));
+        return c;
+      },
+      wallet: () => s.meta.tribute,
       maxLabel: u.max === 1 ? 'OWNED' : undefined,
       canAfford: () => s.meta.tribute >= cost(),
       buy: () => {
@@ -306,7 +315,7 @@ export class ThroneScene {
     };
   }
 
-  private openThrone(): void {
+  openThrone(): void {
     const g = this.game;
     const s = g.save;
     const unlocked = g.built.filter((id) => s.depts[id]);
@@ -330,7 +339,10 @@ export class ThroneScene {
       { name: 'Steward', entries: this.stewardEntries(unlocked), bank: () => this.stewardBank() },
       { name: 'Looks', entries: COSMETICS.map((u) => this.tributeEntry(u, () => this.drawDecor())) },
     ];
-    g.openCustomSheet('THRONE UPGRADES', () => ({ text: `${formatNum(s.meta.tribute, s.meta.settings.notation)} TRIBUTE`, color: C.goldText }), groups);
+    // On a resize the Throne Room is rebuilt: re-open from the new scene (these closures hold this one).
+    g.openCustomSheet('THRONE UPGRADES', () => ({ text: `${formatNum(s.meta.tribute, s.meta.settings.notation)} TRIBUTE`, color: C.goldText }), groups, undefined, () =>
+      g.throne?.openThrone(),
+    );
   }
 
   private edictBank(): { text: string; color: string } {
@@ -456,7 +468,7 @@ export class ThroneScene {
 
   // ---------- the Dread Altar ----------
 
-  private openAltar(): void {
+  openAltar(): void {
     const g = this.game;
     const s = g.save;
     const entry = (
@@ -477,6 +489,14 @@ export class ThroneScene {
         max,
         cost: price,
         currency: 'Dread',
+        // Exact X10 / MAX prices against the Dread purse (U-06).
+        costFor: (n: number) => {
+          const l = s.meta.dreadPerks[id] ?? 0;
+          let c = 0;
+          for (let k = 0; k < n; k++) c += Math.ceil(cost(l + k));
+          return c;
+        },
+        wallet: () => s.meta.dread,
         canAfford: () => s.meta.dread >= price(),
         buy: () => {
           if (g.spendDread(price())) {
@@ -517,10 +537,16 @@ export class ThroneScene {
         }),
       );
     }
-    g.openCustomSheet('DREAD ALTAR', () => ({ text: `${formatNum(s.meta.dread)} DREAD`, color: '#c070e0' }), [
+    g.openCustomSheet(
+      'DREAD ALTAR',
+      () => ({ text: `${formatNum(s.meta.dread)} DREAD`, color: '#c070e0' }),
+      [
       { name: 'Empire', entries: empire },
       { name: 'Wings', entries: wings },
-    ]);
+      ],
+      undefined,
+      () => g.throne?.openAltar(),
+    );
     if (s.meta.dreadLifetime === 0) g.toast("DREAD COMES FROM FALLS. FILL A DEPARTMENT'S INFAMY, THEN LET ITS LEGEND IN.");
   }
 
@@ -533,7 +559,7 @@ export class ThroneScene {
     const root = new Container();
     const dim = new Graphics().rect(0, 0, L.w, L.h).fill({ color: 0x0a0410, alpha: 0.7 });
     dim.eventMode = 'static';
-    dim.on('pointertap', () => root.destroy({ children: true }));
+    dim.on('pointertap', () => destroyTree(root));
     root.addChild(dim);
     const w = L.w - L.safe.l - L.safe.r - 8;
     const rows = g.built;
@@ -563,7 +589,7 @@ export class ThroneScene {
       );
     setSub();
     root.addChild(title, sub);
-    const close = new Button({ w: 16, h: 14, label: 'X', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => root.destroy({ children: true }) });
+    const close = new Button({ w: 16, h: 14, label: 'X', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => destroyTree(root) });
     close.position.set(x + w - 20, y + 4);
     root.addChild(close);
 
@@ -601,15 +627,16 @@ export class ThroneScene {
           if (g.spendTribute(cost)) {
             s.meta.throne[TROPHY_HALL_ID] = 1;
             g.toast('THE TROPHY HALL OPENS. VISITORS GASP. TRIBUTE FLOWS.');
-            root.destroy({ children: true });
+            destroyTree(root);
             this.openTrophies();
           } else g.toast(`THE TROPHY HALL COSTS ${formatNum(cost)} TRIBUTE.`);
         },
       });
-      btn.setLabel(`BUILD HALL {coin}${formatNum(hall.cost(0))}`);
+      btn.setLabel(`BUILD HALL {tribute}${formatNum(hall.cost(0))}`);
       btn.position.set(x + 8, y + h - 22);
       root.addChild(btn);
     }
+    g.trackModal(root, { reopen: () => g.throne?.openTrophies() });
     g.modalLayer.addChild(root);
   }
 
@@ -621,7 +648,7 @@ export class ThroneScene {
     const s = g.save;
     const L = g.layout;
     const n = s.meta.settings.notation;
-    this.tribute.set(`{coin}${formatNum(s.meta.tribute, n)} TRIBUTE`);
+    this.tribute.set(`{tribute}${formatNum(s.meta.tribute, n)} TRIBUTE`);
     let rate = 0;
     for (const id of g.built) rate += tributeRate(s, id, g.defs, false);
     this.tributeRate.set(`+${formatNum(rate * 60, n)}/MIN`);
@@ -700,7 +727,7 @@ export class ThroneScene {
       const dread = g.sealDread(door.id);
       if (s.meta.dreadLifetime < dread) status = `${dread} DREAD`;
       else {
-        status = `{coin}${formatNum(g.sealCost(door.id))}`;
+        status = `{tribute}${formatNum(g.sealCost(door.id))}`;
         statusColor = s.meta.tribute >= g.sealCost(door.id) ? C.greenText : C.goldText;
       }
     } else {
@@ -735,7 +762,7 @@ export class ThroneScene {
   }
 
   destroy(): void {
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }
 

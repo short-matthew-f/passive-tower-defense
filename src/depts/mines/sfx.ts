@@ -2,32 +2,20 @@
 // keg blasts, lightning, gems and the Doom Drum's boom (the metronome, scheduled ahead on the
 // audio clock so it lands on the beat). One shared AudioContext, created on the first sound
 // (after a user gesture). Every node is short-lived and stops itself, so nothing accumulates.
-let ac: AudioContext | null = null;
-let failed = false;
+import { getAudioContext } from '../../core/audio';
 let noiseBuf: AudioBuffer | null = null;
 
+/** The suite's one shared AudioContext (perf P-06: core/audio.ts). */
+let started = false;
 export function audio(): AudioContext | null {
-  if (failed) return null;
-  try {
-    if (!ac) {
-      const AC = (window as any).AudioContext ?? (window as any).webkitAudioContext;
-      if (!AC) {
-        failed = true;
-        return null;
-      }
-      ac = new AC() as AudioContext;
-    }
-    if (ac.state === 'suspended') void ac.resume();
-    return ac;
-  } catch {
-    failed = true;
-    return null;
-  }
+  started = true;
+  return getAudioContext();
 }
 
 /** The audio clock if a context is running, else null (no sound yet: no user gesture). */
 export function audioNow(): number | null {
-  return ac && ac.state === 'running' ? ac.currentTime : null;
+  const a = started ? getAudioContext() : null;
+  return a && a.state === 'running' ? a.currentTime : null;
 }
 
 function tone(freq: number, dur: number, vol: number, type: OscillatorType, at = 0, slide = 0): void {

@@ -177,8 +177,15 @@ export function openSettings(game: Game): void {
       game.replaceSave(loaded);
       el.remove();
     } else if (a === 'wipe') {
+      // A read-only tab does not own the save: the writer tab would write it straight back (C-02).
+      if (game.readOnly) {
+        alert('Overlord is open in another tab. Erase from that tab.');
+        return;
+      }
       if (!confirm('Erase all progress? This cannot be undone.')) return;
       game.readOnly = true;
+      // wipeSave closes the save module's write gate first: no autosave, hide or unload write in
+      // this page can bring the empire back.
       await wipeSave();
       location.reload();
     }

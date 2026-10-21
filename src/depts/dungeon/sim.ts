@@ -134,7 +134,7 @@ export interface SimRune {
 
 export type SimEvent =
   | { t: 'shot'; kind: 'arrow' | 'ballista' | 'clerk'; x1: number; y1: number; x2: number; y2: number; miss: boolean }
-  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; by: 'glare' | 'other'; greed: boolean }
+  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; recover: number; by: 'glare' | 'other'; greed: boolean }
   | { t: 'leak'; x: number; y: number; hero: M.HeroType; sack: number }
   | { t: 'escape'; hero: M.HeroType; sack: number }
   | { t: 'rune'; x: number; y: number; kind: M.RuneKind }
@@ -953,15 +953,21 @@ export class Sim {
     const bonus = p?.bonus ?? 0;
     const purse = p?.looted && this.caged > 1 ? 1 + 0.1 * (this.caged - 1) : 1;
     const greed = this.hasGreed && !(h.leaked && h.type === 'champ') ? this.greedAt(h.x, h.y) : 0;
-    const amount = h.leaked && h.type === 'champ' ? 0 : h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse * (1 + greed);
+    const full = h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse * (1 + greed);
+    // D-dungeon-01: a thief caught on the way out pays the sack back plus a recovery bonus on its
+    // *bounty* (RECOVER_BONUS of the kill), carved out of that kill's pay (a Champion that reached
+    // the Hoard pays only the bonus). Letting a hero in and killing it later never beats killing it
+    // before the Hoard.
+    const amount = h.leaked ? (h.type === 'champ' ? 0 : full * (1 - M.RECOVER_BONUS)) : full;
+    const recover = h.leaked ? full * M.RECOVER_BONUS : 0;
     this.earned += amount;
     let net = amount;
-    if (h.sack > 0) {
-      this.stolen -= h.sack * (1 + M.RECOVER_BONUS);
-      net += h.sack * (1 + M.RECOVER_BONUS);
+    if (h.sack > 0 || recover > 0) {
+      this.stolen -= h.sack + recover;
+      net += h.sack + recover;
     }
     if (!this.live) this.partyNet.set(h.party, (this.partyNet.get(h.party) ?? 0) + net);
-    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, by: glare ? 'glare' : 'other', greed: greed > 0 });
+    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, recover, by: glare ? 'glare' : 'other', greed: greed > 0 });
     this.resolve(h);
   }
 
@@ -1061,8 +1067,10 @@ export function layoutHash(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g:
 }
 
 /** Plunder/s (net of steals) and leak fraction for one tier, averaged over seeds. Each seed runs
- * until parties WARM..WARM+IDLE_PARTIES-1 are resolved and divides their net haul by their spacing. */
-export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): { pps: number; leak: number } {
+ * until parties WARM..WARM+IDLE_PARTIES-1 are resolved and divides their net haul by their spacing.
+ * A generator (P-03 / D-dungeon-02): it yields every few hundred steps so the browser can spread a
+ * cold run over several frames; `simTier` runs it to the end. */
+function* simTierGen(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports, g: Grid): Generator<void, { pps: number; leak: number }> {
   let pps = 0;
   let leak = 0;
   for (let k = 0; k < IDLE_SEEDS; k++) {
@@ -1080,6 +1088,7 @@ export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonIm
         for (let n = first; n <= last && done; n++) if (!sim.resolvedParties.has(n)) done = false;
         if (done) break;
       }
+      if ((i & 63) === 63) yield;
     }
     let net = 0;
     let size = 0;
@@ -1098,6 +1107,17 @@ export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonIm
   return { pps: Math.max(0, pps / IDLE_SEEDS), leak: leak / IDLE_SEEDS };
 }
 
+function finish<T>(gen: Generator<void, T>): T {
+  for (;;) {
+    const n = gen.next();
+    if (n.done) return n.value;
+  }
+}
+
+export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): { pps: number; leak: number } {
+  return finish(simTierGen(r, T, hash, imp, g));
+}
+
 export interface IdleResult {
   pps: number;
   /** Leak fraction at the tier Cautious Mode picked. */
@@ -1107,19 +1127,22 @@ export interface IdleResult {
 }
 
 /** Cautious Mode (01 §3.3): the best tier among T..T-3 that holds the line (< 20% leaks). */
-export function cautious(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): IdleResult {
-  const hash = layoutHash(r, imp, g);
-  const top = simTier(r, r.lure, hash, imp, g);
+function* cautiousGen(r: M.DungeonRun, imp: DungeonImports, g: Grid, hash = layoutHash(r, imp, g)): Generator<void, IdleResult> {
+  const top = yield* simTierGen(r, r.lure, hash, imp, g);
   if (top.leak < 0.2 || r.lure === 0) return { pps: top.pps, leak: top.leak, tier: r.lure };
   let best: IdleResult | null = null;
   let last = top;
   let lastT = r.lure;
   for (let k = 1; k <= 3 && r.lure - k >= 0; k++) {
-    last = simTier(r, r.lure - k, hash, imp, g);
+    last = yield* simTierGen(r, r.lure - k, hash, imp, g);
     lastT = r.lure - k;
     if (last.leak < 0.2 && (!best || last.pps > best.pps)) best = { pps: last.pps, leak: last.leak, tier: lastT };
   }
   return best ?? { pps: last.pps, leak: last.leak, tier: lastT };
+}
+
+export function cautious(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): IdleResult {
+  return finish(cautiousGen(r, imp, g));
 }
 
 export function cautiousRate(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): number {
@@ -1134,17 +1157,90 @@ let lastImp = '';
 let lastGrid = '';
 let lastVal: IdleResult = { pps: 0, leak: 0, tier: 0 };
 
+/*
+ * P-03 / D-dungeon-02: a memo miss is 300 game-seconds x 3 seeds x up to 4 Lure tiers of sim
+ * (20-90 ms on a desktop, more on a phone). In the browser it is queued and run in <= 6 ms slices
+ * between frames; meanwhile idleOf answers with the last known result for this run (also kept in
+ * the save as `run.idleMemo`, so a reload has it at once). Headless callers (tests, the balance
+ * sim) compute synchronously and stay deterministic.
+ */
+/** Bump when the idle sim's rules change, so a saved `idleMemo` from an older build is ignored. */
+const IDLE_MEMO_V = 1;
+let idleAsync = typeof window !== 'undefined' && typeof document !== 'undefined';
+const IDLE_SLICE_MS = 6;
+const idleQueue = new Map<string, Generator<void, IdleResult>>();
+let idlePump = false;
+
+/** Headless switch (tests): true = queue memo misses, false = compute at once. */
+export function setIdleAsync(on: boolean): void {
+  idleAsync = on;
+}
+export const idlePending = () => idleQueue.size;
+
+/** Steps queued idle sims for up to `budgetMs`. Returns true when the queue is empty. */
+export function pumpIdle(budgetMs = IDLE_SLICE_MS): boolean {
+  const deadline = performance.now() + budgetMs;
+  for (const [key, gen] of idleQueue) {
+    for (;;) {
+      const n = gen.next();
+      if (n.done) {
+        if (memo.size > 96) memo.clear();
+        memo.set(key, n.value);
+        idleQueue.delete(key);
+        lastRun = null; // the next idleOf call re-reads the memo
+        break;
+      }
+      if (performance.now() >= deadline) return false;
+    }
+  }
+  return idleQueue.size === 0;
+}
+
+function scheduleIdle(): void {
+  if (idlePump) return;
+  idlePump = true;
+  setTimeout(() => {
+    idlePump = false;
+    try {
+      if (!pumpIdle()) scheduleIdle();
+    } catch (err) {
+      console.error(err);
+      idleQueue.clear();
+    }
+  }, 0);
+}
+
+/** A frozen copy of what the idle sim reads, so later edits can't change a queued run. */
+function snapshot(r: M.DungeonRun): M.DungeonRun {
+  return { ...r, pieces: structuredClone(r.pieces), bait: structuredClone(r.bait), ws: { ...r.ws } };
+}
+
 /** Cautious Mode result for the run's layout (memoized by layout hash; the frame call is a lookup). */
 export function idleOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): IdleResult {
   const ik = `${imp.ap},${imp.caged}`;
   if (r === lastRun && r.rev === lastRev && ik === lastImp && g.key === lastGrid) return lastVal;
   const key = layoutHash(r, imp, g);
+  const saved = `${IDLE_MEMO_V}:${key}`;
   let v = memo.get(key);
+  if (v === undefined && r.idleMemo?.key === saved) {
+    v = { pps: r.idleMemo.pps, leak: r.idleMemo.leak, tier: r.idleMemo.tier };
+    memo.set(key, v);
+  }
   if (v === undefined) {
+    if (idleAsync && (r.idleMemo || r === lastRun)) {
+      if (!idleQueue.has(key)) {
+        idleQueue.set(key, cautiousGen(snapshot(r), imp, g, key));
+        scheduleIdle();
+      }
+      // Provisional: the last known result (not cached as this layout's; the real one lands soon).
+      const m = r.idleMemo;
+      return r === lastRun ? lastVal : { pps: m!.pps, leak: m!.leak, tier: m!.tier };
+    }
     v = cautious(r, imp, g);
     if (memo.size > 96) memo.clear();
     memo.set(key, v);
   }
+  if (r.idleMemo?.key !== saved) r.idleMemo = { key: saved, pps: v.pps, leak: v.leak, tier: v.tier };
   lastRun = r;
   lastRev = r.rev;
   lastImp = ik;

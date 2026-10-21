@@ -4,9 +4,13 @@ import { Game } from './core/game';
 import { computeLayout } from './core/layout';
 import { initPwa } from './pwa';
 import { DEPARTMENTS } from './depts';
+import { exportSave, loadSave } from './core/save';
 
 // Pixel art: nearest-neighbor everywhere, no smoothing.
 TextureSource.defaultOptions.scaleMode = 'nearest';
+
+/** The running game, once constructed: the fatal overlay exports its save (C-04). */
+let gameRef: Game | null = null;
 
 async function boot(): Promise<void> {
   const layout = computeLayout();
@@ -24,6 +28,7 @@ async function boot(): Promise<void> {
   document.getElementById('app')!.appendChild(app.canvas);
 
   const game = new Game(app, layout);
+  gameRef = game;
   for (const def of DEPARTMENTS) game.register(def);
   // Size the canvas before the first scene is built.
   game.layout = layout;
@@ -78,6 +83,27 @@ async function boot(): Promise<void> {
   };
   window.addEventListener('error', (e) => onError(e.error ?? e.message));
   window.addEventListener('unhandledrejection', (e) => onError(e.reason));
+
+  // A single throw inside a ticker callback stops Pixi's loop for good (no further frame is
+  // requested), so the burst rule above never fires. Watch for frames instead: visible for 3 s
+  // with no frame means the loop is dead; save and show the overlay (C-04).
+  let lastFrame = performance.now();
+  let visibleSince = performance.now();
+  let lastErr: unknown = null;
+  window.addEventListener('error', (e) => (lastErr = e.error ?? e.message));
+  app.ticker.add(() => (lastFrame = performance.now()), undefined, -1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') visibleSince = lastFrame = performance.now();
+  });
+  window.setInterval(() => {
+    const now = performance.now();
+    if (document.visibilityState !== 'visible' || now - visibleSince < 3000) return;
+    if (now - lastFrame > 3000 && app.ticker.started) {
+      app.ticker.stop();
+      game.persistSync();
+      showFatal(lastErr ?? new Error('The game loop stopped.'));
+    }
+  }, 1000);
 }
 
 function showFatal(err: any): void {
@@ -86,7 +112,25 @@ function showFatal(err: any): void {
   const el = document.createElement('div');
   el.className = 'overlay fatal';
   const msg = String(err?.message ?? err).replace(/[<>&]/g, '');
-  el.innerHTML = `<div class="box"><h2>THE MINIONS DROPPED SOMETHING</h2><p>Your empire is saved.</p><p style="font-size:11px;opacity:.6">${msg}</p><button onclick="location.reload()">Reload</button></div>`;
+  el.innerHTML = `<div class="box"><h2>THE MINIONS DROPPED SOMETHING</h2><p>Your empire is saved.</p><p style="font-size:11px;opacity:.6">${msg}</p><button data-a="reload">Reload</button> <button data-a="export" class="secondary">Export save</button><textarea readonly style="display:none;width:100%;height:80px;margin-top:8px;font-size:10px"></textarea></div>`;
+  el.querySelector('[data-a="reload"]')!.addEventListener('click', () => location.reload());
+  // Export works without the canvas, so a save that breaks boot can still be backed up.
+  el.querySelector('[data-a="export"]')!.addEventListener('click', async () => {
+    const io = el.querySelector('textarea')!;
+    io.style.display = 'block';
+    try {
+      const save = gameRef?.save ?? (await loadSave());
+      io.value = save ? exportSave(save) : 'No save found.';
+    } catch (e) {
+      io.value = `Could not export: ${String((e as Error)?.message ?? e)}`;
+    }
+    io.select();
+    try {
+      await navigator.clipboard.writeText(io.value);
+    } catch {
+      /* clipboard may be blocked; the text is selected for manual copy */
+    }
+  });
   document.body.appendChild(el);
 }
 

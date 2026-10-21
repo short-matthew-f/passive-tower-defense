@@ -124,6 +124,8 @@ export interface SpireRun {
   volBought: number; // levels bought this cycle
   vIdle: number; // lowest Volatility set in the last 10 min of active play (idle uses it)
   volSetAt: number; // Date.now() of the last raise
+  /** D-spire-01: [setting, active seconds] runs covering the last 10 min of active play. */
+  vAct?: [number, number][];
   minSinceVent: number; // lowest Volatility since the last vent (Feat rule)
   volLog: number[]; // Volatility at each of the last 60 drops (Feat rule)
   ceiling: number; // Distill Ceiling: highest tier created by a merge this cycle
@@ -207,6 +209,7 @@ export function normalize(run: SpireRun, per: SpirePersistent): void {
   if (!run.queue || run.queue.length < 3) run.queue = d.queue.slice();
   run.vol = Math.max(0, Math.min(run.vol ?? 0, run.volBought ?? 0));
   run.vIdle = Math.min(run.vIdle ?? 0, run.vol);
+  if (!Array.isArray(run.vAct)) run.vAct = [];
   run.minSinceVent ??= 0;
   run.ceiling ??= 0;
   run.featBest ??= 0;

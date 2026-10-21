@@ -50,7 +50,9 @@ export const cauldronEcon: DeptEcon = {
   idleRate(save) {
     const r = save.run as CRun;
     if (!r || !r.lv) return 0;
-    return idleRateOf(r, exotic(save));
+    // Partial / odd saves: read the dial clamped to what was bought (no write to the save).
+    const m = Math.max(0, Math.min(MALICE_MAX, r.maliceBought ?? 0, Number.isFinite(r.malice) ? r.malice : 0));
+    return idleRateOf(m === r.malice ? r : { ...r, malice: m }, exotic(save));
   },
   // Potions (00 §4, 05 §16): 1 per Batch (active) and 1 per 3,000 toadling drops (passive).
   goods: {
@@ -75,7 +77,11 @@ export const cauldronEcon: DeptEcon = {
   //    of the 90 minutes, and 6e9 slipped the Fall to day 2 08:00 at ~5.7 h AE (the night adds
   //    ~2 h AE of offline income at the ~4x active:offline ratio), outside the hard band.
   //  - rankRef: idleRate after ~10 min on screen; rankTarget: idleRate at the first 100% Infamy.
-  econBase: 2.4e9,
+  //  - econBase 2.4e9 -> 3.6e9 (with econ.ts MALICE_LATE 2 -> 2.5): idleRate now counts the
+  //    toadling rain's specials (D-cauldron-03, ~+5-8% late), which ran the mid-game cycles faster
+  //    and put the day-7 Dread share over 35%. The first Fall still lands in the day-1 evening
+  //    session (~3.5-3.8 h AE); 5e9+ slips it to day 2 08:00 (~6 h AE, out of the hard band).
+  econBase: 3.6e9,
   rankRef: 8000,
   rankTarget: 350_000,
   commendations,

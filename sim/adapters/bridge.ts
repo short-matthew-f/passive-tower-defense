@@ -228,7 +228,6 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     let cur: Gate | null = null;
     let arriveT = 0;
     let napT = 0;
-    let showdownQueued = false;
     let clock = 0;
     let wordT = 0;
     let songT = 0;
@@ -256,8 +255,8 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       if (step === 'toll' && r.stats.travelers === 0) t = gen('merchant');
       else if (step === 'unmask') t = gen('heroLesson');
       else if (step === 'search') t = gen('smugglerLesson');
-      else if (showdownQueued && rnd() < 0.4) {
-        showdownQueued = false;
+      else if (r.showdown && rnd() < 0.4) {
+        r.showdown = false; // saved in the run (D-bridge-01), as the scene does
         t = gen('showdown');
       } else t = bench.shift();
       if (!t) return;
@@ -277,8 +276,8 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         return;
       }
       r.whisper = Math.min(5, r.whisper + 1);
-      if (r.whisper >= 5 && !showdownQueued) {
-        showdownQueued = true;
+      if (r.whisper >= 5 && !r.showdown) {
+        r.showdown = true;
         r.whisper = 0;
       }
     }

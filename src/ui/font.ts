@@ -1,5 +1,5 @@
 // A tiny 3x5 pixel font, rendered to cached textures so text stays crisp at any integer scale.
-import { CanvasSource, Sprite, Texture } from 'pixi.js';
+import { CanvasSource, Rectangle, Sprite, Texture } from 'pixi.js';
 
 const GLYPHS: Record<string, string> = {
   A: '010101111101101', B: '110101110101110', C: '011100100100011', D: '110101101101110',
@@ -45,6 +45,8 @@ const GLYPHS: Record<string, string> = {
   '\u001a': '010111101111010', // {barrel}
   '\u001b': '010111101111101', // {goon}
   '\u001c': '010111101111111', // {poster}
+  // Tribute's own mark (a little crown), distinct from the departments' {coin} (U-13).
+  '\u001d': '101111111000111', // {tribute}
 };
 
 const ICONS: Record<string, string> = {
@@ -53,6 +55,7 @@ const ICONS: Record<string, string> = {
   potion: '\u000e', ingot: '\u000f', bone: '\u0010', crate: '\u0011', soul: '\u0012', essence: '\u0013', captive: '\u0014',
   play: '\u0015', check: '\u0016',
   tooth: '\u0017', eye: '\u0018', mask: '\u0019', barrel: '\u001a', goon: '\u001b', poster: '\u001c',
+  tribute: '\u001d',
 };
 
 /** Icon token names usable as {name} in any PixelText. */
@@ -141,24 +144,35 @@ export class PixelText extends Sprite {
     const sh = this._shadow ? 1 : 0;
     const cw = Math.max(1, w + sh);
     const ch = Math.max(1, h + sh);
-    if (!this.canvas || !this.owned || this.canvas.width !== cw || this.canvas.height !== ch) {
-      // Size changed: replace our own texture (never shared, so freeing it is safe).
+    // One grow-only canvas per instance (perf P-05): a new canvas and texture only when the text
+    // no longer fits (rounded up to a power of two in width); otherwise redraw in place and move
+    // the texture frame to the used rectangle.
+    if (!this.canvas || !this.owned || this.canvas.width < cw || this.canvas.height < ch) {
       const old = this.owned;
+      const prev = this.canvas;
       this.canvas = document.createElement('canvas');
-      this.canvas.width = cw;
-      this.canvas.height = ch;
-      drawText(this.canvas.getContext('2d')!, src, this._color, this._shadow);
-      this.owned = new Texture({ source: new CanvasSource({ resource: this.canvas, scaleMode: 'nearest' }) });
-      this.texture = this.owned;
+      this.canvas.width = Math.max(2 ** Math.ceil(Math.log2(cw)), prev?.width ?? 0);
+      this.canvas.height = Math.max(ch, prev?.height ?? 0);
+      // dynamic: the sprite re-reads its bounds when the frame moves (texture.update()).
+      this.owned = new Texture({
+        source: new CanvasSource({ resource: this.canvas, scaleMode: 'nearest' }),
+        frame: new Rectangle(0, 0, cw, ch),
+        dynamic: true,
+      });
       old?.destroy(true);
-    } else {
-      const ctx = this.canvas.getContext('2d')!;
-      ctx.clearRect(0, 0, cw, ch);
-      drawText(ctx, src, this._color, this._shadow);
-      this.owned.source.update();
-      // set('') swapped in Texture.EMPTY; reattach our texture now that there is text again.
-      this.texture = this.owned;
     }
+    const ctx = this.canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    drawText(ctx, src, this._color, this._shadow);
+    const f = this.owned.frame;
+    if (f.width !== cw || f.height !== ch) {
+      f.width = cw;
+      f.height = ch;
+      this.owned.update();
+    }
+    this.owned.source.update();
+    // set('') swapped in Texture.EMPTY; reattach our texture now that there is text again.
+    if (this.texture !== this.owned) this.texture = this.owned;
     return this;
   }
 

@@ -5,17 +5,21 @@ import { deptSetting, migrateDeptSettings, setDeptSetting } from './settings';
 import {
   coreMult,
   commendationReward,
+  idleEarnAllowed,
+  offlineSecondsFor,
   dreadPayout,
   infamy,
   MAX_ELAPSED,
   offlineCapSeconds,
   offlineFactor,
   rank,
+  safeIdleRate,
   tributeCapSeconds,
   tributeRate,
+  updateLateRecruit,
 } from './economy';
 import { computeLayout, type Layout } from './layout';
-import { acquireWriterLock, loadSave, requestPersistence, writeMirror, writeSave } from './save';
+import { acquireWriterLock, loadSave, repairClock, requestPersistence, writeMirror, writeSave } from './save';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from './types';
 import { SEAL_COST, SEAL_DREAD } from './meta';
 import {
@@ -57,9 +61,22 @@ import { haptic } from './haptics';
 import { formatNum } from './format';
 import { goodsGroup } from '../ui/goods';
 import { maybeExportNag, maybeShowA2hs } from '../scenes/install';
+import { destroyTree } from '../ui/destroy';
 
 const AUTOSAVE_MS = 10_000;
-const IDLE_INPUT_MS = 10 * 60_000;
+export const IDLE_INPUT_MS = 10 * 60_000;
+/** Longest wall-clock gap between two visible frames credited by the 1 Hz economy; longer gaps
+ * (stalls, throttled windows) go through applyOffline instead (00 §7). */
+export const MAX_FRAME_GAP_S = 5;
+
+/** Hooks of an open modal (core/game.ts trackModal): `dispose` releases what the modal holds
+ * outside its display tree (ticker callbacks); `reopen` rebuilds it for a new layout; `keep`
+ * leaves it untouched on resize. */
+export interface ModalHooks {
+  dispose?: () => void;
+  reopen?: () => void;
+  keep?: () => boolean;
+}
 
 export class Game {
   app: Application;
@@ -85,6 +102,15 @@ export class Game {
   lastInputAt = Date.now();
   private stewardAcc = 0;
   private hiddenAt: number | null = null;
+  /** Present but no input (00 §7): start of the idle span (ms epoch; = lastSeen, frozen) and the
+   * department on screen then. Settled by the next input or carried through a hide. */
+  idleSince: number | null = null;
+  private idleDept: DeptId | null = null;
+  /** performance.now() of the previous frame: economy time follows the wall clock (C-12). */
+  private lastFrameAt = 0;
+  /** Errors already logged once per guarded call site (a broken department logs once, not 60/s). */
+  private logged = new Set<string>();
+  private modalHooks = new Map<Container, ModalHooks>();
   /** On-screen active Goods (core/goods.ts): the export counter's last value and token bucket. */
   private goodsTrack: Partial<Record<DeptId, ActiveGoodsTrack>> = {};
   readOnly = false;
@@ -105,6 +131,7 @@ export class Game {
       'pointerdown',
       (e) => {
         this.lastInputAt = Date.now();
+        if (this.idleSince !== null) this.guard('idle', () => this.settleIdle(this.lastInputAt));
         const c = (app.canvas as HTMLCanvasElement).getBoundingClientRect();
         const k = this.layout.device.cssW / this.layout.w;
         this.manager.onPointer((e.clientX - c.left) / k, (e.clientY - c.top) / k);
@@ -130,15 +157,37 @@ export class Game {
     this.migrateSettings();
     if (!this.save.depts.cauldron && this.defs.cauldron) this.unlock('cauldron', now);
     const elapsed = this.clampElapsed(now);
+    const live = this.save.idleLive;
+    delete this.save.idleLive;
     this.save.lastSeen = now;
+    this.guard('clock', () => repairClock(this.save, now, this.marketDay(now)));
     this.goThrone();
-    if (elapsed >= 60) this.applyOffline(elapsed, now);
-    else maybeExportNag(this);
+    // Boot never bricks on one department's hook (C-04): the offline credit, the report and the
+    // nag are each guarded; per-department work inside them is guarded again.
+    if (elapsed >= 60) this.guard('boot.offline', () => this.applyOffline(elapsed, now, live));
+    else this.guard('boot.nag', () => maybeExportNag(this));
     this.lastSave = now;
+    this.lastFrameAt = performance.now();
     this.app.ticker.add((t) => this.frame(t.deltaMS / 1000));
     document.addEventListener('visibilitychange', () => this.onVisibility());
     window.addEventListener('pagehide', () => this.persistSync());
     if (this.readOnly) this.showReadOnly();
+  }
+
+  /** Runs `fn`; a throw is logged once per `key` and swallowed. Returns undefined on a throw. */
+  guard<T>(key: string, fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (err) {
+      this.logOnce(key, err);
+      return undefined;
+    }
+  }
+
+  private logOnce(key: string, err: unknown): void {
+    if (this.logged.has(key)) return;
+    this.logged.add(key);
+    console.error(`[overlord] ${key}:`, err);
   }
 
   /** Per-department settings that older saves kept in `persistent` (DeptSettingDef.legacy). */
@@ -159,27 +208,71 @@ export class Game {
   }
 
   private onVisibility(): void {
+    // A read-only tab never writes and never credits (C-01): its snapshot is stale.
+    if (this.readOnly) return;
     const now = Date.now();
     if (document.visibilityState === 'hidden') {
+      if (this.hiddenAt !== null) return;
+      // Present-but-idle carries through the hide: lastSeen stays at the idle start so the idle
+      // span and the hidden span share one cap (00 §7); idleLive records what was paid live.
+      this.syncClock(now);
       this.hiddenAt = now;
-      this.save.lastSeen = now;
+      this.idleSince = null;
+      this.idleDept = null;
       this.persistSync();
       void writeSave(this.save, now);
     } else if (this.hiddenAt !== null) {
+      if (now < this.save.lastSeen) this.guard('clock', () => repairClock(this.save, now, this.marketDay(now)));
       const elapsed = this.clampElapsed(now);
+      const live = this.save.idleLive;
+      delete this.save.idleLive;
       this.hiddenAt = null;
       this.save.lastSeen = now;
       this.lastInputAt = now;
-      if (elapsed >= 5) this.applyOffline(elapsed, now);
+      this.lastFrameAt = performance.now();
+      if (elapsed >= 5) this.guard('offline', () => this.applyOffline(elapsed, now, live));
     }
   }
 
-  /** Credits offline income for every unlocked department plus Tribute, then shows Gobbo's report. */
-  applyOffline(elapsed: number, now: number): void {
+  /** Brings lastSeen (and idleLive) up to date before a write: `now` normally, the idle start
+   * while present-but-idle. */
+  private syncClock(now: number): void {
+    const s = this.save;
+    // While hidden, lastSeen (and a carried idleLive) stay as the hide left them: the whole hidden
+    // span is credited on return, or on the next boot if the page is discarded.
+    if (this.hiddenAt !== null) return;
+    if (this.idleSince !== null) {
+      s.lastSeen = this.idleSince;
+      if (this.idleDept) s.idleLive = { id: this.idleDept, seconds: Math.min(offlineCapSeconds(s), Math.max(0, (now - this.idleSince) / 1000)) };
+      else delete s.idleLive;
+    } else {
+      s.lastSeen = now;
+      delete s.idleLive;
+    }
+  }
+
+  /** The first input after a present-but-idle span: credit it once as offline time (caps,
+   * factor, Goods, report), skipping what the on-screen department already earned live. */
+  private settleIdle(now: number): void {
+    const since = this.idleSince;
+    if (since === null) return;
+    const dept = this.idleDept;
+    this.idleSince = null;
+    this.idleDept = null;
+    delete this.save.idleLive;
+    this.save.lastSeen = now;
+    const elapsed = Math.max(0, Math.min(MAX_ELAPSED, (now - since) / 1000));
+    if (elapsed >= 1) this.applyOffline(elapsed, now, dept ? { id: dept, seconds: elapsed } : undefined);
+    this.saveSoon();
+  }
+
+  /** Credits offline income for every unlocked department plus Tribute, then shows Gobbo's report.
+   * `live`: seconds of this span already paid on screen to one department (present-but-idle,
+   * 00 §7); that department's local credit uses only what is left of the cap. */
+  applyOffline(elapsed: number, now: number, live?: { id: DeptId; seconds: number }): void {
     if (this.readOnly) return;
     const s = this.save;
     const cap = offlineCapSeconds(s);
-    const t = Math.min(elapsed, cap);
     const lines: ReportLine[] = [];
     const greet = absenceGreeting(elapsed);
     let tribute = 0;
@@ -187,19 +280,23 @@ export class Game {
       const d = s.depts[id];
       if (!d) continue;
       const def = this.defs[id];
-      const factor = offlineFactor(s, id); // + Iron Discipline here, <= 0.9
-      const rate = def.idleRate(d) * coreMult(s, id, this.defs, now);
-      const amount = rate * factor * t;
-      this.credit(d, amount, econGateMult(s, id));
-      // Department offline extras (Mines Gems ...): gentle, a throwing hook skips only itself.
-      if (def.onOffline) {
-        try {
-          def.onOffline(d, t, factor, { now, capSeconds: cap });
-        } catch (err) {
-          console.error(err);
+      // One department's broken hook skips only that department (C-04).
+      this.guard(`offline.${id}`, () => {
+        const t = offlineSecondsFor(elapsed, cap, live?.id === id ? live.seconds : 0);
+        const factor = offlineFactor(s, id); // + Iron Discipline here, <= 0.9
+        const rate = safeIdleRate(def, d) * coreMult(s, id, this.defs, now);
+        const amount = rate * factor * t;
+        this.credit(d, amount, econGateMult(s, id));
+        // Department offline extras (Mines Gems ...): gentle, a throwing hook skips only itself.
+        if (def.onOffline && t > 0) {
+          try {
+            def.onOffline(d, t, factor, { now, capSeconds: cap });
+          } catch (err) {
+            console.error(err);
+          }
         }
-      }
-      tribute += tributeRate(s, id, this.defs, false) * factor * Math.min(elapsed, tributeCapSeconds(s));
+        const tr = tributeRate(s, id, this.defs, false) * factor * Math.min(elapsed, tributeCapSeconds(s));
+        if (Number.isFinite(tr)) tribute += tr;
       // Return ritual (00 §5.3): the haul waits for the first entry after this absence.
       if (elapsed >= 60 && amount > 0) d.haul = (d.haul ?? 0) + amount;
       const steward = stewardOn(s, id) ? this.stewardPass(id, stewardShare(s) * amount) : [];
@@ -211,14 +308,15 @@ export class Game {
       if (!flavor) flavor = pickLine(def, 'report');
       delete d.reportCarry;
       if (greet) d.seen['mgr.greet'] = greet;
-      const inf = infamy(def, d);
-      lines.push({ id, def, amount, legend: d.cycle.legendWaiting, infamy: inf.value, flavor, ready: this.readyBuys(id), steward });
+      const inf = this.guard(`infamy.${id}`, () => infamy(def, d).value) ?? 0;
+      lines.push({ id, def, amount, legend: d.cycle.legendWaiting, infamy: inf, flavor, ready: this.readyBuys(id), steward });
+      });
     }
     this.addTribute(tribute);
-    const goods = offlineGoods(s, this.defs, elapsed);
-    for (const [g, amt] of Object.entries(goods)) addGoods(s, g as GoodId, amt);
+    const goods = this.guard('offline.goods', () => offlineGoods(s, this.defs, elapsed)) ?? {};
+    for (const [g, amt] of Object.entries(goods)) if (Number.isFinite(amt)) addGoods(s, g as GoodId, amt);
     if (elapsed >= 60) {
-      showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute, goods }, () => maybeExportNag(this));
+      this.guard('report', () => showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute, goods }, () => maybeExportNag(this)));
       // The first manager with a report line speaks it in their own voice.
       const first = lines.find((l) => l.flavor);
       if (first?.flavor) this.voice(first.def, first.flavor, 'report', 'report');
@@ -264,13 +362,14 @@ export class Game {
   /** Adds local income to the bank and the economy gate. `gate` scales only what the gate counts
    * (Fear Itself, perks.econGateMult). */
   credit(d: DeptSave, amount: number, gate = 1): void {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || !Number.isFinite(amount)) return;
+    if (!Number.isFinite(gate)) gate = 1;
     d.run.bank += amount;
     d.cycle.earnings += amount * gate;
   }
 
   addTribute(amount: number): void {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || !Number.isFinite(amount)) return;
     const m = this.save.meta;
     m.tribute += amount;
     m.tributeLifetime += amount;
@@ -296,11 +395,25 @@ export class Game {
   private frame(dtRaw: number): void {
     const dt = Math.min(0.1, dtRaw);
     const now = Date.now();
-    if (!this.readOnly) {
-      this.econAcc += dt;
-      while (this.econAcc >= 1) {
-        this.econAcc -= 1;
-        this.econTick(now);
+    // Economy time follows the wall clock, not the clamped frame dt (C-12): a long frame still
+    // credits its seconds. Gaps up to MAX_FRAME_GAP_S feed the 1 Hz economy; longer visible gaps
+    // (stalls, throttled windows) are credited once like an absence. Hidden spans never reach here
+    // (onVisibility resets the clock on return).
+    const pnow = performance.now();
+    const gap = this.lastFrameAt > 0 ? Math.max(0, (pnow - this.lastFrameAt) / 1000) : dt;
+    this.lastFrameAt = pnow;
+    if (!this.readOnly && this.hiddenAt === null) {
+      if (gap > MAX_FRAME_GAP_S && this.idleSince === null) {
+        this.econAcc = 0;
+        const elapsed = Math.min(MAX_ELAPSED, gap);
+        this.save.lastSeen = now;
+        this.guard('offline', () => this.applyOffline(elapsed, now));
+      } else {
+        this.econAcc += Math.min(gap, MAX_FRAME_GAP_S);
+        while (this.econAcc >= 1) {
+          this.econAcc -= 1;
+          this.guard('econTick', () => this.econTick(now));
+        }
       }
     }
     try {
@@ -309,20 +422,36 @@ export class Game {
       this.recover(err);
       return;
     }
-    this.hud?.update();
-    this.manager.update(dt);
-    this.floatLayer.update(dt);
+    // One part throwing never stops the ticker (Pixi schedules no further frame after a throw).
+    this.guard('hud', () => this.hud?.update());
+    this.guard('manager', () => this.manager.update(dt));
+    this.guard('floats', () => this.floatLayer.update(dt));
     if (!this.readOnly && now - this.lastSave > AUTOSAVE_MS) {
       this.lastSave = now;
-      this.save.lastSeen = now;
+      this.syncClock(now);
       void writeSave(this.save, now);
     }
   }
 
-  /** 1 Hz: background departments accrue closed-form idle income; Tribute accrues; Infamy updates. */
+  /** 1 Hz: background departments accrue closed-form idle income; Tribute accrues; Infamy updates.
+   * Present but no input for 10 min (00 §7): accounting freezes at the idle start; the span is
+   * credited once as offline time (caps, factor) on the next input or carried through a hide. */
   private econTick(now: number): void {
     const s = this.save;
-    const idle = now - this.lastInputAt > IDLE_INPUT_MS;
+    // A clock that jumped back (corrected) leaves future epochs behind: repair them (C-06).
+    if (now + 2000 < s.lastSeen) {
+      this.guard('clock', () => repairClock(s, now, this.marketDay(now)));
+      s.lastSeen = now;
+      if (this.idleSince !== null && this.idleSince > now) this.idleSince = now;
+    }
+    if (this.idleSince === null && now - this.lastInputAt > IDLE_INPUT_MS) {
+      this.idleSince = s.lastSeen;
+      this.idleDept = this.current === 'throne' ? null : this.current;
+    }
+    if (this.idleSince !== null) {
+      this.guard('progress', () => this.checkProgress(now));
+      return;
+    }
     let tribute = 0;
     const share = stewardShare(s);
     const stewardNow = share > 0 && ++this.stewardAcc >= 5;
@@ -330,55 +459,65 @@ export class Game {
     for (const id of this.built) {
       const d = s.depts[id];
       if (!d) continue;
-      const onScreen = this.current === id;
       const def = this.defs[id];
-      const factor = idle ? offlineFactor(s, id) : 1;
-      if (!onScreen) {
-        const amount = def.idleRate(d) * coreMult(s, id, this.defs, now) * factor;
-        this.credit(d, amount, econGateMult(s, id));
-        // Steward: off-screen departments only; the allowance accrues every tick, spends every 5 s.
-        if (stewardOn(s, id)) {
-          const st = (s.meta.steward[id] ??= { on: true, reserve: 0, pool: 0 });
-          st.pool = (st.pool || 0) + share * amount;
-          if (stewardNow) this.stewardPass(id, 0);
+      // Per department: one broken hook (idleRate, Goods step) skips only that department (C-04).
+      this.guard(`econ.${id}`, () => {
+        const onScreen = this.current === id;
+        if (!onScreen) {
+          const amount = safeIdleRate(def, d) * coreMult(s, id, this.defs, now);
+          this.credit(d, amount, econGateMult(s, id));
+          // Steward: off-screen departments only; the allowance accrues every tick, spends every 5 s.
+          if (stewardOn(s, id) && Number.isFinite(amount)) {
+            const st = (s.meta.steward[id] ??= { on: true, reserve: 0, pool: 0 });
+            st.pool = (st.pool || 0) + share * amount;
+            if (stewardNow) this.stewardPass(id, 0);
+          }
         }
-      }
-      tribute += tributeRate(s, id, this.defs, onScreen && !idle) * factor;
-      // Goods (00 §4, §7): the passive rate everywhere; the active bonus while played on screen.
-      const good = EXPORT_OF[id];
-      addGoods(s, good, passivePerH(s, id, this.defs) / 3600);
-      if (onScreen && !idle) {
-        const tr = (this.goodsTrack[id] ??= newActiveTrack());
-        addGoods(s, good, activeGoodsStep(def, d, tr, 1));
-      }
+        const tr = tributeRate(s, id, this.defs, onScreen);
+        if (Number.isFinite(tr)) tribute += tr;
+        // Goods (00 §4, §7): the passive rate everywhere; the active bonus while played on screen.
+        const good = EXPORT_OF[id];
+        const passive = passivePerH(s, id, this.defs) / 3600;
+        if (Number.isFinite(passive)) addGoods(s, good, passive);
+        if (onScreen) {
+          const tr2 = (this.goodsTrack[id] ??= newActiveTrack());
+          const step = activeGoodsStep(def, d, tr2, 1);
+          if (Number.isFinite(step)) addGoods(s, good, step);
+        }
+      });
     }
     this.addTribute(tribute);
     s.lastSeen = now;
-    this.checkProgress(now);
+    this.guard('progress', () => this.checkProgress(now));
   }
 
-  /** Infamy thresholds, peak rank, commendations. */
+  /** Infamy thresholds, peak rank, commendations. Each department, and each commendation test,
+   * is guarded on its own: a throwing test (an old save shape) skips only itself (C-04). */
   checkProgress(_now: number): void {
     const s = this.save;
     for (const id of this.built) {
       const d = s.depts[id];
       if (!d) continue;
       const def = this.defs[id];
-      d.lifetime.peakRank = Math.max(d.lifetime.peakRank, rank(s, id, this.defs));
-      const inf = infamy(def, d).value;
-      if (inf >= 50 && !d.seen[`inf50.${d.cycle.n}`]) {
-        d.seen[`inf50.${d.cycle.n}`] = 1;
-        if (this.current === id) this.managerSay(id, 'infamy50', { type: 'infamy_50' });
-      }
-      if (inf >= 100 && !d.cycle.legendWaiting) {
-        d.cycle.legendWaiting = true;
-        // Off screen, the director carries it to the next report (00 §5.4.7).
-        this.managerSay(id, 'legend', { type: 'legend_arrives' });
-      }
+      this.guard(`progress.${id}`, () => {
+        if (!Number.isFinite(d.lifetime.peakRank)) d.lifetime.peakRank = 0;
+        d.lifetime.peakRank = Math.max(d.lifetime.peakRank, rank(s, id, this.defs));
+        updateLateRecruit(s, id, this.defs);
+        const inf = infamy(def, d).value;
+        if (inf >= 50 && !d.seen[`inf50.${d.cycle.n}`]) {
+          d.seen[`inf50.${d.cycle.n}`] = 1;
+          if (this.current === id) this.managerSay(id, 'infamy50', { type: 'infamy_50' });
+        }
+        if (inf >= 100 && !d.cycle.legendWaiting) {
+          d.cycle.legendWaiting = true;
+          // Off screen, the director carries it to the next report (00 §5.4.7).
+          this.managerSay(id, 'legend', { type: 'legend_arrives' });
+        }
+      });
       const mask = s.meta.commendations[id] ?? 0;
       def.commendations.forEach((c, i) => {
         if (mask & (1 << i)) return;
-        if (c.test(d)) {
+        if (this.guard(`commend.${id}.${i}`, () => !!c.test(d))) {
           s.meta.commendations[id] = (s.meta.commendations[id] ?? 0) | (1 << i);
           const reward = commendationReward(i);
           this.addTribute(reward);
@@ -496,7 +635,14 @@ export class Game {
     // The director knows the department before the scene is built, so a lesson fired from the
     // scene's constructor is queued, not dropped.
     this.manager.begin(def, d);
-    const scene = def.createScene(ctx);
+    let scene: DeptScene;
+    try {
+      scene = def.createScene(ctx);
+    } catch (err) {
+      // A throwing constructor drops back to the Throne Room instead of a blank scene (P-02).
+      this.recover(err);
+      return;
+    }
     this.scene = scene;
     this.sceneLayer.addChild(scene.root);
     this.goodsTrack[id] = newActiveTrack();
@@ -565,16 +711,57 @@ export class Game {
       .catch((err) => console.error(err));
   }
 
+  // ---------- modals ----------
+
+  /** Registers an open modal's hooks. `dispose` runs exactly once, however the modal goes away
+   * (teardown, a sheet replacing it, its own close), so ticker callbacks never outlive it (C-03). */
+  trackModal(root: Container, hooks: ModalHooks): void {
+    let done = false;
+    const wrapped: ModalHooks = {
+      ...hooks,
+      dispose: () => {
+        if (done) return;
+        done = true;
+        this.modalHooks.delete(root);
+        if (hooks.dispose) this.guard('modal.dispose', hooks.dispose);
+      },
+    };
+    this.modalHooks.set(root, wrapped);
+    root.once('destroyed', () => wrapped.dispose!());
+  }
+
+  /** Disposes and destroys one modal-layer child. */
+  private closeModal(c: Container): void {
+    this.modalHooks.get(c)?.dispose?.();
+    if (!c.destroyed) {
+      c.parent?.removeChild(c);
+      destroyTree(c);
+    }
+  }
+
+  /** Closes every modal and returns the reopen hooks of those that have one (resize). With
+   * `keep`, modals whose keep() is true stay open untouched. */
+  private closeModals(keep = false): (() => void)[] {
+    const reopen: (() => void)[] = [];
+    for (const c of [...this.modalLayer.children]) {
+      const h = this.modalHooks.get(c);
+      if (keep && h?.keep && this.guard('modal.keep', h.keep)) continue;
+      if (h?.reopen) reopen.push(h.reopen);
+      this.closeModal(c);
+    }
+    return reopen;
+  }
+
   private teardown(): void {
     this.manager.clear();
-    this.modalLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.closeModals();
     if (this.scene) {
       if ('destroy' in this.scene) this.scene.destroy();
       this.scene = null;
     }
     this.sceneLayer.removeChildren();
     if (this.hud) {
-      this.hud.destroy({ children: true });
+      destroyTree(this.hud);
       this.hud = null;
     }
     this.ctx = null;
@@ -595,7 +782,14 @@ export class Game {
         return { x: L.safe.l, y: top, w: L.w - L.safe.l - L.safe.r, h: L.h - top - L.safe.b };
       },
       earn(base: number) {
-        const amount = base * coreMult(game.save, def.id, game.defs, Date.now());
+        const now = Date.now();
+        let amount = base * coreMult(game.save, def.id, game.defs, now);
+        // Present but no input (00 §7): the on-screen department earns at the offline factor, and
+        // only inside the offline cap counted from the idle start; the settlement skips it there.
+        if (game.idleSince !== null) {
+          amount = idleEarnAllowed(game.idleSince, now, offlineCapSeconds(game.save)) ? amount * offlineFactor(game.save, def.id) : 0;
+        }
+        if (!Number.isFinite(amount)) return 0;
         game.credit(d, amount, econGateMult(game.save, def.id));
         return amount;
       },
@@ -667,10 +861,18 @@ export class Game {
   }
 
   /** `wallet`: the funds bank-priced rows spend (x10 / MAX affordability); omit for none. */
-  openCustomSheet(title: string, bank: () => { text: string; color: string }, groups: UpgradeGroup[], wallet?: () => number): void {
-    this.modalLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
-    const sheet = new UpgradeSheet(this, title, bank, groups, () => sheet.destroy({ children: true }), wallet);
+  /** `reopen`: how to rebuild this sheet after a resize (default: the same arguments, right when
+   * the groups' closures outlive the scene, as a department's do under DeptScene.resize). */
+  openCustomSheet(title: string, bank: () => { text: string; color: string }, groups: UpgradeGroup[], wallet?: () => number, reopen?: () => void): void {
+    this.closeModals();
+    const sheet = new UpgradeSheet(this, title, bank, groups, () => destroyTree(sheet), wallet);
+    this.trackModal(sheet, { reopen: reopen ?? (() => this.openCustomSheet(title, bank, groups, wallet)) });
     this.modalLayer.addChild(sheet);
+  }
+
+  /** The Throne Room, while it is the open scene. */
+  get throne(): ThroneScene | null {
+    return this.scene instanceof ThroneScene ? this.scene : null;
   }
 
   /** The open upgrade sheet, if any (onboarding highlights inside it). */
@@ -762,14 +964,20 @@ export class Game {
 
   persistSync(): void {
     if (this.readOnly) return;
-    this.save.lastSeen = Date.now();
-    writeMirror(this.save, Date.now());
+    const now = Date.now();
+    this.syncClock(now);
+    writeMirror(this.save, now);
   }
 
   replaceSave(s: SaveRoot): void {
     this.save = s;
     this.migrateSettings();
-    this.save.lastSeen = Date.now();
+    this.idleSince = null;
+    this.idleDept = null;
+    delete this.save.idleLive;
+    const now = Date.now();
+    this.save.lastSeen = now;
+    this.guard('clock', () => repairClock(this.save, now, this.marketDay(now)));
     this.persistSync();
     this.goThrone();
   }
@@ -787,8 +995,35 @@ export class Game {
     canvas.style.top = `${Math.floor((window.innerHeight - L.device.cssH) / 2)}px`;
     this.app.stage.scale.set(L.scale);
     this.app.stage.hitArea = { contains: () => true };
-    if (this.current === 'throne') this.goThrone();
-    else this.enter(this.current);
+    // Re-lay out instead of rebuilding (C-11): open modals (report, A2HS, Fall card, sheet) are
+    // closed and re-opened for the new layout with their continuations; a modal that must not be
+    // interrupted (a running Last Stand) stays as it is.
+    const reopen = this.closeModals(true);
+    const id = this.current;
+    const scene = this.scene;
+    let relaid = false;
+    if (id !== 'throne' && scene && !(scene instanceof ThroneScene) && this.defs[id] && this.save.depts[id]) {
+      try {
+        scene.resize(L);
+        if (this.hud) {
+          destroyTree(this.hud);
+          this.hud = null;
+        }
+        this.hud = new DeptHud(this, this.defs[id], this.save.depts[id]!);
+        this.hudLayer.addChild(this.hud);
+        relaid = true;
+      } catch (err) {
+        this.logOnce(`resize.${id}`, err);
+      }
+    }
+    if (!relaid) {
+      // Kept modals (a Last Stand) would lose their scene with a rebuild: close them too (a Last
+      // Stand falls back to the Crush bar) and re-open what can be re-opened.
+      reopen.push(...this.closeModals());
+      if (id === 'throne') this.goThrone();
+      else this.enter(id);
+    }
+    for (const r of reopen) this.guard('modal.reopen', r);
   }
 
   /** A department threw during its update: save, drop back to the Throne Room, and say so. */

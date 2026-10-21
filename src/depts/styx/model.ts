@@ -105,6 +105,13 @@ export const BAITS: Record<BaitId, { name: string; short: string; cost: number; 
 export const BAIT_ORDER: BaitId[] = ['worm', 'promise', 'debt', 'gilded', 'lock'];
 /** Consumable baits (worm is free and infinite). */
 export const PAID_BAITS: BaitId[] = ['promise', 'debt', 'gilded', 'lock'];
+/** Stock cap per bait (D-styx-02): 50 packs. Stock persists through Falls (03 §5.3) but can't be
+ * banked into a permanent x2: an end-of-cycle bank buys at most this many. */
+export const BAIT_CAP: Record<BaitId, number> = { worm: 0, promise: 500, debt: 500, gilded: 250, lock: 150 };
+/** Bait prices follow the deepest open band (D-styx-02): x4^(0.75 (bands - 1)) = x1, 3, 8, 23, 64.
+ * TUNED: a band-5 Gilded Obol (12.8k a bait) is about one deep catch, so it pays only on a combo,
+ * as the Shallows' 200-Obol one does at band 1. */
+export const baitBandMult = (bands = 1) => Math.round(4 ** (0.75 * (Math.max(1, Math.min(MAX_BANDS, bands)) - 1)));
 
 // ---------- upgrades (03 §6) ----------
 
@@ -217,9 +224,14 @@ export const CLEAN_MULT: Record<Rarity, number> = { common: 1.1, uncommon: 1.15,
 export const hooksPerCast = (twin: number) => 1 + Math.max(0, Math.min(2, twin));
 export const TWIN_WAIT = 0.75;
 
-/** Chum Barrel (03 §6.3): netters fish with the equipped bait at 25% efficiency per level. They
- * only smell it: the barrel never uses up stock, but an empty slot (worm) does nothing. */
+/** Chum Barrel (03 §6.3): netters fish with the equipped bait at 25% efficiency per level. */
 export const chumEff = (lv: number) => 0.25 * Math.max(0, Math.min(3, lv));
+/** D-styx-01: the barrel uses the stock up. The netters use 1 bait per CHUM_SOULS souls netted at
+ * full strength, and the strength is the barrel's fill (stock / BAIT_CAP), so a single bait smells
+ * of almost nothing and a full barrel fades as it empties. TUNED: band 5, 20 netters, Bigger Nets
+ * 40 net ~3.4 souls/s: ~250 Gilded Obols an hour (~3.2M Obols at band-5 prices) against the
+ * full barrel's +75% (~6M an hour), so chumming pays but is never free. */
+export const CHUM_SOULS = 50;
 
 export const PILK_NETTERS = 30 / 45; // Pilk's skiff: 1 soul / 45 s, in netter-equivalents
 export const NET_S = 30; // one soul per 30 s per netter
@@ -239,8 +251,8 @@ export const brewPotency = (brew: number) => 1 + 0.1 * Math.max(0, Math.min(3, b
 /** Gilded Obol payout multiplier (x2, its +100% scaled by Bait Brews). */
 export const gildedMult = (brew = 0) => 1 + brewPotency(brew);
 /** Debt Collectors (Contraband import, 00 §4): Unpaid Debt bait -15% per level. */
-export function baitCost(id: BaitId, collectors = 0): number {
-  const c = BAITS[id].cost;
+export function baitCost(id: BaitId, collectors = 0, bands = 1): number {
+  const c = BAITS[id].cost * baitBandMult(bands);
   return id === 'debt' ? Math.ceil(c * (1 - 0.15 * Math.max(0, Math.min(3, collectors)))) : c;
 }
 
@@ -344,10 +356,10 @@ export function netWindow(bands: number, poles: number): { top: number; depth: n
 
 /** Expected ledger value of a netted soul: the depth-weighted average over the netters' window.
  * With a worm and no Wall this is the plain base-table EV per band. */
-export function netEV(bands: number, poles: number, bait: BaitId = 'worm', chum = 0, p?: StyxPersistent): number {
+export function netEV(bands: number, poles: number, bait: BaitId = 'worm', chum = 0, p?: StyxPersistent, fill = 1): number {
   const { top: w0, depth } = netWindow(bands, poles);
   const w1 = w0 + depth;
-  const eff = bait === 'worm' ? 0 : chumEff(chum);
+  const eff = bait === 'worm' ? 0 : chumEff(chum) * Math.max(0, Math.min(1, fill));
   const gild = bait === 'gilded' ? 1 + eff : 1;
   let sum = 0;
   for (let b = 0; b < bands; b++) {
@@ -377,10 +389,48 @@ export function chumBait(r: StyxRun, p?: StyxPersistent): BaitId {
   return r.bait;
 }
 
+/** The barrel's fill, 0-1 (D-styx-01): the stock left of the equipped bait over its cap, less
+ * the share of the top bait already used. No persistent data = a full barrel (headless callers). */
+export function chumFill(r: StyxRun, p?: StyxPersistent): number {
+  const b = chumBait(r, p);
+  if (b === 'worm') return 0;
+  if (!p) return 1;
+  return Math.max(0, Math.min(1, ((p.baits[b] ?? 0) - (r.chumUsed ?? 0)) / BAIT_CAP[b]));
+}
+
+/** Baits the netters use per second at the current fill (D-styx-01). */
+export const chumUseRate = (r: StyxRun, p?: StyxPersistent) => (chumFill(r, p) * netRate(r)) / CHUM_SOULS;
+
+/**
+ * Settles the Chum Barrel's bait use over `seconds` of netting (D-styx-01): the scene calls it
+ * every frame, `onOffline` for an absence and the in-session time off screen. The use rate
+ * follows the fill, so the stock decays exponentially (closed form: one call covers a long
+ * absence, and the boost credited at a fill is paid for at that fill). Whole baits leave the stock as they are used up; the share of the top one
+ * already used lives in `run.chumUsed`. The equipped bait falls back to the worm once it is gone.
+ */
+export function settleChum(r: StyxRun, p: StyxPersistent, seconds: number): void {
+  const b = chumBait(r, p);
+  if (b === 'worm' || !(seconds > 0)) return;
+  const cap = BAIT_CAP[b];
+  const S0 = Math.min(cap, p.baits[b] ?? 0) - (r.chumUsed ?? 0);
+  const c = netRate(r) / CHUM_SOULS; // baits/s at a full barrel
+  if (!(S0 > 0) || !(c > 0)) return;
+  // dS/dt = -c S / cap (S <= cap): S(t) = S0 exp(-c t / cap).
+  let S = S0 * Math.exp((-c * seconds) / cap);
+  if (S < 0.5) S = 0; // the last half bait goes too, so the tail ends
+  const whole = Math.max(0, Math.ceil(S - 1e-9));
+  p.baits[b] = whole;
+  r.chumUsed = whole - S;
+  if (whole <= 0) {
+    r.chumUsed = 0;
+    r.bait = 'worm';
+  }
+}
+
 /** On-screen idle Obols/s (03 §3): R_idle x EV(netDepth) x 1.10^W x yield. Pure and cheap.
- * `p` (persistent) adds the Trophy Wall and checks the Chum Barrel's bait stock. */
+ * `p` (persistent) adds the Trophy Wall and the Chum Barrel's fill (D-styx-01). */
 export function idleObols(r: StyxRun, p?: StyxPersistent): number {
-  return netRate(r) * netEV(r.bands, r.lv.poles, chumBait(r, p), r.lv.chum ?? 0, p) * wrathIdle(r.wrath) * NET_YIELD * legendMult(r);
+  return netRate(r) * netEV(r.bands, r.lv.poles, chumBait(r, p), r.lv.chum ?? 0, p, chumFill(r, p)) * wrathIdle(r.wrath) * NET_YIELD * legendMult(r);
 }
 
 // ---------- save state ----------
@@ -423,6 +473,10 @@ export interface StyxRun {
   gate: Gate;
   stats: StyxStats;
   aim: { x: number; d: number } | null; // last cast, as a fraction of the river width + depth px
+  /** Chum Barrel (D-styx-01): share of the equipped bait's top unit the netters already used. */
+  chumUsed?: number;
+  /** Chum Barrel: wall clock (ms) its bait use was last settled (scene frame or absence). */
+  chumAt?: number;
 }
 
 export interface StyxPersistent {
@@ -470,6 +524,9 @@ export function normalize(r: StyxRun, p: StyxPersistent): void {
   r.bank = Number.isFinite(r.bank) ? r.bank : 0;
   p.codex = p.codex ?? {};
   p.baits = { ...defaultPersistent().baits, ...(p.baits ?? {}) };
+  // D-styx-02: older saves could bank unlimited stock; clamp it to the cap.
+  for (const b of PAID_BAITS) p.baits[b] = Math.max(0, Math.min(BAIT_CAP[b], Math.floor(Number(p.baits[b]) || 0)));
+  r.chumUsed = Math.max(0, Math.min(1, Number(r.chumUsed) || 0));
   p.wall = Array.isArray(p.wall) ? p.wall.filter((t) => t && SPECIES_BY_ID[t.id] && t.band >= 0 && t.band < MAX_BANDS).slice(0, WALL_MAX) : [];
   p.maxBand = Math.max(p.maxBand ?? 1, r.bands);
 }

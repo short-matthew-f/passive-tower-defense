@@ -4,8 +4,9 @@ import { Container, Graphics, type FederatedPointerEvent, type Ticker } from 'pi
 import type { Rect, UpgradeEntry, UpgradeGroup } from '../core/dept';
 import type { Game } from '../core/game';
 import { formatNum } from '../core/format';
-import { PixelText } from './font';
+import { PixelText, wrap } from './font';
 import { Button, C, drawPanel } from './widgets';
+import { destroyTree } from './destroy';
 
 const ROW_H = 28;
 const HEADER_H = 12;
@@ -38,6 +39,38 @@ interface Row {
 }
 
 /** Plain levelled rows take the bulk mode unless they opt out (UpgradeEntry.bulk). */
+/** Whether holding a row's button repeats the buy (UpgradeEntry.repeat). Toggle and cycle rows
+ * (a custom buyLabel or costText, or a single level) never repeat. Pure (exported for tests). */
+export function rowRepeats(e: UpgradeEntry): boolean {
+  if (e.repeat !== undefined) return e.repeat && !e.header;
+  return !e.header && !e.costText && !e.buyLabel && e.max > 1;
+}
+
+/** One line of at most `max` characters, ending ".." when cut (never mid-word silently). */
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let cut = text.slice(0, Math.max(1, max - 2));
+  // Never cut through an icon token such as {coin}.
+  const open = cut.lastIndexOf('{');
+  if (open > cut.lastIndexOf('}')) cut = cut.slice(0, open);
+  return `${cut.trimEnd()}..`;
+}
+
+/** Up to two word-wrapped lines of `max` characters each; the second ends ".." when there is
+ * more (U-08: descriptions used to be cut mid-word on one line). Pure (exported for tests). */
+export function twoLines(text: string, max: number): string {
+  const lines = wrap(text, max * 4).split('\n');
+  if (lines.length <= 2) return lines.map((l) => clip(l, max)).join('\n');
+  // More than fits: end the second line on a whole word, then "..".
+  let second = '';
+  for (const w of `${lines[1]} ${lines.slice(2).join(' ')}`.split(' ')) {
+    const next = second ? `${second} ${w}` : w;
+    if (next.length + 2 > max) break;
+    second = next;
+  }
+  return `${clip(lines[0], max)}\n${second ? `${second}..` : clip(lines[1], max)}`;
+}
+
 export function bulkable(e: UpgradeEntry): boolean {
   if (e.bulk !== undefined) return e.bulk && !e.header;
   return !e.header && !e.costText && !e.buyLabel && !e.levelText && e.max > 1;
@@ -244,7 +277,7 @@ export class UpgradeSheet extends Container {
   private selectTab(i: number): void {
     this.tab = i;
     this.tabs.forEach((b, j) => b.setColor(j === i ? C.gold : C.edge, j === i ? 0x9a7a20 : 0x3a2046));
-    this.list.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.list.removeChildren().forEach((c) => destroyTree(c));
     this.rows = [];
     this.scrollY = 0;
     this.list.y = 0;
@@ -284,7 +317,7 @@ export class UpgradeSheet extends Container {
         w: BTN_W,
         h: 21,
         label: 'BUY',
-        repeat: true,
+        repeat: rowRepeats(entry),
         onTap: () => {
           if (this.drag?.moved) return;
           this.buy(row);
@@ -346,18 +379,19 @@ export class UpgradeSheet extends Container {
         const lvl = e.level();
         const maxed = lvl >= e.max;
         const lvlText = e.levelText ? e.levelText() : e.max === Infinity ? `LV${lvl}` : `${lvl}/${e.max}`;
-        r.name.set(`${e.name.toUpperCase()} ${lvlText}`.slice(0, maxChars + 6));
+        r.name.set(clip(`${e.name.toUpperCase()} ${lvlText}`, maxChars + 6));
         const lock = e.locked?.() ?? null;
         const plan = maxed || lock ? null : this.planFor(r, false, dt);
         const many = !!plan && plan.n > 1;
         const desc = many && e.descFor ? e.descFor(plan!.n) : e.desc();
-        r.desc.set(desc.toUpperCase().slice(0, maxChars));
+        r.desc.set(twoLines(desc.toUpperCase(), maxChars));
         if (maxed) {
           r.btn.setLabel(e.maxLabel ?? 'MAX').setEnabled(false);
         } else if (lock) {
           r.btn.setLabel('LOCKED', lock.toUpperCase().slice(0, 10)).setEnabled(false);
         } else {
-          const unit = !e.currency ? '' : e.currency.startsWith('{') ? e.currency.slice(0, e.currency.indexOf('}') + 1) : e.currency[0];
+          // Tribute shows its own crown mark, never a bare 'T' (Batch Tokens use T, U-13).
+          const unit = !e.currency ? '' : e.currency === 'Tribute' ? '{tribute}' : e.currency.startsWith('{') ? e.currency.slice(0, e.currency.indexOf('}') + 1) : e.currency[0];
           const cost = `${formatNum(plan!.cost, notation)}${unit}`;
           // Exact bulk: "+n" over the total. Repeated-buy fallback: the mode over the next price.
           const label = !many ? (e.buyLabel ?? 'BUY') : plan!.exact ? `+${plan!.n}` : this.mode === 1 ? 'X10' : 'MAX';

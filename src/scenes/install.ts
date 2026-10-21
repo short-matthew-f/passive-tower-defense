@@ -7,6 +7,7 @@ import { installPrompt } from '../pwa';
 import { PixelText, measure, wrap } from '../ui/font';
 import { Button, C, drawPanel } from '../ui/widgets';
 import { openSettings } from './settings';
+import { destroyTree } from '../ui/destroy';
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
 
@@ -80,7 +81,7 @@ export function showA2hs(game: Game, then?: () => void): void {
     sy += 18;
   });
   const close = () => {
-    root.destroy({ children: true });
+    destroyTree(root);
     then?.();
   };
   const ok = new Button({
@@ -96,6 +97,8 @@ export function showA2hs(game: Game, then?: () => void): void {
   const later = new Button({ w: w - 24, h: 14, label: 'NOT NOW', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: close });
   later.position.set(x + 12, y + h - 22);
   root.addChild(ok, later);
+  // A resize re-opens it with its continuation (the Fall the player started), C-11.
+  game.trackModal(root, { reopen: () => showA2hs(game, then) });
   game.modalLayer.addChild(root);
 }
 
@@ -141,7 +144,7 @@ export function showExportNag(game: Game): void {
   const body = new PixelText(text, '#2a1a3a', null);
   body.position.set(x + 8, y + 18);
   root.addChild(title, body);
-  const close = () => root.destroy({ children: true });
+  const close = () => destroyTree(root);
   const exp = new Button({
     w: w - 24,
     h: 16,
@@ -155,6 +158,7 @@ export function showExportNag(game: Game): void {
   const later = new Button({ w: w - 24, h: 14, label: 'LATER', color: 0x8a6a3a, shade: 0x5a4a2a, textColor: C.ink, onTap: close });
   later.position.set(x + 12, y + h - 20);
   root.addChild(exp, later);
+  game.trackModal(root, { reopen: () => showExportNag(game) });
   game.modalLayer.addChild(root);
 }
 

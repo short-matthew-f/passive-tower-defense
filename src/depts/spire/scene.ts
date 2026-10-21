@@ -41,6 +41,7 @@ import { MAX_ORBS, SpireCore } from './logic';
 import type { MergeEvent, Orb } from './physics';
 import { sfx } from './sfx';
 import { ToolBtn } from './toolbtn';
+import { destroyTree } from '../../ui/destroy';
 
 const BAR_H = 16;
 const BRAZIER_H = 7;
@@ -528,6 +529,7 @@ export class SpireScene implements DeptScene {
   }
 
   private onDown(e: FederatedPointerEvent): void {
+    this.core.noteInput();
     this.aiming = true;
     this.pointerId = e.pointerId;
     this.downY = e.getLocalPosition(this.root).y;
@@ -1350,7 +1352,7 @@ export class SpireScene implements DeptScene {
   destroy(): void {
     this.endRitual(this.ritual?.dropped ? 0.6 : 0);
     this.core.persist();
-    this.root.destroy({ children: true });
+    destroyTree(this.root);
   }
 }
 

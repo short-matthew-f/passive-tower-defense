@@ -9,6 +9,7 @@ import {
   INGREDIENTS,
   ING_ORDER,
   LAYOUTS,
+  LandingJob,
   landingStats,
   RUNE_MULT,
   SPECIALS,
@@ -238,14 +239,18 @@ export const upLocked = (u: UpDef, n: number): string | null => (u.afterFall ? l
 export const MALICE_MAX = 10;
 /**
  * Price of the next Malice level (one-time per cycle). Spec seed is 2,000 x 5^M (05 §7).
- * SIM-TUNED: x5 per level up to Malice V while the capped nodes fill (the income ramp), then x2 per
- * level, which tracks the plateau income at the top of the dial (00 §8.1 step-cost band). The old
+ * SIM-TUNED: x5 per level up to Malice V while the capped nodes fill (the income ramp), then x2.5 per
+ * level (MALICE_LATE, below), which tracks the plateau income at the top of the dial (00 §8.1 step-cost band). The old
  * 100,000 x 15^M priced Malice VIII at 1.7e13 Bile against ~2e11/day, so the Cauldron stalled at
  * 88% Infamy for good after its 4th Fall.
  */
 export const MALICE_KNEE = 5;
+/** SIM-TUNED 2 -> 2.5 (D-cauldron-03 retune): with the specials counted in idleRate the mid-game
+ * cycles ran ~5% faster and the Cauldron's day-7 Dread share crept over its 35% cap; a steeper
+ * top of the dial slows cycles 2+ without touching the first (Malice IV). */
+export const MALICE_LATE = 2.5;
 export function maliceCost(bought: number): number {
-  return 2.7e6 * 5 ** Math.min(bought, MALICE_KNEE) * 2 ** Math.max(0, bought - MALICE_KNEE);
+  return 2.7e6 * 5 ** Math.min(bought, MALICE_KNEE) * MALICE_LATE ** Math.max(0, bought - MALICE_KNEE);
 }
 
 // ---------- derived stats ----------
@@ -343,14 +348,20 @@ export function allFactor(run: CRun): number {
   return (1 + 0.05 * lvOf(run, 'pot')) * 1.04 ** lvOf(run, 'row');
 }
 
-/** Multiplier by bucket tier (0 Dregs .. 4 Jackpot) at a Malice setting (05 §5, §7; seeds). */
-export function tierMults(run: CRun, malice = run.malice): number[] {
+/** The bucket table by tier before the layout's balance factor (05 §5, §7). */
+function rawTierMults(run: CRun, malice: number): number[] {
   const lined = 1 + 0.04 * lvOf(run, 'lined');
-  const all = allFactor(run) * layoutNorm(run);
+  const all = allFactor(run);
   const center = JACKPOT[lvOf(run, 'jackpot')] * 1.2 ** malice;
   const adj = 2 * lined * 1.1 ** malice;
   const dregs = Math.min(0.5 * lined * (1 + 0.04 * malice), 0.6 * lined);
   return [dregs, 1 * lined, 1.5 * lined, adj, center].map((v) => v * all);
+}
+
+/** Multiplier by bucket tier (0 Dregs .. 4 Jackpot) at a Malice setting (05 §5, §7; seeds). */
+export function tierMults(run: CRun, malice = run.malice): number[] {
+  const n = layoutNorm(run, malice);
+  return rawTierMults(run, malice).map((v) => v * n);
 }
 
 /** Bucket multipliers left to right (layout order and Bucket Shift swaps applied). */
@@ -368,43 +379,262 @@ export function inZone(bucket: number, zone: number, tiers: number[] = LAYOUTS.c
 
 const statCache = new Map<string, LandingStats>();
 const CACHE_MAX = 4000;
-function cached(key: string, make: () => LandingStats): LandingStats {
-  let d = statCache.get(key);
-  if (!d) {
-    if (statCache.size >= CACHE_MAX) statCache.delete(statCache.keys().next().value!);
-    d = make();
-    statCache.set(key, d);
-  }
-  return d;
-}
 // Bone, rune and thorn pegs are priced in analytically (bone and rune as a share of peg hits,
 // thorn halves are value-neutral), so the cache only keys the board's shape: rows, Malice, gold
 // pegs, layout and the steering goal. That keeps the EV cache to the same ~200 boards per save.
 const cfgKey = (c: BoardConfig) => `${c.rows}|${c.malice}|${c.gold}|${c.layout ?? 'classic'}|${Math.round(c.goalX ?? CENTER_X)}`;
 const shape = (c: BoardConfig): BoardConfig => ({ ...c, bone: 0, rune: 0, thorn: 0 });
 
+/*
+ * D-cauldron-02: a cold board costs ~1,200 simulated drops (~0.2 s on a desktop, up to ~1 s on a
+ * phone). In the browser the full run is queued and stepped in <= SLICE_MS time slices between
+ * frames; until it lands, callers get a provisional answer (a neighbouring cached board, else a
+ * small quick sample), and the derived memos are flushed when the real stats arrive. Headless
+ * callers (tests, the balance sim) compute synchronously, so their numbers stay deterministic.
+ */
+let evAsync = typeof window !== 'undefined' && typeof document !== 'undefined';
+const SLICE_MS = 6;
+const QUICK_N = 32;
+const QUICK_CHUTE_N = 8;
+interface PendingJob {
+  job: LandingJob;
+  low: boolean;
+}
+const queue = new Map<string, PendingJob>();
+const provisional = new Map<string, LandingStats>();
+let pumpScheduled = false;
+
+/** Headless switch (tests): true = queue cold boards and answer provisionally, false = compute
+ * at once. */
+export function setEvAsync(on: boolean): void {
+  evAsync = on;
+}
+/** Boards still queued (tests, debug). */
+export const evPending = () => queue.size;
+
+function store(key: string, st: LandingStats): void {
+  if (statCache.size >= CACHE_MAX) statCache.delete(statCache.keys().next().value!);
+  statCache.set(key, st);
+}
+
+/** Steps the queued boards for up to `budgetMs`; urgent ones first. Returns true when idle. */
+export function pumpEv(budgetMs = SLICE_MS): boolean {
+  const deadline = performance.now() + budgetMs;
+  let landed = false;
+  for (const urgentPass of [true, false]) {
+    for (const [key, pj] of queue) {
+      if (pj.low === urgentPass) continue;
+      if (!pj.job.run(deadline)) {
+        if (landed) flushMemos();
+        return false;
+      }
+      store(key, pj.job.result());
+      queue.delete(key);
+      provisional.delete(key);
+      landed = true;
+    }
+  }
+  if (landed) flushMemos();
+  return queue.size === 0;
+}
+
+function schedulePump(): void {
+  if (pumpScheduled) return;
+  pumpScheduled = true;
+  setTimeout(() => {
+    pumpScheduled = false;
+    try {
+      if (!pumpEv()) schedulePump();
+    } catch (err) {
+      console.error(err);
+      queue.clear();
+    }
+  }, 0);
+}
+
+function enqueue(key: string, make: () => LandingJob, low: boolean): void {
+  const q = queue.get(key);
+  if (q) {
+    if (!low) q.low = false;
+    return;
+  }
+  queue.set(key, { job: make(), low });
+  schedulePump();
+}
+
+/** Cached stats, or (browser, cold) a provisional answer while the real run is queued. */
+function cachedStats(key: string, make: () => LandingJob, quick: () => LandingStats, near: string[] = []): LandingStats {
+  const d = statCache.get(key);
+  if (d) return d;
+  if (!evAsync) {
+    const st = make().result();
+    store(key, st);
+    return st;
+  }
+  enqueue(key, make, false);
+  let p = provisional.get(key);
+  if (!p) {
+    for (const k of near) {
+      p = statCache.get(k);
+      if (p) break;
+    }
+    p ??= nearestCached(key) ?? quick();
+    if (provisional.size > 200) provisional.clear();
+    provisional.set(key, p);
+  }
+  return p;
+}
+
+/** The closest cached (or provisional) board of the same layout, goal and chute (rows, Malice,
+ * gold distance). */
+function nearestCached(key: string): LandingStats | undefined {
+  const [a, chute = ''] = key.split('#');
+  const [r0, m0, g0, l0, x0] = a.split('|');
+  let best: LandingStats | undefined;
+  let bd = Infinity;
+  for (const [k, st] of [...statCache, ...provisional]) {
+    if (k.startsWith('F')) continue;
+    const [b, ch = ''] = k.split('#');
+    if (ch !== chute) continue;
+    const [r, m, g, l, x] = b.split('|');
+    if (l !== l0 || x !== x0) continue;
+    const d = 3 * Math.abs(+r - +r0) + Math.abs(+m - +m0) + 2 * Math.abs(+g - +g0);
+    if (d < bd) (bd = d), (best = st);
+  }
+  return best;
+}
+
+/** Keys of boards one step away (the provisional stand-ins, and what the queue pre-warms). */
+function nearConfigs(c: BoardConfig): BoardConfig[] {
+  const out: BoardConfig[] = [];
+  if (c.malice > 0) out.push({ ...c, malice: c.malice - 1 });
+  if (c.malice < MALICE_MAX) out.push({ ...c, malice: c.malice + 1 });
+  if (c.gold > 1) out.push({ ...c, gold: c.gold - 1 });
+  if (c.gold < 5) out.push({ ...c, gold: c.gold + 1 });
+  if (c.rows > 10) out.push({ ...c, rows: c.rows - 1 });
+  if (c.rows < 12) out.push({ ...c, rows: c.rows + 1 });
+  return out;
+}
+
 /** Random-x landing stats for a board (bone pegs don't change the physics, so not in the key). */
 export function boardStats(c: BoardConfig): LandingStats {
-  return cached(cfgKey(c), () => landingStats(shape(c), 1200));
+  const key = cfgKey(c);
+  const hit = statCache.get(key);
+  if (hit) return hit;
+  const near = nearConfigs(c);
+  const st = cachedStats(key, () => new LandingJob(shape(c), 1200), () => landingStats(shape(c), QUICK_N), near.map(cfgKey));
+  // Pre-warm the boards the next Malice step or board upgrade would ask for (low priority).
+  if (evAsync) for (const n of near) if (!statCache.has(cfgKey(n))) enqueue(cfgKey(n), () => new LandingJob(shape(n), 1200), true);
+  return st;
 }
 
 /** Landing stats for drops down chute k (Taught Toadlings, Scrying Ladle). */
 export function chuteStats(c: BoardConfig, k: number): LandingStats {
-  return cached(`${cfgKey(c)}#${k}`, () => landingStats(shape(c), 120, k));
+  return cachedStats(
+    `${cfgKey(c)}#${k}`,
+    () => new LandingJob(shape(c), 120, k),
+    () => landingStats(shape(c), QUICK_CHUTE_N, k),
+    nearConfigs(c).map((n) => `${cfgKey(n)}#${k}`),
+  );
 }
 
-/** Layout balance: other layouts' bucket table is scaled so a random drop is worth what it is on
- * Classic (a layout is a different game, not a strict upgrade; 05 §7 "its own EV cache"). */
-const BASE_TIER = [0.5, 1, 1.5, 2, 3];
-export function layoutNorm(run: CRun): number {
+/*
+ * D-cauldron-03: the toadling rain's specials (Wisp Salt homing on the jackpot, Boomshroom gold
+ * procs, Splitroot / thorn halves carrying their gold hits, Lead Heart's drop) and the run's real
+ * pour made the live board earn ~1.2x idleRate late on. A one-off run of the run's own pour on
+ * the full board (rune and thorn pegs in) measures that against the base-mix cache; the ratio is
+ * taken on the Malice-0 bucket table, which keeps the jackpot's variance down.
+ */
+const factorMemo = new Map<string, number>();
+const lastFactor = new Map<string, number>();
+/** A queued board landed: drop the memos that may have been built on provisional stats. */
+function flushMemos(): void {
+  normMemo.clear();
+  factorMemo.clear();
+}
+
+function flowMix(run: CRun, exotic: number): { ing: IngId; w: number }[] {
+  const o = lvOf(run, 'odds');
+  return flow(run).map((i) => ({ ing: i, w: ingWeight(i, exotic, o) * ingValue(run, i) * (INGREDIENTS[i].idleValue ?? 1) }));
+}
+
+export function specialsFactor(run: CRun, _exotic = 0): number {
+  const c = boardConfig(run);
+  // Coarse key (the ratio moves slowly): Malice and Special Odds in steps of 5, Contraband
+  // ignored. That keeps the extra runs to a handful per cycle.
+  const mal = Math.round(c.malice / 5) * 5;
+  const odds = Math.round(lvOf(run, 'odds') / 5) * 5;
+  const fc: BoardConfig = { ...c, malice: mal, bone: 0 };
+  const sig = `${flow(run).join(',')}|${odds}`;
+  const key = `${cfgKey(fc)}|r${fc.rune ?? 0}|t${fc.thorn ?? 0}|${sig}`;
+  const memoKey = `${key}|${c.malice}|${lvOf(run, 'jackpot')}|${lvOf(run, 'lined')}|${lvOf(run, 'polish')}|${tiersOf(run).join('')}|${lvOf(run, 'pot')}`;
+  const m = factorMemo.get(memoKey);
+  if (m !== undefined) return m;
+  const fkey = `F${key}`;
+  const mixRun: CRun = { ...run, lv: { ...run.lv, odds } };
+  const make = () => new LandingJob(fc, 1200, -1, flowMix(mixRun, 0));
+  if (evAsync && !statCache.has(fkey)) {
+    enqueue(fkey, make, false);
+    return lastFactor.get(sig) ?? 1; // provisional (not memoised: the real one lands soon)
+  }
+  const full = cachedStats(fkey, make, () => landingStats(fc, QUICK_N, -1, flowMix(mixRun, 0)));
+  const plain = boardStats(fc);
+  const t0 = rawTierMults(run, 0);
+  const mults = tiersOf(run).map((k) => t0[k]);
+  const g = goldMult(run) - 1;
+  let meas = full.spill * SLOP_MULT * allFactor(run);
+  for (let i = 0; i < BUCKETS; i++) meas += full.dist[i] * mults[i] * (1 + g * full.goldHits[i]) * (1 + (RUNE_MULT - 1) * full.rune[i]);
+  const base = multOf(run, plain, mults);
+  // SIM-TUNED bounds: a measured factor outside 0.85-1.5 would be a sampling accident.
+  const f = base > 0 ? Math.max(0.85, Math.min(1.5, meas / base)) : 1;
+  if (factorMemo.size >= 2000) factorMemo.clear();
+  factorMemo.set(memoKey, f);
+  lastFactor.set(sig, f);
+  return f;
+}
+
+/**
+ * Layout balance (D-cauldron-01): other layouts' bucket table is scaled so a toadling drop is worth
+ * what it is on Classic (a layout is a different game, not a strict upgrade; 05 §7 "its own EV
+ * cache"). The ratio is taken on the run's *real* table (Center Jackpot, Malice, Lined Buckets,
+ * gold pegs, runes, the Taught Toadlings' aim) for the layout's original tiers, so it holds as the
+ * player upgrades. Bucket Shift swaps on a non-Classic layout can lower that layout's worth but
+ * never lift it above Classic's: norm = E_classic / max(E_layout, E_shifted).
+ */
+const normMemo = new Map<string, number>();
+export function layoutNorm(run: CRun, malice = run.malice): number {
   const layout = layoutOf(run);
   if (layout === 'classic') return 1;
-  const ev = (l: LayoutId) => {
-    const st = boardStats({ rows: rows(run), malice: run.malice, gold: 0, layout: l, goalX: goalX(LAYOUTS[l].tiers) });
-    return LAYOUTS[l].tiers.reduce((a, t, k) => a + st.dist[k] * BASE_TIER[t], 0);
-  };
-  const e = ev(layout);
-  return e > 0 ? ev('classic') / e : 1;
+  const tiers = tiersOf(run);
+  const key = `${layout}|${tiers.join('')}|${malice}|${rows(run)}|${goldCount(run)}|${lvOf(run, 'jackpot')}|${lvOf(run, 'lined')}|${lvOf(run, 'polish')}|${lvOf(run, 'rune')}|${lvOf(run, 'taught')}|${lvOf(run, 'pot')}`;
+  let n = normMemo.get(key);
+  if (n === undefined) {
+    const e0 = rawExpected(run, malice, 'classic', LAYOUTS.classic.tiers);
+    const orig = LAYOUTS[layout].tiers;
+    const e1 = rawExpected(run, malice, layout, orig);
+    const e2 = tiers.join('') === orig.join('') ? e1 : rawExpected(run, malice, layout, tiers);
+    const e = Math.max(e1, e2);
+    n = e > 0 && e0 > 0 ? e0 / e : 1;
+    if (normMemo.size >= 2000) normMemo.delete(normMemo.keys().next().value!);
+    normMemo.set(key, n);
+  }
+  return n;
+}
+
+/** Expected bucket multiplier of a toadling drop (random x plus the Taught aim) on `layout` with
+ * `tiers`, on the run's table before the layout factor. */
+function rawExpected(run: CRun, malice: number, layout: LayoutId, tiers: number[]): number {
+  const r: CRun = { ...run, malice, layout, tiers };
+  const c = boardConfig(r);
+  const t = rawTierMults(run, malice);
+  const mults = tiers.map((k) => t[k]);
+  const rand = multOf(run, boardStats(c), mults);
+  const a = taughtShare(run);
+  if (a <= 0) return rand;
+  const b = bestChute(r);
+  let aimed = 0;
+  for (const k of [b - 1, b, b + 1]) aimed += multOf(run, chuteStats(c, Math.max(0, Math.min(BUCKETS - 1, k))), mults) / 3;
+  return (1 - a) * rand + a * aimed;
 }
 
 export function distribution(r: number, malice: number): number[] {
@@ -460,7 +690,7 @@ export function boneEv(run: CRun, exotic = 0): number {
 }
 
 export function evPerDrop(run: CRun, exotic = 0): number {
-  return avgValue(run, exotic) * expectedMult(run) + boneEv(run, exotic);
+  return avgValue(run, exotic) * expectedMult(run) * specialsFactor(run, exotic) + boneEv(run, exotic);
 }
 
 /** On-screen idle Bile/s before core multipliers: toadling drops x value x E[mult]_random.

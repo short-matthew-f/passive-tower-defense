@@ -80,7 +80,7 @@ export function goodsGroup(game: Game, id: DeptId): UpgradeGroup | null {
 export function openArmory(game: Game): void {
   const s = () => game.save;
   const n = () => s().meta.settings.notation;
-  const tribute = () => ({ text: `{coin}${formatNum(s().meta.tribute, n())} TRIBUTE`, color: C.goldText });
+  const tribute = () => ({ text: `{tribute}${formatNum(s().meta.tribute, n())} TRIBUTE`, color: C.goldText });
 
   const market: UpgradeEntry[] = GOOD_ORDER.filter((g) => game.defs[GOODS[g].exporter]).map((g) => {
     const def = GOODS[g];
@@ -97,6 +97,7 @@ export function openArmory(game: Game): void {
       cost: () => marketCost(s(), game.marketDay(), MARKET_BUNDLE),
       currency: 'Tribute',
       buyLabel: `+${MARKET_BUNDLE}`,
+      repeat: true, // repeated bundles, not a toggle
       canAfford: () => s().meta.tribute + 1e-9 >= marketCost(s(), game.marketDay(), MARKET_BUNDLE),
       buy: () => {
         game.buyGoods(g, MARKET_BUNDLE);

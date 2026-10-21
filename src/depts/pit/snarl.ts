@@ -74,7 +74,7 @@ export const snarl: ManagerDef = {
 
 /** The intro (07 §18): ~90 s, Snarl's 120-Teeth purse and the starter garrison. */
 export const onboarding: OnboardingStep[] = [
-  { id: 'purse', line: 'Purse is yours, Chief. Spend.', target: 'upgrades', gesture: 'tap', done: (s) => Object.values(run(s)?.lv ?? {}).some((l) => l > 0) || (run(s)?.stakesBought ?? 0) > 0 },
+  { id: 'purse', line: 'Purse is yours, Chief. Spend.', target: 'upgrades', sheetTarget: 'hardy', gesture: 'tap', done: (s) => Object.values(run(s)?.lv ?? {}).some((l) => l > 0) || (run(s)?.stakesBought ?? 0) > 0 },
   { id: 'start', line: 'Start a Run. Draft beasts.', target: 'start', gesture: 'tap', done: (s) => !!cur(s) || seen(s, 'pit.buy') },
   { id: 'buy', line: 'Pick a beast. Tap, then a slot.', target: 'shop.0', gesture: 'tap', waitFor: open, done: (s) => seen(s, 'pit.buy') },
   { id: 'line', line: 'Front is left. Takes the hits.', target: 'line.last', gesture: 'drag', dragTo: 'line.0', waitFor: (s) => open(s) && (cur(s)!.line.filter(Boolean).length ?? 0) > 0, done: (s) => seen(s, 'pit.move') || seen(s, 'pit.fight') },

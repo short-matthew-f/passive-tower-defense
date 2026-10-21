@@ -18,6 +18,7 @@ import {
   rankEff,
   tributeCapSeconds,
   tributeRate,
+  updateLateRecruit,
 } from '../src/core/economy';
 import type { DeptEcon } from '../src/core/dept';
 import {
@@ -450,6 +451,8 @@ export function simulate(cfg: SimConfig): SimResult {
       const def = defs[id];
       const tr = tracks[id];
       d.lifetime.peakRank = Math.max(d.lifetime.peakRank, rank(s, id, defs));
+      // game.ts checkProgress: the Late Recruit latch (00 §6).
+      updateLateRecruit(s, id, defs);
       const inf = infamy(def, d);
       if (inf.econ >= 1 && econFullAt[id] === undefined) econFullAt[id] = t;
       if (d.cycle.n === 0) {

@@ -1,26 +1,11 @@
 // Tiny WebAudio blips for the Spire: merge bloops that climb a semitone per tier and per cascade
 // step, the vent's cough, the Singularity's chord and a soft drop tick. One shared AudioContext,
 // created on the first sound (after a user gesture); every node is short-lived.
-let ac: AudioContext | null = null;
-let failed = false;
+import { getAudioContext } from '../../core/audio';
 
+/** The suite's one shared AudioContext (perf P-06: core/audio.ts). */
 function ctx(): AudioContext | null {
-  if (failed) return null;
-  try {
-    if (!ac) {
-      const AC = (window as any).AudioContext ?? (window as any).webkitAudioContext;
-      if (!AC) {
-        failed = true;
-        return null;
-      }
-      ac = new AC() as AudioContext;
-    }
-    if (ac.state === 'suspended') void ac.resume();
-    return ac;
-  } catch {
-    failed = true;
-    return null;
-  }
+  return getAudioContext();
 }
 
 function tone(freq: number, dur: number, vol: number, type: OscillatorType, delay = 0, slide = 0): void {
