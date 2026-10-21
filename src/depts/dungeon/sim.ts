@@ -1,6 +1,6 @@
 // The Dungeon's fixed-step simulation (specs/01 §14): pure TS, no Pixi. The live scene runs it at
 // 20 Hz and renders from it; idleRate runs the same code headless over a few seeds.
-import { COLS, HOARD, idx, lairPost, LOOPS, ROUTES, ROWS, type Route } from './map';
+import { COLS, entranceOn, idx, lairPost, routeFor, ROWS, FLOOR0, type Grid, type Route } from './map';
 import * as M from './model';
 
 export const STEP = 0.05; // 20 Hz
@@ -52,6 +52,15 @@ export interface SimHero {
   /** Caged Bait (Captives import): baited loop entrances passed, and the glance timer. */
   baitI: number;
   glanceT: number;
+  /** Eye of Gloom aura this step: slow fraction and +damage taken (reset each step). */
+  gloomF: number;
+  vuln: number;
+  /** Inside an Eye of Gloom's aura: Rogues cannot dodge (01 §5.1 "reveals Rogues"). */
+  revealed: boolean;
+  /** Confusion: walking backward. */
+  confT: number;
+  /** Wizard: seconds to the next dispel. */
+  castT: number;
 }
 
 export interface SimTower {
@@ -69,6 +78,11 @@ export interface SimTower {
   dps: number;
   settle: number;
   active: boolean;
+  /** Aura slow (Eye, Cinders brazier) and +damage taken (Withering Eye). */
+  slow: number;
+  vuln: number;
+  /** Ignores armor (Piercer arrows). */
+  pierceArmor: boolean;
 }
 
 export interface SimMinion {
@@ -87,6 +101,8 @@ export interface SimMinion {
   alive: boolean;
   blocked: SimHero[];
   swing: number; // live: attack animation timer
+  /** Slime Pit: a split slime (appears when the big one dies; never respawns on a timer). */
+  split: boolean;
 }
 
 export interface SimRune {
@@ -98,34 +114,48 @@ export interface SimRune {
   slowDur: number;
   stun: number;
   dmg: number;
+  bleed: number;
   charges: number;
   maxCharges: number;
   recharge: number;
   rechargeT: number;
   settle: number;
   flash: number;
+  /** Greed: bonus and radius. Confusion: duration, cooldown and its timer. */
+  bonus: number;
+  radius: number;
+  confuse: number;
+  cool: number;
+  coolT: number;
+  champConfuse: boolean;
+  /** Dispelled by a Wizard (seconds left). */
+  off: number;
 }
 
 export type SimEvent =
   | { t: 'shot'; kind: 'arrow' | 'ballista' | 'clerk'; x1: number; y1: number; x2: number; y2: number; miss: boolean }
-  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; by: 'glare' | 'other' }
+  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; by: 'glare' | 'other'; greed: boolean }
   | { t: 'leak'; x: number; y: number; hero: M.HeroType; sack: number }
   | { t: 'escape'; hero: M.HeroType; sack: number }
   | { t: 'rune'; x: number; y: number; kind: M.RuneKind }
   | { t: 'trapped'; x: number; y: number }
+  | { t: 'sunk'; x: number; y: number }
+  | { t: 'dispel'; x: number; y: number; rx: number; ry: number }
   | { t: 'party'; n: number; champ: boolean; bonus: number }
   | { t: 'partyDone'; size: number; leaked: number }
-  | { t: 'minionDown'; x: number; y: number }
+  | { t: 'minionDown'; x: number; y: number; split: boolean }
   | { t: 'loot'; x: number; y: number };
 
 export interface SimSetup {
   pieces: M.PieceSave[];
-  chests: [number, number];
+  bait: number[];
   ws: M.Workshop;
   lure: number;
   party: number;
   seed: number;
   live: boolean;
+  /** The floor's grid (default: floor 0 as authored). */
+  grid?: Grid;
   /** Goods imports (00 §4): Iron-shod Towers armor pierce, Caged Bait level. */
   ap?: number;
   caged?: number;
@@ -144,7 +174,9 @@ export class Sim {
   live: boolean;
   lure: number;
   ws: M.Workshop;
-  mask = 0;
+  grid: Grid;
+  route: Route;
+  rogueRoute: Route;
   heroes: SimHero[] = [];
   towers: SimTower[] = [];
   minions: SimMinion[] = [];
@@ -179,8 +211,10 @@ export class Sim {
   /** Caged Bait level: L1 rogues glance 1 s at each baited loop's entrance; L2-3 +10% purse each
    * on parties that loot a Bait Chest. */
   caged = 0;
-  /** Route distance (on the rogues' main path) of each baited loop's entrance. */
+  /** Route distance (on the rogues' route) of each baited loop's entrance. */
   private baitAt: number[] = [];
+  private hasCleric = false;
+  private hasGreed = false;
 
   constructor(s: SimSetup) {
     this.live = s.live;
@@ -190,7 +224,10 @@ export class Sim {
     this.ws = s.ws;
     this.partyN = s.party;
     this.rng = mulberry32(s.seed);
-    this.setLayout(s.pieces, s.chests, s.ws);
+    this.grid = s.grid ?? FLOOR0;
+    this.route = routeFor(this.grid, s.bait);
+    this.rogueRoute = routeFor(this.grid, [], true);
+    this.setLayout(s.pieces, s.bait, s.ws, undefined, this.grid);
     this.regenQueue();
   }
 
@@ -211,12 +248,20 @@ export class Sim {
     const champ = M.isChampParty(n, T);
     const size = M.partySize(T) - (champ ? 1 : 0);
     const out: M.HeroType[] = [];
-    const wR = T >= M.ROGUE_LURE ? 15 : 0;
-    const wK = T >= M.KNIGHT_LURE ? 15 : 0;
-    const tot = 50 + wR + wK;
+    let tot = 0;
+    for (const [, w, at] of M.HERO_WEIGHTS) if (T >= at) tot += w;
     for (let i = 0; i < size; i++) {
-      const r = this.rng() * tot;
-      out.push(r < 50 ? 'squire' : r < 50 + wR ? 'rogue' : 'knight');
+      let r = this.rng() * tot;
+      let pick: M.HeroType = 'squire';
+      for (const [t, w, at] of M.HERO_WEIGHTS) {
+        if (T < at) continue;
+        if (r < w) {
+          pick = t;
+          break;
+        }
+        r -= w;
+      }
+      out.push(pick);
     }
     // Slow, tough heroes walk at the back so the party reads at a glance.
     out.sort((a, b) => HERO_ORDER[a] - HERO_ORDER[b]);
@@ -224,14 +269,25 @@ export class Sim {
     return out;
   }
 
-  /** Rebuilds towers, lairs and runes from the save. `settle` maps piece id -> inactive seconds. */
-  setLayout(pieces: M.PieceSave[], chests: [number, number], ws: M.Workshop, settle?: Map<number, number>): void {
+  /**
+   * Rebuilds towers, lairs and runes from the save. `settle` maps piece id -> inactive seconds.
+   * A new `grid` (Dig, floor switch) re-routes heroes already on the field from their position.
+   */
+  setLayout(pieces: M.PieceSave[], bait: number[], ws: M.Workshop, settle?: Map<number, number>, grid?: Grid): void {
     this.ws = ws;
-    this.mask = (chests[0] ? 1 : 0) | (chests[1] ? 2 : 0);
-    this.baitAt = LOOPS.filter((_, i) => (this.mask >> i) & 1)
-      .map((l) => ROUTES[0].cum[l.from])
-      .sort((x, y) => x - y);
-    for (const h of this.heroes) h.blocked = null;
+    const regrid = !!grid && grid.key !== this.grid.key;
+    if (grid) this.grid = grid;
+    this.route = routeFor(this.grid, bait);
+    this.rogueRoute = routeFor(this.grid, [], true);
+    this.baitAt = this.route.chestAt.length
+      ? bait.filter((b) => this.grid.spots.includes(b)).map((b) => entranceOn(this.grid, this.rogueRoute, b)).sort((x, y) => x - y)
+      : [];
+    for (const h of this.heroes) {
+      h.blocked = null;
+      // A new grid may remove tiles under an old route: re-route from where each hero stands. A new
+      // bait set leaves heroes already on the field on their route (as the MVP did).
+      if (regrid) this.reroute(h, h.type === 'rogue' ? this.rogueRoute : this.route);
+    }
     // Keep minion health/respawn and rune charges across rebuilds (upgrades must not heal for free).
     const oldM = new Map(this.minions.map((m) => [`${m.id}.${m.n}`, m]));
     const oldR = new Map(this.runes.map((r) => [r.id, r]));
@@ -242,53 +298,97 @@ export class Sim {
     const tm = M.towerMult(ws);
     const sm = M.summonMult(ws);
     const rm = M.runeMult(ws);
+    const rp = 1 + 0.5 * (rm - 1); // rune potency for percentages
+    const g = this.grid;
     for (const p of pieces) {
       const lm = M.levelMult(p.l);
       const rb = M.rangeBonus(p.l);
+      const b = p.b;
+      const b2 = p.l >= M.BRANCH_LEVEL2 ? (p.b2 ?? 0) : 0;
       const st = settle?.get(p.id) ?? 0;
       const cx = p.x + 0.5;
       const cy = p.y + 0.5;
       const tw = (kind: M.TowerKind, range: number, o: Partial<SimTower>) =>
-        this.towers.push({ id: p.id, kind, x: cx, y: cy, range, range2: range * range, dmg: 0, rate: 1, cd: 0, pierce: 1, bleed: 0, dps: 0, settle: st, active: false, ...o });
+        this.towers.push({
+          id: p.id, kind, x: cx, y: cy, range, range2: range * range, dmg: 0, rate: 1, cd: 0, pierce: 1, bleed: 0, dps: 0,
+          settle: st, active: false, slow: 0, vuln: 0, pierceArmor: false, ...o,
+        });
       switch (p.k) {
         case 'arrow':
-          tw('arrow', 3 + rb, { dmg: 4 * lm * tm * (p.b === 1 ? 2.2 : 1), rate: 1.2 * (p.b === 1 ? 0.6 : 1), bleed: p.b === 2 ? 2 * lm * tm : 0 });
+          tw('arrow', 3 + rb, {
+            dmg: 4 * lm * tm * (b === 1 ? 2.2 : 1),
+            rate: 1.2 * (b === 1 ? 0.6 : 1) * (b2 === 1 ? 1.5 : 1),
+            bleed: b === 2 ? 2 * lm * tm : 0,
+            pierceArmor: b2 === 2,
+          });
           break;
         case 'brazier':
-          tw('brazier', 1.5 + rb + (p.b === 1 ? 0.7 : 0), { dps: 3 * lm * tm * (p.b === 2 ? 1.7 : 1) });
+          tw('brazier', 1.5 + rb + (b === 1 ? 0.7 : 0), { dps: 3 * lm * tm * (b === 2 ? 1.7 : 1) * (b2 === 1 ? 1.4 : 1), slow: b2 === 2 ? 0.2 : 0 });
           break;
         case 'ballista':
-          tw('ballista', 5 + rb, { dmg: 30 * lm * tm * (p.b === 1 ? 2 : 1), rate: 0.4 * (p.b === 2 ? 1.25 : 1), pierce: p.b === 2 ? 5 : 3 });
+          tw('ballista', 5 + rb, { dmg: 30 * lm * tm * (b === 1 ? 2 : 1) * (b2 === 1 ? 1.5 : 1), rate: 0.4 * (b === 2 ? 1.25 : 1) * (b2 === 2 ? 1.6 : 1), pierce: b === 2 ? 5 : 3 });
+          break;
+        case 'eye':
+          tw('eye', 2 + rb + (b === 2 ? 1 : 0) + (b2 === 2 ? 0.5 : 0), {
+            slow: Math.min(0.6, ((b === 1 ? 0.4 : 0.25) + 0.01 * (p.l - 1) + (b2 === 2 ? 0.15 : 0))),
+            vuln: b2 === 1 ? 0.2 : 0,
+          });
           break;
         case 'crypt':
+        case 'slime':
         case 'ogre': {
-          const post = lairPost(p.x, p.y);
+          const post = lairPost(g, p.x, p.y);
           if (!post) break;
-          const ogre = p.k === 'ogre';
-          const n = ogre ? 1 : 2 + (p.b === 1 ? 1 : 0);
-          const hp = ogre ? 200 * lm * sm * (p.b === 2 ? 1.5 : 1) : 30 * lm * sm * (p.b === 2 ? 2.5 : 1);
-          const dps = ogre ? 12 * lm * sm * (p.b === 1 ? 1.7 : 1) : 3 * lm * sm;
-          for (let i = 0; i < n; i++)
-            this.minions.push({
-              id: p.id, kind: p.k, n: i, px: post[0] + 0.5, py: post[1] + 0.5, hp, maxHp: hp, dps,
-              cap: ogre ? (p.b === 2 ? 3 : 2) : 1, cleave: ogre, respawn: ogre ? 20 : 8,
-              respawnT: st, alive: st <= 0, blocked: [], swing: 0,
-            });
+          const base = { id: p.id, kind: p.k, px: post[0] + 0.5, py: post[1] + 0.5, blocked: [] as SimHero[], swing: 0 };
+          if (p.k === 'ogre') {
+            const hp = 200 * lm * sm * (b === 2 ? 1.5 : 1) * (b2 === 1 ? 1.3 : b2 === 2 ? 2 : 1);
+            const dps = 12 * lm * sm * (b === 1 ? 1.7 : 1) * (b2 === 1 ? 1.5 : 1);
+            this.minions.push({ ...base, n: 0, hp, maxHp: hp, dps, cap: b === 2 ? 3 : 2, cleave: true, respawn: 20, respawnT: st, alive: st <= 0, split: false });
+          } else if (p.k === 'crypt') {
+            const n = 2 + (b === 1 ? 1 : 0) + (b2 === 1 ? 1 : 0);
+            const hp = 30 * lm * sm * (b === 2 ? 2.5 : 1);
+            const dps = 3 * lm * sm;
+            const respawn = b2 === 2 ? 4 : 8;
+            for (let i = 0; i < n; i++) this.minions.push({ ...base, blocked: [], n: i, hp, maxHp: hp, dps, cap: 1, cleave: false, respawn, respawnT: st, alive: st <= 0, split: false });
+          } else {
+            const hp = 50 * lm * sm * (b === 1 ? 2 : 1);
+            const dps = 2 * lm * sm * (b === 2 ? 2 : 1);
+            const cap = b2 === 2 ? 2 : 1;
+            this.minions.push({ ...base, n: 0, hp, maxHp: hp, dps, cap, cleave: false, respawn: 12, respawnT: st, alive: st <= 0, split: false });
+            const splits = b2 === 1 ? 3 : 2;
+            const shp = 20 * lm * sm * (b === 1 ? 2 : 1);
+            for (let i = 1; i <= splits; i++)
+              this.minions.push({ ...base, blocked: [], n: i, hp: shp, maxHp: shp, dps: dps * 0.6, cap: 1, cleave: false, respawn: Infinity, respawnT: Infinity, alive: false, split: true });
+          }
           break;
         }
         case 'mire':
-        case 'spikes': {
+        case 'spikes':
+        case 'greed':
+        case 'confusion': {
           const i = this.runes.length;
-          const mire = p.k === 'mire';
-          this.runes.push({
-            id: p.id, kind: p.k, x: p.x, y: p.y,
-            slow: mire ? Math.min(0.7, (p.b === 1 ? 0.55 : 0.4) * (1 + 0.5 * (rm - 1))) : 0,
-            slowDur: mire ? 2 * (1 + 0.08 * (p.l - 1)) : 0,
-            stun: mire && p.b === 2 ? 0.08 : 0,
-            dmg: mire ? 0 : 8 * lm * rm * (p.b === 1 ? 1.8 : 1),
-            charges: mire ? 0 : p.b === 2 ? 5 : 3, maxCharges: mire ? 0 : p.b === 2 ? 5 : 3,
-            recharge: p.b === 2 ? 2 : 4, rechargeT: 0, settle: st, flash: 0,
-          });
+          const r: SimRune = {
+            id: p.id, kind: p.k, x: p.x, y: p.y, slow: 0, slowDur: 0, stun: 0, dmg: 0, bleed: 0, charges: 0, maxCharges: 0,
+            recharge: 4, rechargeT: 0, settle: st, flash: 0, bonus: 0, radius: 0, confuse: 0, cool: 0, coolT: 0, champConfuse: false, off: 0,
+          };
+          if (p.k === 'mire') {
+            r.slow = Math.min(0.7, (b === 1 ? 0.55 : 0.4) * rp);
+            r.slowDur = 2 * (1 + 0.08 * (p.l - 1)) * (b2 === 1 ? 1.6 : 1);
+            r.stun = b === 2 ? 0.08 * (b2 === 2 ? 2 : 1) : 0;
+          } else if (p.k === 'spikes') {
+            r.dmg = 8 * lm * rm * (b === 1 ? 1.8 : 1) * (b2 === 1 ? 1.6 : 1);
+            r.bleed = b2 === 2 ? 3 * lm * rm : 0;
+            r.charges = r.maxCharges = b === 2 ? 5 : 3;
+            r.recharge = b === 2 ? 2 : 4;
+          } else if (p.k === 'greed') {
+            r.bonus = M.GREED_BONUS * (1 + 0.05 * (p.l - 1)) * rp * (b === 1 ? 1.5 : 1) * (b2 === 1 ? 1.3 : 1);
+            r.radius = (b === 2 ? 3 : M.GREED_RADIUS) + (b2 === 2 ? 1 : 0) + rb;
+          } else {
+            r.confuse = (b === 1 ? 2.5 : M.CONFUSE_S) * (1 + 0.04 * (p.l - 1)) * (b2 === 1 ? 1.4 : 1);
+            r.cool = (b === 2 ? 6 : M.CONFUSE_CD) * (b2 === 2 ? 0.6 : 1);
+            r.champConfuse = b2 === 1;
+          }
+          this.runes.push(r);
           this.runeAt[idx(p.x, p.y)] = i;
           break;
         }
@@ -296,20 +396,50 @@ export class Sim {
     }
     for (const m of this.minions) {
       const o = oldM.get(`${m.id}.${m.n}`);
-      if (!o || m.respawnT > 0) continue;
+      if (!o || o.kind !== m.kind) continue;
+      if (m.split) {
+        m.alive = o.alive;
+        m.hp = o.alive ? Math.min(m.maxHp, m.maxHp * (o.hp / o.maxHp)) : m.maxHp;
+        continue;
+      }
+      if (m.respawnT > 0) continue;
       m.alive = o.alive;
       m.respawnT = o.respawnT;
       m.hp = o.alive ? Math.min(m.maxHp, m.maxHp * (o.hp / o.maxHp)) : m.maxHp;
     }
     for (const r of this.runes) {
       const o = oldR.get(r.id);
-      if (o && o.kind === r.kind) r.charges = Math.min(r.maxCharges, o.charges);
+      if (o && o.kind === r.kind) {
+        r.charges = Math.min(r.maxCharges, o.charges);
+        r.off = o.off;
+        r.coolT = Math.min(r.cool, o.coolT);
+      }
     }
+    this.hasGreed = this.runes.some((r) => r.kind === 'greed');
     // Ledger-Bones throws bones from the Hoard (starter kit, 01 §4).
+    const [hx, hy] = g.hoard;
     this.towers.push({
-      id: 0, kind: 'clerk', x: HOARD[0] + 0.5, y: HOARD[1] + 0.5, range: M.CLERK.range, range2: M.CLERK.range ** 2,
-      dmg: M.CLERK.dmg, rate: M.CLERK.rate, cd: 0, pierce: 1, bleed: 0, dps: 0, settle: 0, active: false,
+      id: 0, kind: 'clerk', x: hx + 0.5, y: hy + 0.5, range: M.CLERK.range, range2: M.CLERK.range ** 2,
+      dmg: M.CLERK.dmg, rate: M.CLERK.rate, cd: 0, pierce: 1, bleed: 0, dps: 0, settle: 0, active: false, slow: 0, vuln: 0, pierceArmor: false,
     });
+  }
+
+  /** Moves a hero onto a new route at the nearest point (Dig / chest change mid-walk). */
+  private reroute(h: SimHero, r: Route): void {
+    let best = 0;
+    let bd = Infinity;
+    for (let k = 0; k < r.n; k++) {
+      const d = (r.xs[k] - h.x) ** 2 + (r.ys[k] - h.y) ** 2;
+      if (d < bd - 1e-9) {
+        bd = d;
+        best = k;
+      }
+    }
+    h.route = r;
+    h.dist = h.dir < 0 ? Math.min(r.cum[best], r.len) : r.cum[best];
+    h.seg = Math.min(best, r.n - 2);
+    h.chestI = r.chestAt.filter((c) => c < h.dist).length;
+    this.place(h);
   }
 
   // ---------- active verbs ----------
@@ -370,18 +500,25 @@ export class Sim {
         this.spawnT += M.SPAWN_GAP;
       }
     }
+    this.auras();
     this.moveHeroes(dt);
     if (this.minions.length) this.blockAndFight(dt);
     this.fireTowers(dt);
+    if (this.hasCleric) this.heal(dt);
     this.updateRunes(dt);
     if (this.trap) this.updateTrap(dt);
     // Compact.
     let w = 0;
+    let cl = false;
     for (let i = 0; i < this.heroes.length; i++) {
       const h = this.heroes[i];
-      if (!h.dead && !h.gone) this.heroes[w++] = h;
+      if (!h.dead && !h.gone) {
+        this.heroes[w++] = h;
+        if (h.type === 'cleric') cl = true;
+      }
     }
     this.heroes.length = w;
+    this.hasCleric = cl;
   }
 
   private launch(bonus: number): void {
@@ -399,14 +536,16 @@ export class Sim {
   private spawnHero(type: M.HeroType, party: number): void {
     const T = this.lure;
     const d = M.HEROES[type];
-    const route = type === 'rogue' ? ROUTES[0] : ROUTES[this.mask];
+    const route = type === 'rogue' ? this.rogueRoute : this.route;
     const hp = d.hp * M.hpScale(T);
     this.heroes.push({
       id: this.nextHero++, type, hp, maxHp: hp, armor: M.heroArmor(type, T), speed: d.spd, atk: d.atk * M.atkScale(T),
-      bounty: d.b * M.bountyScale(T), dodge: d.dodge, route, dist: 0, seg: 0, x: route.xs[0], y: route.ys[0],
+      bounty: d.b * M.bountyScale(T) * M.floorBounty(this.grid.f), dodge: d.dodge, route, dist: 0, seg: 0, x: route.xs[0], y: route.ys[0],
       px: route.xs[0], py: route.ys[0], dir: 1, slowT: 0, slowF: 0, bleedT: 0, bleedDps: 0, stunT: 0, blocked: null,
       tile: -1, party, sack: 0, leaked: false, flash: 0, dead: false, gone: false, chestI: 0, baitI: 0, glanceT: 0,
+      gloomF: 0, vuln: 0, revealed: false, confT: 0, castT: type === 'wizard' ? M.WIZ_EVERY / 2 : 0,
     });
+    if (type === 'cleric') this.hasCleric = true;
     this.spawned++;
   }
 
@@ -422,7 +561,30 @@ export class Sim {
     h.y = r.ys[s] + (r.ys[s + 1] - r.ys[s]) * f;
   }
 
+  /** Eye of Gloom and Cinders auras: slow and vulnerability for this step. */
+  private auras(): void {
+    for (const h of this.heroes) {
+      h.gloomF = 0;
+      h.vuln = 0;
+      h.revealed = false;
+    }
+    for (const tw of this.towers) {
+      if (tw.settle > 0 || (tw.slow <= 0 && tw.vuln <= 0)) continue;
+      for (const h of this.heroes) {
+        if (h.dead || h.gone) continue;
+        const dx = h.x - tw.x;
+        const dy = h.y - tw.y;
+        if (dx * dx + dy * dy > tw.range2) continue;
+        if (tw.kind === 'eye') tw.active = true;
+        h.gloomF = Math.max(h.gloomF, h.type === 'champ' ? tw.slow * 0.5 : tw.slow);
+        h.vuln = Math.max(h.vuln, tw.vuln);
+        if (tw.kind === 'eye') h.revealed = true;
+      }
+    }
+  }
+
   private moveHeroes(dt: number): void {
+    const g = this.grid;
     for (const h of this.heroes) {
       h.px = h.x;
       h.py = h.y;
@@ -433,6 +595,7 @@ export class Sim {
         this.hurt(h, h.bleedDps * dt, true);
         if (h.dead) continue;
       }
+      if (h.type === 'wizard' && h.dir > 0) this.cast(h, dt);
       if (h.slowT > 0) h.slowT -= dt;
       if (h.stunT > 0) {
         h.stunT -= dt;
@@ -445,16 +608,33 @@ export class Sim {
       if (h.blocked) continue;
       let spd = h.speed * (h.dir < 0 ? 1.3 : 1);
       if (h.slowT > 0) spd *= 1 - h.slowF;
-      h.dist += spd * dt * h.dir;
-      if (h.dir > 0 && h.dist >= h.route.len) {
+      if (h.gloomF > 0) spd *= 1 - h.gloomF;
+      if (h.type === 'rogue' && h.tile >= 0 && g.water[h.tile]) spd *= M.WATER_ROGUE;
+      let dir = h.dir;
+      if (h.confT > 0) {
+        h.confT -= dt;
+        dir = -dir as 1 | -1;
+      }
+      h.dist += spd * dt * dir;
+      if (h.dist >= h.route.len) {
         h.dist = h.route.len;
-        this.reachHoard(h);
-      } else if (h.dir < 0 && h.dist <= 0) {
+        if (h.dir > 0 && dir > 0) {
+          this.reachHoard(h);
+          this.place(h);
+          continue;
+        }
+      } else if (h.dist <= 0) {
         h.dist = 0;
-        this.escape(h);
-        continue;
+        if (h.dir < 0 && dir < 0) {
+          this.escape(h);
+          continue;
+        }
       }
       this.place(h);
+      if (dir < 0) {
+        h.tile = idx(Math.floor(h.x), Math.floor(h.y));
+        continue;
+      }
       if (h.type === 'rogue' && h.dir > 0 && this.caged > 0 && h.baitI < this.baitAt.length && h.dist >= this.baitAt[h.baitI]) {
         // Caged Bait: a glance at the captive, no detour (Rogues still ignore Bait Chests, W-15).
         h.baitI++;
@@ -477,6 +657,44 @@ export class Sim {
     }
   }
 
+  /** Wizard: every WIZ_EVERY s, dispel the nearest live rune within WIZ_RANGE tiles. */
+  private cast(h: SimHero, dt: number): void {
+    h.castT -= dt;
+    if (h.castT > 0) return;
+    h.castT = M.WIZ_EVERY;
+    let best: SimRune | null = null;
+    let bd = M.WIZ_RANGE * M.WIZ_RANGE;
+    for (const r of this.runes) {
+      if (r.off > 0) continue;
+      const d = (r.x + 0.5 - h.x) ** 2 + (r.y + 0.5 - h.y) ** 2;
+      if (d <= bd) {
+        bd = d;
+        best = r;
+      }
+    }
+    if (!best) {
+      h.castT = 1; // nothing in range: look again soon
+      return;
+    }
+    best.off = M.WIZ_OFF;
+    this.emit({ t: 'dispel', x: h.x, y: h.y, rx: best.x, ry: best.y });
+  }
+
+  /** Clerics heal allies within CLERIC_RANGE (01 §5.1). */
+  private heal(dt: number): void {
+    const amt = M.CLERIC_HEAL * M.hpScale(this.lure) * dt;
+    const r2 = M.CLERIC_RANGE * M.CLERIC_RANGE;
+    for (const c of this.heroes) {
+      if (c.type !== 'cleric' || c.dead || c.gone) continue;
+      for (const h of this.heroes) {
+        if (h === c || h.dead || h.gone || h.hp >= h.maxHp) continue;
+        const dx = h.x - c.x;
+        const dy = h.y - c.y;
+        if (dx * dx + dy * dy <= r2) h.hp = Math.min(h.maxHp, h.hp + amt);
+      }
+    }
+  }
+
   private blockAndFight(dt: number): void {
     const ms = this.minions;
     for (const m of ms) {
@@ -486,7 +704,7 @@ export class Sim {
       m.blocked.length = w;
     }
     for (const h of this.heroes) {
-      if (h.dead || h.gone || h.blocked) continue;
+      if (h.dead || h.gone || h.blocked || h.confT > 0) continue;
       for (const m of ms) {
         if (!m.alive || m.blocked.length >= m.cap) continue;
         const dx = h.x - m.px;
@@ -500,6 +718,7 @@ export class Sim {
     }
     for (const m of ms) {
       if (!m.alive) {
+        if (m.split) continue;
         m.respawnT -= dt;
         if (m.respawnT <= 0) {
           m.alive = true;
@@ -523,7 +742,14 @@ export class Sim {
         m.respawnT = m.respawn;
         for (const h of m.blocked) if (h.blocked === m) h.blocked = null;
         m.blocked.length = 0;
-        this.emit({ t: 'minionDown', x: m.px, y: m.py });
+        this.emit({ t: 'minionDown', x: m.px, y: m.py, split: m.kind === 'slime' && !m.split });
+        if (m.kind === 'slime' && !m.split) {
+          // The big slime splits into smaller ones on its post.
+          for (const s of ms) if (s.id === m.id && s.split && !s.alive) {
+            s.alive = true;
+            s.hp = s.maxHp;
+          }
+        }
       }
     }
   }
@@ -541,6 +767,7 @@ export class Sim {
         tw.active = false;
         continue;
       }
+      if (tw.kind === 'eye') continue; // aura only (auras())
       if (tw.kind === 'brazier') {
         tw.active = false;
         const d = tw.dps * dt;
@@ -577,10 +804,11 @@ export class Sim {
       tw.cd = Math.max(tw.cd, -0.2) + 1 / tw.rate;
       if (tw.kind === 'ballista') this.ballista(tw, best);
       else {
-        const miss = best.dodge > 0 && this.rng() < best.dodge;
-        this.emit({ t: 'shot', kind: tw.kind, x1: tw.x, y1: tw.y, x2: best.x, y2: best.y, miss });
+        // An Eye of Gloom reveals Rogues: no dodging inside its aura.
+        const miss = best.dodge > 0 && !best.revealed && this.rng() < best.dodge;
+        this.emit({ t: 'shot', kind: tw.kind as 'arrow' | 'clerk', x1: tw.x, y1: tw.y, x2: best.x, y2: best.y, miss });
         if (!miss) {
-          this.hurt(best, tw.dmg, false);
+          this.hurt(best, tw.dmg, tw.pierceArmor);
           if (tw.bleed > 0 && !best.dead) {
             best.bleedT = 3;
             best.bleedDps = Math.max(best.bleedDps, tw.bleed);
@@ -602,7 +830,7 @@ export class Sim {
     this.emit({ t: 'shot', kind: 'ballista', x1: tw.x, y1: tw.y, x2: ex, y2: ey, miss: false });
     let hits = 0;
     const tryHit = (h: SimHero) => {
-      if (h.dodge > 0 && this.rng() < h.dodge) return;
+      if (h.dodge > 0 && !h.revealed && this.rng() < h.dodge) return;
       this.hurt(h, tw.dmg, false);
       hits++;
     };
@@ -620,18 +848,34 @@ export class Sim {
   }
 
   private triggerRune(r: SimRune, h: SimHero): void {
-    if (r.settle > 0) return;
+    if (r.settle > 0 || r.off > 0) return;
     if (r.kind === 'mire') {
       h.slowF = h.slowT > 0 ? Math.max(h.slowF, r.slow) : r.slow;
       h.slowT = r.slowDur;
-      if (r.stun > 0 && h.type !== 'champ' && this.rng() < r.stun) h.stunT = 1.5;
+      if (r.stun > 0 && h.type !== 'champ' && this.rng() < r.stun) {
+        h.stunT = 1.5;
+        this.emit({ t: 'sunk', x: h.x, y: h.y });
+      }
       r.flash = 0.3;
       this.emit({ t: 'rune', x: r.x, y: r.y, kind: 'mire' });
-    } else if (r.charges >= 1) {
+    } else if (r.kind === 'spikes') {
+      if (r.charges < 1) return;
       r.charges--;
       r.flash = 0.3;
       this.hurt(h, r.dmg, false);
+      if (r.bleed > 0 && !h.dead) {
+        h.bleedT = 3;
+        h.bleedDps = Math.max(h.bleedDps, r.bleed);
+      }
       this.emit({ t: 'rune', x: r.x, y: r.y, kind: 'spikes' });
+    } else if (r.kind === 'confusion') {
+      if (r.coolT > 0) return;
+      if (h.type === 'champ' && !r.champConfuse) return;
+      r.coolT = r.cool;
+      r.flash = 0.4;
+      h.confT = h.type === 'champ' ? r.confuse * 0.5 : r.confuse;
+      this.release(h);
+      this.emit({ t: 'rune', x: r.x, y: r.y, kind: 'confusion' });
     }
   }
 
@@ -639,6 +883,8 @@ export class Sim {
     for (const r of this.runes) {
       if (r.settle > 0) r.settle -= dt;
       if (r.flash > 0) r.flash -= dt;
+      if (r.off > 0) r.off -= dt;
+      if (r.coolT > 0) r.coolT -= dt;
       if (r.charges < r.maxCharges) {
         r.rechargeT -= dt;
         if (r.rechargeT <= 0) {
@@ -661,6 +907,7 @@ export class Sim {
       h.seg = 0;
       h.chestI = 0;
       h.tile = -1;
+      h.confT = 0;
       this.place(h);
       h.px = h.x;
       h.py = h.y;
@@ -681,10 +928,22 @@ export class Sim {
 
   private hurt(h: SimHero, raw: number, ignoreArmor: boolean, glare = false): void {
     if (h.dead || h.gone) return;
-    const d = ignoreArmor ? raw : Math.max(1, raw - Math.max(0, h.armor - this.ap));
+    let d = ignoreArmor ? raw : Math.max(1, raw - Math.max(0, h.armor - this.ap));
+    if (h.vuln > 0) d *= 1 + h.vuln;
     h.hp -= d;
     if (!ignoreArmor) h.flash = 0.08;
     if (h.hp <= 0) this.kill(h, glare);
+  }
+
+  /** Greed runes: the best bonus among live runes within their radius of (x, y). */
+  private greedAt(x: number, y: number): number {
+    let b = 0;
+    for (const r of this.runes) {
+      if (r.kind !== 'greed' || r.off > 0 || r.settle > 0) continue;
+      const d2 = (r.x + 0.5 - x) ** 2 + (r.y + 0.5 - y) ** 2;
+      if (d2 <= r.radius * r.radius) b = Math.max(b, r.bonus);
+    }
+    return b;
   }
 
   private kill(h: SimHero, glare: boolean): void {
@@ -693,7 +952,8 @@ export class Sim {
     const p = this.parties.get(h.party);
     const bonus = p?.bonus ?? 0;
     const purse = p?.looted && this.caged > 1 ? 1 + 0.1 * (this.caged - 1) : 1;
-    const amount = h.leaked && h.type === 'champ' ? 0 : h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse;
+    const greed = this.hasGreed && !(h.leaked && h.type === 'champ') ? this.greedAt(h.x, h.y) : 0;
+    const amount = h.leaked && h.type === 'champ' ? 0 : h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse * (1 + greed);
     this.earned += amount;
     let net = amount;
     if (h.sack > 0) {
@@ -701,13 +961,14 @@ export class Sim {
       net += h.sack * (1 + M.RECOVER_BONUS);
     }
     if (!this.live) this.partyNet.set(h.party, (this.partyNet.get(h.party) ?? 0) + net);
-    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, by: glare ? 'glare' : 'other' });
+    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, by: glare ? 'glare' : 'other', greed: greed > 0 });
     this.resolve(h);
   }
 
   private reachHoard(h: SimHero): void {
     h.leaked = true;
     h.dir = -1;
+    h.confT = 0;
     this.release(h);
     const want = M.stealBase(h.type, h.bounty);
     const sack = this.stealFn ? this.stealFn(h) : Math.min(want, 0.02 * Math.max(200, this.earned * 0.25));
@@ -749,7 +1010,7 @@ export class Sim {
   }
 }
 
-const HERO_ORDER: Record<M.HeroType, number> = { rogue: 0, squire: 1, knight: 2, champ: 3 };
+const HERO_ORDER: Record<M.HeroType, number> = { rogue: 0, squire: 1, wizard: 2, cleric: 3, knight: 4, champ: 5 };
 
 // ---------- headless idle rate (01 §3) ----------
 
@@ -780,24 +1041,35 @@ export const dungeonImports = (imports: Record<string, number> | undefined): Dun
   caged: Math.max(0, Math.min(3, imports?.captives ?? 0)),
 });
 
-export function layoutHash(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): string {
-  const ps = r.pieces.map((p) => `${p.k[0]}${p.k[1]}${p.x},${p.y},${p.l},${p.b}`).sort().join(';');
+/** The MVP's chest pair, from the bait list (floor 0 hashes stay as before for MVP layouts). */
+function chestKey(r: M.DungeonRun, g: Grid): string {
+  if (g.f === 0 && g.spots.length === 2 && r.bait.every((b) => b === g.spots[0] || b === g.spots[1]))
+    return `${r.bait.includes(g.spots[0]) ? 1 : 0}${r.bait.includes(g.spots[1]) ? 1 : 0}`;
+  return [...r.bait].sort((a, b) => a - b).join('.');
+}
+
+export function layoutHash(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): string {
+  const ps = r.pieces
+    .map((p) => `${p.k[0]}${p.k[1]}${p.x},${p.y},${p.l},${p.b}${p.b2 && p.l >= M.BRANCH_LEVEL2 ? `/${p.b2}` : ''}`)
+    .sort()
+    .join(';');
   const w = r.ws;
   // No imports: the pre-Goods hash exactly (it seeds the idle sim, so the baseline stays put).
   const ik = imp.ap || imp.caged ? `|${imp.ap},${imp.caged}` : '';
-  return `${ps}|${r.chests[0]}${r.chests[1]}|${w.whet},${w.necro},${w.insc},${w.ledger}|${r.lure}${ik}`;
+  const gk = g.key === '0' ? '' : `|g${g.key}`;
+  return `${ps}|${chestKey(r, g)}|${w.whet},${w.necro},${w.insc},${w.ledger}|${r.lure}${ik}${gk}`;
 }
 
 /** Plunder/s (net of steals) and leak fraction for one tier, averaged over seeds. Each seed runs
  * until parties WARM..WARM+IDLE_PARTIES-1 are resolved and divides their net haul by their spacing. */
-export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports = NO_IMPORTS): { pps: number; leak: number } {
+export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): { pps: number; leak: number } {
   let pps = 0;
   let leak = 0;
   for (let k = 0; k < IDLE_SEEDS; k++) {
     const seed = fnv(`${hash}#${k}`);
     const start = seed % 10;
     // Hoard of Greed scales every haul; idleRateOf applies it after the memo (not in the hash).
-    const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: { ...r.ws, greed: 0 }, lure: T, party: start, seed, live: false, ap: imp.ap, caged: imp.caged });
+    const sim = new Sim({ pieces: r.pieces, bait: r.bait, ws: { ...r.ws, greed: 0 }, lure: T, party: start, seed, live: false, ap: imp.ap, caged: imp.caged, grid: g });
     const first = start + WARM_PARTIES;
     const last = first + IDLE_PARTIES - 1;
     const maxSteps = Math.round(IDLE_MAX_S / STEP);
@@ -826,40 +1098,61 @@ export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonIm
   return { pps: Math.max(0, pps / IDLE_SEEDS), leak: leak / IDLE_SEEDS };
 }
 
+export interface IdleResult {
+  pps: number;
+  /** Leak fraction at the tier Cautious Mode picked. */
+  leak: number;
+  /** The tier it picked. */
+  tier: number;
+}
+
 /** Cautious Mode (01 §3.3): the best tier among T..T-3 that holds the line (< 20% leaks). */
-export function cautiousRate(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): number {
-  const hash = layoutHash(r, imp);
-  const top = simTier(r, r.lure, hash, imp);
-  if (top.leak < 0.2 || r.lure === 0) return top.pps;
-  let best = -1;
+export function cautious(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): IdleResult {
+  const hash = layoutHash(r, imp, g);
+  const top = simTier(r, r.lure, hash, imp, g);
+  if (top.leak < 0.2 || r.lure === 0) return { pps: top.pps, leak: top.leak, tier: r.lure };
+  let best: IdleResult | null = null;
   let last = top;
+  let lastT = r.lure;
   for (let k = 1; k <= 3 && r.lure - k >= 0; k++) {
-    last = simTier(r, r.lure - k, hash, imp);
-    if (last.leak < 0.2) best = Math.max(best, last.pps);
+    last = simTier(r, r.lure - k, hash, imp, g);
+    lastT = r.lure - k;
+    if (last.leak < 0.2 && (!best || last.pps > best.pps)) best = { pps: last.pps, leak: last.leak, tier: lastT };
   }
-  return best >= 0 ? best : last.pps;
+  return best ?? { pps: last.pps, leak: last.leak, tier: lastT };
+}
+
+export function cautiousRate(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): number {
+  return cautious(r, imp, g).pps;
 }
 
 // Memo: idleRate is called every frame by the HUD, so it must be a lookup.
-const memo = new Map<string, number>();
+const memo = new Map<string, IdleResult>();
 let lastRun: M.DungeonRun | null = null;
 let lastRev = -1;
 let lastImp = '';
-let lastVal = 0;
+let lastGrid = '';
+let lastVal: IdleResult = { pps: 0, leak: 0, tier: 0 };
 
-export function idleRateOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): number {
+/** Cautious Mode result for the run's layout (memoized by layout hash; the frame call is a lookup). */
+export function idleOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): IdleResult {
   const ik = `${imp.ap},${imp.caged}`;
-  if (r === lastRun && r.rev === lastRev && ik === lastImp) return lastVal * M.greedMult(r.ws);
-  const key = layoutHash(r, imp);
+  if (r === lastRun && r.rev === lastRev && ik === lastImp && g.key === lastGrid) return lastVal;
+  const key = layoutHash(r, imp, g);
   let v = memo.get(key);
   if (v === undefined) {
-    v = cautiousRate(r, imp);
-    if (memo.size > 64) memo.clear();
+    v = cautious(r, imp, g);
+    if (memo.size > 96) memo.clear();
     memo.set(key, v);
   }
   lastRun = r;
   lastRev = r.rev;
   lastImp = ik;
+  lastGrid = g.key;
   lastVal = v;
-  return v * M.greedMult(r.ws);
+  return v;
+}
+
+export function idleRateOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS, g: Grid = FLOOR0): number {
+  return idleOf(r, imp, g).pps * M.greedMult(r.ws);
 }

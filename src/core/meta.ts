@@ -47,7 +47,7 @@ export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,
   dungeon: 2500,
-  bridge: 44000,
+  bridge: 60000,
   styx: 120000,
   spire: 900000,
   pit: 3000000,

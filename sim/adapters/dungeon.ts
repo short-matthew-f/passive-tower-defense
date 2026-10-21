@@ -25,7 +25,7 @@ import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';
 import { LONG_EFFECT } from '../../src/core/longnode';
 import type { DeptSave } from '../../src/core/types';
 import { dungeonEcon } from '../../src/depts/dungeon/def';
-import { COLS, lairPost, isRuneTile, ROUTES, ROWS, STARTER_SLITS, tileKind } from '../../src/depts/dungeon/map';
+import { COLS, lairPost, routeFor, ROWS, tileKind, FLOOR0, type Grid, type Route } from '../../src/depts/dungeon/map';
 import * as M from '../../src/depts/dungeon/model';
 import { dungeonImports, idleRateOf, Sim, STEP, type SimHero } from '../../src/depts/dungeon/sim';
 import { buildGroups } from '../../src/depts/dungeon/upgrades';
@@ -71,7 +71,10 @@ function headlessCtx(save: DeptSave): DeptCtx {
 // ---------- geometry: path coverage per tile (map.ts routes) ----------
 
 const SAMPLE = 0.1;
-const routePts: Float64Array[] = ROUTES.map((r) => {
+const ptsCache = new Map<Route, Float64Array>();
+function routePts(r: Route): Float64Array {
+  const hit = ptsCache.get(r);
+  if (hit) return hit;
   const n = Math.floor(r.len / SAMPLE);
   const out = new Float64Array(2 * n);
   let s = 0;
@@ -83,15 +86,22 @@ const routePts: Float64Array[] = ROUTES.map((r) => {
     out[2 * i] = r.xs[s] + (r.xs[s + 1] - r.xs[s]) * f;
     out[2 * i + 1] = r.ys[s] + (r.ys[s + 1] - r.ys[s]) * f;
   }
+  if (ptsCache.size > 64) ptsCache.clear();
+  ptsCache.set(r, out);
   return out;
-});
-const covCache = new Map<number, number>();
-/** Route length (tiles) within range R of point (px, py) on route `mask` (px, py on the half-tile grid). */
-function coverage(px: number, py: number, R: number, mask: number): number {
-  const key = ((Math.round(px * 2) * 64 + Math.round(py * 2)) * 4 + mask) * 4096 + Math.round(R * 100);
-  let v = covCache.get(key);
+}
+const covCache = new Map<Route, Map<number, number>>();
+/** Route length (tiles) within range R of point (px, py) on `route` (px, py on the half-tile grid). */
+function coverage(px: number, py: number, R: number, route: Route): number {
+  let m = covCache.get(route);
+  if (!m) {
+    if (covCache.size > 64) covCache.clear();
+    covCache.set(route, (m = new Map()));
+  }
+  const key = (Math.round(px * 2) * 64 + Math.round(py * 2)) * 4096 + Math.round(R * 100);
+  let v = m.get(key);
   if (v !== undefined) return v;
-  const pts = routePts[mask];
+  const pts = routePts(route);
   let n = 0;
   const r2 = R * R;
   for (let i = 0; i < pts.length; i += 2) {
@@ -100,27 +110,22 @@ function coverage(px: number, py: number, R: number, mask: number): number {
     if (dx * dx + dy * dy <= r2) n++;
   }
   v = n * SAMPLE;
-  covCache.set(key, v);
+  m.set(key, v);
   return v;
 }
-const onRoute = (px: number, py: number, mask: number) => coverage(px, py, 0.3, mask) > 0;
+const onRoute = (px: number, py: number, route: Route) => coverage(px, py, 0.3, route) > 0;
 
 const TILES: { x: number; y: number; kind: ReturnType<typeof tileKind> }[] = [];
-for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) TILES.push({ x, y, kind: tileKind(x, y) });
+for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) TILES.push({ x, y, kind: tileKind(FLOOR0, x, y) });
 
-function validTile(r: M.DungeonRun, k: M.PieceKind, x: number, y: number): boolean {
-  if (r.pieces.some((p) => p.x === x && p.y === y)) return false;
-  const slot = M.PIECES[k].slot;
-  const kind = tileKind(x, y);
-  if (slot === 'wall') return kind === 'wall';
-  if (slot === 'chamber') return kind === 'chamber' && !!lairPost(x, y);
-  return isRuneTile(x, y);
-}
+/** The bot plays the Cellar (floor 0) as authored: no Dig, no Floors. */
+const GRID: Grid = FLOOR0;
+const validTile = (r: M.DungeonRun, k: M.PieceKind, x: number, y: number) => M.validTile(GRID, r, k, x, y);
 
 // ---------- the builder's defense estimate (expected damage per party member, model.ts numbers) ----------
 
 interface Ctx {
-  mask: number;
+  route: Route;
   T: number;
   armor: number;
   heroAtk: number;
@@ -130,7 +135,7 @@ interface Ctx {
 function ctxOf(r: M.DungeonRun, T = r.lureMax): Ctx {
   const knights = T >= M.KNIGHT_LURE ? 0.2 : 0;
   return {
-    mask: (r.chests[0] ? 1 : 0) | (r.chests[1] ? 2 : 0),
+    route: routeFor(GRID, r.bait),
     T,
     armor: M.heroArmor('squire', T) + knights * M.HEROES.knight.armor,
     heroAtk: 3 * M.atkScale(T),
@@ -151,15 +156,17 @@ function towerStat(p: M.PieceSave, ws: M.Workshop, c: Ctx): TowerStat | null {
   const rb = M.rangeBonus(p.l);
   const x = p.x + 0.5;
   const y = p.y + 0.5;
+  const b2 = p.l >= M.BRANCH_LEVEL2 ? (p.b2 ?? 0) : 0;
   if (p.k === 'arrow') {
     const dmg = 4 * lm * tm * (p.b === 1 ? 2.2 : 1);
     const bleed = p.b === 2 ? 2 * lm * tm : 0;
-    return { x, y, range: 3 + rb, dps: Math.max(1, dmg - c.armor) * 1.2 * (p.b === 1 ? 0.6 : 1) + bleed };
+    const hit = b2 === 2 ? dmg : Math.max(1, dmg - c.armor);
+    return { x, y, range: 3 + rb, dps: hit * 1.2 * (p.b === 1 ? 0.6 : 1) * (b2 === 1 ? 1.5 : 1) + bleed };
   }
-  if (p.k === 'brazier') return { x, y, range: 1.5 + rb + (p.b === 1 ? 0.7 : 0), dps: 3 * lm * tm * (p.b === 2 ? 1.7 : 1) * 1.5 };
+  if (p.k === 'brazier') return { x, y, range: 1.5 + rb + (p.b === 1 ? 0.7 : 0), dps: 3 * lm * tm * (p.b === 2 ? 1.7 : 1) * (b2 === 1 ? 1.4 : b2 === 2 ? 1.15 : 1) * 1.5 };
   if (p.k === 'ballista') {
-    const dmg = 30 * lm * tm * (p.b === 1 ? 2 : 1);
-    return { x, y, range: 5 + rb, dps: Math.max(1, dmg - c.armor) * 0.4 * (p.b === 2 ? 1.25 : 1) * (p.b === 2 ? 2.5 : 2) };
+    const dmg = 30 * lm * tm * (p.b === 1 ? 2 : 1) * (b2 === 1 ? 1.5 : 1);
+    return { x, y, range: 5 + rb, dps: Math.max(1, dmg - c.armor) * 0.4 * (p.b === 2 ? 1.25 : 1) * (b2 === 2 ? 1.6 : 1) * (p.b === 2 ? 2.5 : 2) };
   }
   return null;
 }
@@ -178,30 +185,31 @@ function defense(r: M.DungeonRun, c: Ctx, ws: M.Workshop = r.ws): number {
     return s;
   };
   let D = 0;
-  for (const t of towers) D += (t.dps * coverage(t.x, t.y, t.range, c.mask)) / SPEED;
+  for (const t of towers) D += (t.dps * coverage(t.x, t.y, t.range, c.route)) / SPEED;
   const sm = M.summonMult(ws);
   const rm = M.runeMult(ws);
   for (const p of r.pieces) {
     const lm = M.levelMult(p.l);
+    const b2 = p.l >= M.BRANCH_LEVEL2 ? (p.b2 ?? 0) : 0;
     if (p.k === 'crypt' || p.k === 'ogre') {
-      const post = lairPost(p.x, p.y);
-      if (!post || !onRoute(post[0] + 0.5, post[1] + 0.5, c.mask)) continue;
+      const post = lairPost(GRID, p.x, p.y);
+      if (!post || !onRoute(post[0] + 0.5, post[1] + 0.5, c.route)) continue;
       const ogre = p.k === 'ogre';
-      const n = ogre ? 1 : 2 + (p.b === 1 ? 1 : 0);
-      const hp = ogre ? 200 * lm * sm * (p.b === 2 ? 1.5 : 1) : 30 * lm * sm * (p.b === 2 ? 2.5 : 1);
-      const dps = ogre ? 12 * lm * sm * (p.b === 1 ? 1.7 : 1) : 3 * lm * sm;
+      const n = ogre ? 1 : 2 + (p.b === 1 ? 1 : 0) + (b2 === 1 ? 1 : 0);
+      const hp = ogre ? 200 * lm * sm * (p.b === 2 ? 1.5 : 1) * (b2 === 1 ? 1.3 : b2 === 2 ? 2 : 1) : 30 * lm * sm * (p.b === 2 ? 2.5 : 1) * (b2 === 2 ? 1.5 : 1);
+      const dps = ogre ? 12 * lm * sm * (p.b === 1 ? 1.7 : 1) * (b2 === 1 ? 1.5 : 1) : 3 * lm * sm;
       const cap = ogre ? (p.b === 2 ? 3 : 2) : 1;
       const hold = Math.min(8, hp / (c.heroAtk * cap));
       // Held heroes take the minion's hits and stand in tower range; spread over the party.
       D += (n * cap * hold * (dps + dpsAt(post[0] + 0.5, post[1] + 0.5))) / Math.max(1, c.size / 2);
     } else if (p.k === 'mire') {
-      if (!onRoute(p.x + 0.5, p.y + 0.5, c.mask)) continue;
+      if (!onRoute(p.x + 0.5, p.y + 0.5, c.route)) continue;
       const slow = Math.min(0.7, (p.b === 1 ? 0.55 : 0.4) * (1 + 0.5 * (rm - 1)));
-      const dur = 2 * (1 + 0.08 * (p.l - 1));
+      const dur = 2 * (1 + 0.08 * (p.l - 1)) * (b2 === 1 ? 1.6 : 1);
       D += slow * dur * dpsAt(p.x + 0.5, p.y + 0.5);
     } else if (p.k === 'spikes') {
-      if (!onRoute(p.x + 0.5, p.y + 0.5, c.mask)) continue;
-      const dmg = 8 * lm * rm * (p.b === 1 ? 1.8 : 1);
+      if (!onRoute(p.x + 0.5, p.y + 0.5, c.route)) continue;
+      const dmg = 8 * lm * rm * (p.b === 1 ? 1.8 : 1) * (b2 === 1 ? 1.6 : 1) + (b2 === 2 ? 9 * lm * rm : 0);
       const ch = p.b === 2 ? 5 : 3;
       const rech = p.b === 2 ? 2 : 4;
       D += Math.max(1, dmg - c.armor) * Math.min(1, (ch + M.PARTY_EVERY / rech) / c.size);
@@ -215,11 +223,11 @@ function defense(r: M.DungeonRun, c: Ctx, ws: M.Workshop = r.ws): number {
 const probeCache = new Map<string, number>();
 function leakAt(r: M.DungeonRun, T: number): number {
   const w = r.ws;
-  const key = `${r.pieces.map((p) => `${p.k[0]}${p.k[1]}${p.x},${p.y},${p.l},${p.b}`).sort().join(';')}|${r.chests[0]}${r.chests[1]}|${w.whet},${w.necro},${w.insc}|${T}`;
+  const key = `${r.pieces.map((p) => `${p.k[0]}${p.k[1]}${p.x},${p.y},${p.l},${p.b}${p.b2 ?? 0}`).sort().join(';')}|${[...r.bait].sort().join('.')}|${w.whet},${w.necro},${w.insc}|${T}`;
   let v = probeCache.get(key);
   if (v !== undefined) return v;
   const start = 3; // parties 5..12 are measured; party 9 is the Champion party
-  const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: r.ws, lure: T, party: start, seed: 0x9e3779b1, live: false });
+  const sim = new Sim({ pieces: r.pieces, bait: r.bait, ws: r.ws, lure: T, party: start, seed: 0x9e3779b1, live: false, grid: GRID });
   const first = start + 2;
   const last = first + 7;
   for (let i = 0; i < Math.round(160 / STEP); i++) {
@@ -263,11 +271,11 @@ function bestTile(r: M.DungeonRun, k: M.PieceKind, c: Ctx): [number, number] | n
   for (const t of TILES) {
     if (!validTile(r, k, t.x, t.y)) continue;
     let s: number;
-    if (range > 0) s = coverage(t.x + 0.5, t.y + 0.5, range, c.mask);
+    if (range > 0) s = coverage(t.x + 0.5, t.y + 0.5, range, c.route);
     else if (M.PIECES[k].slot === 'chamber') {
-      const post = lairPost(t.x, t.y)!;
-      s = onRoute(post[0] + 0.5, post[1] + 0.5, c.mask) ? 10 + coverage(post[0] + 0.5, post[1] + 0.5, 3, c.mask) : -1;
-    } else s = onRoute(t.x + 0.5, t.y + 0.5, c.mask) ? coverage(t.x + 0.5, t.y + 0.5, 3, c.mask) : -1;
+      const post = lairPost(GRID, t.x, t.y)!;
+      s = onRoute(post[0] + 0.5, post[1] + 0.5, c.route) ? 10 + coverage(post[0] + 0.5, post[1] + 0.5, 3, c.route) : -1;
+    } else s = onRoute(t.x + 0.5, t.y + 0.5, c.route) ? coverage(t.x + 0.5, t.y + 0.5, 3, c.route) : -1;
     // Tie-break toward the Hoard end (later in the route), deterministic.
     s += (t.y * COLS + t.x) * 1e-6;
     if (s > bs) {
@@ -279,7 +287,7 @@ function bestTile(r: M.DungeonRun, k: M.PieceKind, c: Ctx): [number, number] | n
 }
 
 function cloneRun(r: M.DungeonRun): M.DungeonRun {
-  return { ...r, pieces: r.pieces.map((p) => ({ ...p })), chests: [r.chests[0], r.chests[1]], ws: { ...r.ws } };
+  return { ...r, pieces: r.pieces.map((p) => ({ ...p })), bait: [...r.bait], ws: { ...r.ws } };
 }
 
 function candidates(r: M.DungeonRun, c: Ctx): Cand[] {
@@ -293,7 +301,7 @@ function candidates(r: M.DungeonRun, c: Ctx): Cand[] {
       id: `place.${k}`,
       cost,
       apply: (q) => {
-        q.pieces.push({ id: q.nextId++, k, x: tile[0], y: tile[1], l: 1, b: 0, inv: cost });
+        q.pieces.push({ id: q.nextId++, k, x: tile[0], y: tile[1], l: 1, b: 0, b2: 0, inv: cost });
         q.stats.placed++;
       },
     });
@@ -301,7 +309,8 @@ function candidates(r: M.DungeonRun, c: Ctx): Cand[] {
   for (const p of r.pieces) {
     if (p.l >= M.MAX_LEVEL) continue;
     const cost = M.levelCost(p.k, p.l);
-    const branches: (0 | 1 | 2)[] = p.l + 1 === M.BRANCH_LEVEL ? [1, 2] : [0];
+    const branches: (0 | 1 | 2)[] = M.branchAt(p.l) ? [1, 2] : [0];
+    const second = p.l + 1 === M.BRANCH_LEVEL2;
     for (const b of branches)
       out.push({
         id: b ? `branch.${p.k}` : `up.${p.k}`,
@@ -312,16 +321,17 @@ function candidates(r: M.DungeonRun, c: Ctx): Cand[] {
           qp.inv += cost;
           q.stats.upgrades++;
           if (b) {
-            qp.b = b;
+            if (second) qp.b2 = b;
+            else qp.b = b;
             q.stats.branches++;
           }
         },
       });
   }
-  for (let i = 0; i < 2; i++) {
-    if (r.chests[i]) continue;
-    out.push({ id: `chest.${i}`, cost: M.chestCost(r), apply: (q) => void (q.chests[i] = 1) });
-  }
+  GRID.spots.forEach((spot, i) => {
+    if (r.bait.includes(spot)) return;
+    out.push({ id: `chest.${i}`, cost: M.chestCost(r), apply: (q) => void q.bait.push(spot) });
+  });
   return out;
 }
 
@@ -339,22 +349,12 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
   let holdsT = 0;
 
   function updateBlueprint(save: DeptSave): void {
-    const r = run(save);
-    per(save).bp = { cycle: save.cycle.n, pieces: r.pieces.map((p) => ({ k: p.k, x: p.x, y: p.y })), value: M.layoutValue(r) };
+    per(save).bp = M.blueprint(run(save), save.cycle.n);
   }
 
-  /** scene.ts applyStarterKit: last cycle's layout becomes ghosts, the kit adds 10% of its value. */
+  /** scene.ts on entry: last cycle's layout becomes ghosts, the kit adds 10% of its value. */
   function applyStarterKit(save: DeptSave): void {
-    const r = run(save);
-    const p = per(save);
-    const n = save.cycle.n;
-    if (p.bp.cycle >= n) return;
-    const starter = (g: M.Ghost) => STARTER_SLITS.some(([x, y]) => g.x === x && g.y === y && g.k === 'arrow');
-    const fresh = p.bp.pieces.filter((g) => !starter(g));
-    const keep = p.ghosts.filter((g) => !fresh.some((f) => f.x === g.x && f.y === g.y));
-    p.ghosts = [...fresh, ...keep];
-    if (p.bp.value > 0) r.bank += 0.1 * p.bp.value;
-    p.bp = { cycle: n, pieces: [], value: 0 };
+    M.startCycle(run(save), per(save), save.cycle.n);
   }
 
   function startSession(save: DeptSave, env: SessionEnv): ActiveSession {
@@ -365,10 +365,11 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
     const rnd = makeRng(childSeed(seed, `dungeon.bot.${sessions}`));
     const sim = new Sim({
       pieces: r.pieces,
-      chests: r.chests,
+      bait: r.bait,
       ws: r.ws,
       lure: r.lure,
       party: r.party,
+      grid: M.gridOf(r, per(save)),
       seed: childSeed(seed, `dungeon.sim.${sessions++}`),
       live: true,
       ...dungeonImports(save.imports),
@@ -389,7 +390,7 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
     let lastPartyLeaked = false;
 
     function layoutChanged(): void {
-      sim.setLayout(r.pieces, r.chests, r.ws);
+      sim.setLayout(r.pieces, r.bait, r.ws);
       updateBlueprint(save);
       r.stats.bestPieces = Math.max(r.stats.bestPieces, r.pieces.length);
       r.rev++;
@@ -652,7 +653,7 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
     describe(save) {
       const r = run(save);
       const lv = r.pieces.length ? (r.pieces.reduce((a, p) => a + p.l, 0) / r.pieces.length).toFixed(1) : '0';
-      return `lure ${r.lure}/${r.lureMax} pieces ${r.pieces.length} avgL ${lv} chests ${r.chests[0]}${r.chests[1]} greed ${r.ws.greed ?? 0} held ${M.heldLure(r)} idle ${idleRateOf(r).toFixed(1)}`;
+      return `lure ${r.lure}/${r.lureMax} pieces ${r.pieces.length} avgL ${lv} chests ${r.bait.length} greed ${r.ws.greed ?? 0} held ${M.heldLure(r)} idle ${idleRateOf(r).toFixed(1)}`;
     },
   };
 };

@@ -3,6 +3,7 @@
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import { formatNum } from '../../core/format';
 import { longDesc, longLocked } from '../../core/longnode';
+import { FLOORS } from './map';
 import * as M from './model';
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -10,6 +11,8 @@ const pct = (x: number) => `${Math.round(x * 100)}%`;
 export interface UpgradeHooks {
   changed(): void; // layout-affecting change (rebuild the sim, bump rev)
   lureBought(): void;
+  /** Travel to floor f (bought or owned). */
+  floor?(f: number): void;
 }
 
 export function buildGroups(ctx: DeptCtx, hooks: UpgradeHooks): UpgradeGroup[] {
@@ -51,7 +54,8 @@ export function buildGroups(ctx: DeptCtx, hooks: UpgradeHooks): UpgradeGroup[] {
     cost: () => M.lureCost(r().lureMax + 1),
     desc: () => {
       const T = r().lureMax + 1;
-      const unlock = T === M.ROGUE_LURE ? ' ROGUES!' : T === M.KNIGHT_LURE ? ' KNIGHTS!' : T === M.CHAMP_LURE ? ' CHAMPIONS!' : '';
+      const nh = M.NEW_HERO_AT[T];
+      const unlock = nh ? ` ${M.HEROES[nh].name.toUpperCase()}S!` : T === M.CHAMP_LURE ? ' CHAMPIONS!' : '';
       return `LURE ${T}: HP X${formatNum(M.hpScale(T))} {coin}X${formatNum(M.bountyScale(T))}${unlock}`;
     },
     canAfford: () => r().lureMax < M.MAX_LURE && r().bank >= M.lureCost(r().lureMax + 1),
@@ -64,9 +68,40 @@ export function buildGroups(ctx: DeptCtx, hooks: UpgradeHooks): UpgradeGroup[] {
     },
   };
 
+  // Floors (01 §6D): bought once, kept across Falls; one active at a time, each with its own layout.
+  const per = () => ctx.save.persistent as M.DungeonPersistent;
+  const floors: UpgradeEntry[] = FLOORS.map((f, i) => {
+    const owned = () => (per().floors ?? 1) > i;
+    return {
+      id: `floor${i}`,
+      name: f.name,
+      max: 1,
+      maxLabel: 'HERE',
+      level: () => (r().floor === i ? 1 : 0),
+      levelText: () => (r().floor === i ? 'ACTIVE' : owned() ? 'OPEN' : ''),
+      cost: () => (owned() ? 0 : f.cost),
+      costText: () => (owned() ? 'FREE' : formatNum(f.cost)),
+      get buyLabel() {
+        return owned() ? 'GO' : 'BUY';
+      },
+      desc: () => (i === 0 ? 'THE FIRST FLOOR. 2 LOOPS' : `{coin}X${f.bounty} BOUNTY, LONGER PATH${i === 2 ? ', WATER' : ', 3 LOOPS'}`),
+      locked: () => (!owned() && (per().floors ?? 1) < i ? `${FLOORS[i - 1].short} FIRST` : null),
+      canAfford: () => owned() || r().bank >= f.cost,
+      buy: () => {
+        if (r().floor === i) return;
+        if (!owned()) {
+          if ((per().floors ?? 1) !== i || !ctx.spend(f.cost)) return;
+          per().floors = i + 1;
+        }
+        hooks.floor?.(i);
+      },
+    } as UpgradeEntry;
+  });
+
   return [
     { name: 'Workshop', entries: workshop },
     { name: 'Rumor Mill', entries: [lure] },
+    { name: 'Floors', entries: floors },
   ];
 }
 

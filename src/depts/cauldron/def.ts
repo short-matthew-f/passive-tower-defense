@@ -1,8 +1,22 @@
 // The Cauldron's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
-import type { Commendation, DeptEcon } from '../../core/dept';
+import type { Commendation, DeptEcon, StewardCandidate } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
-import { defaultPersistent, defaultRun, dropsPerSec, idleRateOf, type CRun } from './econ';
+import {
+  defaultPersistent,
+  defaultRun,
+  dropsPerSec,
+  fillRun,
+  idleRateOf,
+  lvOf,
+  MALICE_MAX,
+  maliceCost,
+  upCost,
+  UPGRADES,
+  upLocked,
+  type CPersistent,
+  type CRun,
+} from './econ';
 
 const run = (s: DeptSave) => s.run as CRun;
 const stats = (s: DeptSave) => run(s).stats ?? ({} as CRun['stats']);
@@ -19,6 +33,15 @@ export const commendations: Commendation[] = [
   { id: 'million', label: 'A MILLION BILE', test: (s) => s.cycle.earnings >= 1e6 },
 ];
 
+/** Bile-priced run nodes that raise idleRate (the Steward's list and the Ready list). */
+function idleNodes(s: DeptSave) {
+  const r = run(s);
+  if (!r?.lv) return [];
+  return UPGRADES.filter((u) => !u.tokens && !u.activeOnly && !upLocked(u, s.cycle.n) && lvOf(r, u.id) < u.max);
+}
+
+const exotic = (s: DeptSave) => s.imports?.contraband ?? 0;
+
 export const cauldronEcon: DeptEcon = {
   id: 'cauldron',
   version: 1,
@@ -27,7 +50,7 @@ export const cauldronEcon: DeptEcon = {
   idleRate(save) {
     const r = save.run as CRun;
     if (!r || !r.lv) return 0;
-    return idleRateOf(r, save.imports?.contraband ?? 0);
+    return idleRateOf(r, exotic(save));
   },
   // Potions (00 §4, 05 §16): 1 per Batch (active) and 1 per 3,000 toadling drops (passive).
   goods: {
@@ -53,4 +76,62 @@ export const cauldronEcon: DeptEcon = {
   rankRef: 8000,
   rankTarget: 350_000,
   commendations,
+
+  // ---------- advancement hooks (00 §2.5, §5.2) ----------
+
+  /** Gobbo's Ready list: the next Malice level and the idle nodes, cheapest first. */
+  readyBuys(save) {
+    const r = run(save);
+    if (!r?.lv) return [];
+    const out = idleNodes(save).map((u) => ({ label: u.name, cost: upCost(u, lvOf(r, u.id)) }));
+    if ((r.maliceBought ?? 0) < MALICE_MAX) out.push({ label: `Malice ${r.maliceBought + 1}`, cost: maliceCost(r.maliceBought) });
+    return out.sort((a, b) => a.cost - b.cost).slice(0, 6);
+  },
+
+  /** The Steward: idle nodes only (no Malice levels, no active-only nodes, no Batch Tokens). */
+  stewardCandidates(save) {
+    const r = run(save);
+    if (!r?.lv) return [];
+    fillRun(r);
+    const base = idleRateOf(r, exotic(save));
+    return idleNodes(save).map((u): StewardCandidate => {
+      const l = lvOf(r, u.id);
+      const next = { ...r, lv: { ...r.lv, [u.id]: l + 1 } };
+      return {
+        id: u.id,
+        label: u.name,
+        cost: upCost(u, l),
+        deltaIdle: idleRateOf(next, exotic(save)) - base,
+        buy: () => {
+          // The core already took the cost: only raise the level (never past max).
+          if (lvOf(r, u.id) === l && l < u.max) r.lv[u.id] = l + 1;
+        },
+      };
+    });
+  },
+
+  /** Head Start (00 §2.5): own the first 2L Malice levels and 1 + L free toadlings. Idempotent. */
+  applyHeadStart(save, level) {
+    const r = run(save);
+    if (!r || level < 1) return;
+    fillRun(r);
+    r.maliceBought = Math.max(r.maliceBought, Math.min(MALICE_MAX, 2 * level));
+    r.lv.hire = Math.max(lvOf(r, 'hire'), Math.min(7, 1 + level));
+  },
+
+  /** Granny's Book (00 §2.5): Mandrake and Splitroot are pre-unlocked. */
+  signature: {
+    name: "Granny's Book",
+    desc: 'Mandrake & Splitroot unlocked',
+    apply(save) {
+      const r = run(save);
+      if (!r) return;
+      fillRun(r);
+      r.lv.mandrake = Math.max(lvOf(r, 'mandrake'), 1);
+      r.lv.splitroot = Math.max(lvOf(r, 'splitroot'), 1);
+    },
+  },
 };
+
+/** Persistent save helper for the scene (tokens, recipes, layouts). */
+export const persistentOf = (s: DeptSave) => s.persistent as CPersistent;

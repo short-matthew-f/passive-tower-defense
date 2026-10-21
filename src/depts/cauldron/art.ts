@@ -36,6 +36,26 @@ export const ING_COLOR: Record<IngId, string> = {
   toad: '#6ac048',
   bat: '#b070f0',
   mandrake: '#f08a30',
+  splitroot: '#c08a50',
+  boomshroom: '#e03a3a',
+  leadheart: '#a8a8b8',
+  wisp: '#5ae0e0',
+  sock: '#f4f4f4',
+  pumpkin: '#f07a20',
+};
+
+/** Peg colours for the board upgrades. */
+export const PEG_PAL = {
+  bone: 0xe8dcc0,
+  boneLo: 0x8a7a5a,
+  rune: 0xa060f0,
+  runeHi: 0xe0b0ff,
+  thorn: 0x4a8a2a,
+  thornHi: 0xa0e060,
+  wall: 0x5a3a26,
+  wallHi: 0x8a6040,
+  boom: 0xff9a30,
+  slop: 0x6a5a3a,
 };
 
 const SPRITES: Record<IngId, string[]> = {
@@ -75,6 +95,60 @@ const SPRITES: Record<IngId, string[]> = {
     'koooook',
     '.kokok.',
   ],
+  splitroot: [
+    '.k.k.k.',
+    'kbkbkbk',
+    'kbbbbbk',
+    '.kbBbk.',
+    '.kbbbk.',
+    '..kbk..',
+    '...k...',
+  ],
+  boomshroom: [
+    '.kkkkk.',
+    'krrwrrk',
+    'kwrrrwk',
+    'kkkkkkk',
+    '..kSk..',
+    '..kSk..',
+    '..kkk..',
+  ],
+  leadheart: [
+    '.kk.kk.',
+    'kggkggk',
+    'kgGgggk',
+    'kgggggk',
+    '.kgggk.',
+    '..kgk..',
+    '...k...',
+  ],
+  wisp: [
+    '...k...',
+    '..kck..',
+    '.kcCck.',
+    'kcCWCck',
+    'kcCCCck',
+    '.kccck.',
+    '..kkk..',
+  ],
+  sock: [
+    '.kkkk..',
+    '.kwwk..',
+    '.krrk..',
+    '.kwwk..',
+    'kwwwwkk',
+    'kwwwwwk',
+    '.kkkkk.',
+  ],
+  pumpkin: [
+    '...g...',
+    '.kkgkk.',
+    'koyoyok',
+    'kooooko',
+    'koykyok',
+    'kooooko',
+    '.kkkkk.',
+  ],
 };
 
 const SPRITE_PAL: Record<IngId, Record<string, string>> = {
@@ -82,9 +156,34 @@ const SPRITE_PAL: Record<IngId, Record<string, string>> = {
   toad: { k: '#14300a', g: '#6ac048', d: '#3a7a28', w: '#f0f0c0' },
   bat: { k: '#200a30', p: '#b070f0', P: '#e0b0ff' },
   mandrake: { k: '#3a1a0a', o: '#f08a30', g: '#6ac048' },
+  splitroot: { k: '#2a1608', b: '#9a6a3a', B: '#d0a070' },
+  boomshroom: { k: '#2a0808', r: '#e03a3a', w: '#fff0e0', S: '#e8dcc0' },
+  leadheart: { k: '#14141c', g: '#8a8a96', G: '#d0d0dc' },
+  wisp: { k: '#082a2a', c: '#3ac0c0', C: '#8af0f0', W: '#ffffff' },
+  sock: { k: '#3a3a4a', w: '#f4f4f4', r: '#c03a3a' },
+  pumpkin: { k: '#2a1004', o: '#f07a20', y: '#ffe060', g: '#4a8a2a' },
 };
 
 const texCache = new Map<string, Texture>();
+
+/** The Legend for the Last Stand: Dame Brightjaw, 7x14 (tall), facing the viewer. */
+export const BRIGHTJAW = [
+  '..kkk..',
+  '.kGGGk.',
+  '.kGkGk.',
+  '.kGGGk.',
+  'kkRRRkk',
+  'kSSRSSk',
+  'kSSSSSk',
+  'kSkSkSk',
+  '.kSSSk.',
+  '.kSSSk.',
+  '.kbkbk.',
+  '.kbkbk.',
+  '.kbkbk.',
+  'kkk.kkk',
+];
+export const BRIGHTJAW_PAL: Record<string, string> = { k: '#14101c', G: '#d8d8e8', R: '#c03a3a', S: '#a8b0c8', b: '#5a4a3a' };
 
 /** 7x7 ingredient texture (cached per renderer lifetime). */
 export function ingTexture(renderer: Renderer, ing: IngId): Texture {

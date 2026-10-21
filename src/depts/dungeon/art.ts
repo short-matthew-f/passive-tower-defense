@@ -89,6 +89,12 @@ const HERO_PAL: Record<string, number> = {
   R: 0x7a1a2a,
   y: GOLD,
   Y: GOLD_DARK,
+  c: 0xe8e8f0, // cleric robe
+  C: 0xa8a8c0,
+  z: 0x6a3ab0, // wizard robe / hat
+  Z: 0x40206a,
+  t: 0x8a6a3a, // staff
+  o: 0x6ae0ff, // staff orb
 };
 
 const HERO_ROWS: Record<HeroType, [string[], string[]]> = {
@@ -103,6 +109,14 @@ const HERO_ROWS: Record<HeroType, [string[], string[]]> = {
   knight: [
     ['...p....', '..aaa...', '.aaaaa..', '.avvva.s', '.aaaaa.s', 'AaaaaaAs', 'AaAaAaA.', '.aaaaa..', '.AA.AA..', '.kk.kk..'],
     ['...p....', '..aaa...', '.aaaaa..', '.avvva.s', '.aaaaa.s', 'AaaaaaAs', 'AaAaAaA.', '.aaaaa..', '..AAA...', '..kkk...'],
+  ],
+  cleric: [
+    ['..ccc..', '.cfffc.', '.cfffc.', '..fff.y', '.ccycct', 'fcyyyct', '.ccycct', '.CcccC.', '.k...k.'],
+    ['..ccc..', '.cfffc.', '.cfffc.', '..fff.y', '.ccycct', 'fcyyyct', '.ccycct', '.CcccC.', '..k.k..'],
+  ],
+  wizard: [
+    ['...z...', '..zzz..', '.zzzzz.', 'zzzzzzz', '.dfffdo', '..fff.t', '.zzzzzt', 'fzZzZzt', '.ZzzzZ.', '.k...k.'],
+    ['...z...', '..zzz..', '.zzzzz.', 'zzzzzzz', '.dfffdo', '..fff.t', '.zzzzzt', 'fzZzZzt', '.ZzzzZ.', '..k.k..'],
   ],
   champ: [
     [
@@ -132,9 +146,21 @@ export function sackArt(): GraphicsContext {
 
 // ---------- minions ----------
 
-export function minionArt(kind: 'crypt' | 'ogre', frame: number, tier: number): GraphicsContext {
-  return cached(`minion.${kind}.${frame}.${tier}`, (c) => {
+export function minionArt(kind: 'crypt' | 'ogre' | 'slime', frame: number, tier: number, small = false): GraphicsContext {
+  return cached(`minion.${kind}.${frame}.${tier}.${small}`, (c) => {
     const eye = tier >= 2 ? 0x6aff8a : tier >= 1 ? 0x4ac06a : OUTLINE;
+    if (kind === 'slime') {
+      const pal = { g: 0x5ad06a, G: 0x2a8a3a, w: 0xd0ffd8, k: OUTLINE };
+      const data = small
+        ? frame
+          ? ['.gg.', 'gkgk', 'gggg', 'GGGG']
+          : ['....', '.gg.', 'gkkg', 'GGGG']
+        : frame
+          ? ['..ggg..', '.gwggg.', 'ggkggkg', 'ggggggg', 'GGGGGGG']
+          : ['.......', '..gwg..', '.gkgkg.', 'ggggggg', 'GGGGGGG'];
+      rows(c, data, pal, small ? -2 : -3, small ? -3 : -4);
+      return;
+    }
     if (kind === 'crypt') {
       const data = frame
         ? ['.www.', 'wkwkw', '.www.', '..w.s', 'wwwws', '.www.', '.w.w.', 'ww.ww']
@@ -247,6 +273,51 @@ export function pieceArt(k: PieceKind, tier: number, branch: number, frame = 0):
         if (branch === 2) c.rect(2, 6, 2, 1).fill(0x9a9aaa).rect(12, 6, 2, 1).fill(0x9a9aaa);
         break;
       }
+      case 'eye': {
+        const stone = 0x5e4f70;
+        c.rect(3, 4, 10, 11).fill(OUTLINE);
+        c.rect(4, 5, 8, 9).fill(stone);
+        c.rect(4, 13, 8, 1).fill(0x3a2f48);
+        // The eye.
+        const iris = branch === 1 ? 0xc03a6a : branch === 2 ? 0xe8e070 : 0x9a5ad0;
+        c.rect(4, 6, 8, 5).fill(OUTLINE);
+        c.rect(5, 7, 6, 3).fill(0xe8e0c8);
+        c.rect(7, 7, 2, 3).fill(iris);
+        c.rect(7, 8 - frame, 1, 1).fill(OUTLINE);
+        c.rect(2, 8, 1, 1).fill(iris).rect(13, 8, 1, 1).fill(iris);
+        band(c, tier, 4, 12, 8);
+        if (tier >= 2) c.rect(7, 4, 2, 1).fill(GOLD_LIGHT);
+        break;
+      }
+      case 'slime': {
+        c.rect(1, 6, 14, 9).fill(OUTLINE);
+        c.rect(2, 7, 12, 7).fill(0x2a3a2a);
+        c.rect(3, 9, 10, 4).fill(branch === 2 ? 0xa0d040 : 0x3a9a4a);
+        c.rect(4, 8 + frame, 3, 2).fill(0x5ad06a).rect(9, 9 - frame, 2, 2).fill(0x5ad06a);
+        c.rect(5, 8 + frame, 1, 1).fill(0xd0ffd8);
+        band(c, tier, 2, 13, 12);
+        if (branch === 1) c.rect(6, 5, 4, 2).fill(0x5ad06a);
+        break;
+      }
+      case 'greed': {
+        const glow = tier >= 2 ? GOLD_LIGHT : tier >= 1 ? GOLD : GOLD_DARK;
+        c.rect(3, 3, 10, 10).fill({ color: 0x3a2a10, alpha: 0.85 });
+        c.rect(4, 5, 8, 1).fill(glow).rect(4, 10, 8, 1).fill(glow).rect(4, 5, 1, 6).fill(glow).rect(11, 5, 1, 6).fill(glow);
+        // A coin glyph in the middle.
+        c.rect(7, 6, 2, 4).fill(glow).rect(6, 7, 4, 2).fill(glow);
+        c.rect(7, 7, 1, 1).fill(0xffffff);
+        if (branch === 2) c.rect(2, 7, 1, 2).fill(glow).rect(13, 7, 1, 2).fill(glow);
+        break;
+      }
+      case 'confusion': {
+        const col = tier >= 2 ? 0xff80ff : tier >= 1 ? 0xd060e0 : 0xa040c0;
+        c.rect(3, 3, 10, 10).fill({ color: 0x2a1030, alpha: 0.85 });
+        // A spiral.
+        c.rect(5, 5, 6, 1).fill(col).rect(10, 5, 1, 6).fill(col).rect(5, 10, 6, 1).fill(col).rect(5, 7, 1, 4).fill(col);
+        c.rect(7, 7, 2, 1).fill(col).rect(8, 7, 1, 2).fill(col);
+        if (frame) c.rect(4, 4, 8, 8).fill({ color: 0x404040, alpha: 0.5 });
+        break;
+      }
       case 'mire': {
         const col = branch === 2 ? 0x3a2a4a : branch === 1 ? 0x2a2a1a : 0x2a5a2a;
         const glow = tier >= 2 ? 0x9aff6a : tier >= 1 ? 0x7ad04a : 0x5aa03a;
@@ -336,6 +407,8 @@ export function heroIcon(t: HeroType): GraphicsContext {
       squire: ['.hhh.', 'hhhhh', 'hfffh', '.fff.', 'bbbbb'],
       rogue: ['.ggg.', 'ggggg', 'gdddg', 'gdddg', 'GgggG'],
       knight: ['..p..', '.aaa.', 'avvva', 'aaaaa', 'AaaaA'],
+      cleric: ['.ccc.', 'cfffc', '.fff.', 'ccycc', 'cyyyc'],
+      wizard: ['..z..', '.zzz.', 'zzzzz', '.fff.', 'zZzZz'],
       champ: ['y.y.y', 'yyyyy', 'avvva', 'aaaaa', 'rAaAr'],
     };
     rows(c, data[t], HERO_PAL, 0, 0);

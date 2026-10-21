@@ -1,15 +1,17 @@
-// The Dungeon scene (specs/01): an 11x13 floor with one winding path and two side loops. Tap a
-// tray piece, then a glowing tile, to build; tap a piece to upgrade, branch, move or sell it.
-// Tap near a visitor to Glare, ring the Gong to call the next party, drop the Trapdoor under a
-// runner. The simulation lives in sim.ts (shared with idleRate); this file renders and handles input.
+// The Dungeon scene (specs/01): an 11x13 floor with one winding path and side loops. Drag a tray
+// piece onto a glowing tile (or tap the piece, then the tile) to build; tap a piece to upgrade,
+// branch, swap, move or sell it; hold a piece and drag it to move it. Tap near a visitor to Glare,
+// ring the Gong to call the next party, drop the Trapdoor under a runner. DIG carves new walls,
+// chambers and corridors (heroes route by greed: chest by chest, then the Hoard). The simulation
+// lives in sim.ts (shared with idleRate); this file renders and handles input.
 import { Container, Graphics, Rectangle, Sprite, Texture, type FederatedPointerEvent } from 'pixi.js';
-import type { DeptCtx, DeptScene, UpgradeGroup } from '../../core/dept';
+import type { DeptCtx, DeptScene, Rect, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
 import { PixelText, measure } from '../../ui/font';
-import { Button, C } from '../../ui/widgets';
+import { Button, C, drawBar } from '../../ui/widgets';
 import * as M from './model';
-import { COLS, HOARD, ENTRY, LOOPS, MAP, ROWS, SUGGESTED_TILE, STARTER_SLITS, TILE, isRuneTile, isWalkable, lairPost, tileKind } from './map';
+import { COLS, FLOORS, ROWS, TILE, canDig, idx, isWalkable, lairPost, tileKind, K_ROCK, type Grid } from './map';
 import { dungeonImports, Sim, STEP, type SimEvent, type SimHero } from './sim';
 import {
   chestArt,
@@ -35,6 +37,7 @@ const TOP_H = 22;
 const MAX_COINS = 40;
 const MAX_PARTS = 150;
 const MAX_TRACERS = 40;
+const DRAG_PX = 6;
 
 const CHAMP_NAMES = [
   'SIR REGINALD THE MILDLY BRAVE',
@@ -45,8 +48,22 @@ const CHAMP_NAMES = [
   'BARON THADDEUS THE TAXED',
 ];
 
-type Armed = M.PieceKind | 'chest' | null;
-type Sel = { t: 'piece'; id: number } | { t: 'chest'; i: number } | { t: 'ghost'; i: number } | null;
+const PREVIEW_ORDER: M.HeroType[] = ['squire', 'rogue', 'knight', 'cleric', 'wizard', 'champ'];
+
+/** Live floor state for onboarding / lesson `waitFor` and `done` checks (they only get the save). */
+export const live = {
+  heroes: 0,
+  on: { squire: false, rogue: false, knight: false, cleric: false, wizard: false, champ: false } as Record<M.HeroType, boolean>,
+  gongReady: false,
+  trapReady: false,
+  glareReady: false,
+  coins: 0,
+  /** A party has entered at Lure >= 1 since the scene opened (Lure lesson beat 2). */
+  lureParty: false,
+};
+
+type Armed = M.PieceKind | M.TrayExtra | null;
+type Sel = { t: 'piece'; id: number } | { t: 'chest'; spot: number } | { t: 'ghost'; i: number } | { t: 'dug'; i: number } | null;
 
 interface HeroView {
   g: Graphics;
@@ -86,7 +103,7 @@ interface Part {
 }
 
 interface Tracer {
-  kind: 'arrow' | 'ballista' | 'clerk' | 'glare';
+  kind: 'arrow' | 'ballista' | 'clerk' | 'glare' | 'dispel';
   x1: number;
   y1: number;
   x2: number;
@@ -98,13 +115,18 @@ interface Tracer {
 
 const rand = Math.random;
 const SELL_COL: [number, number] = [C.red, 0x7a2020];
+const SWAP_COL: [number, number] = [0x5a9ad8, 0x2a5a8a];
 const fm = (n: number) => formatNum(n);
+const EXTRA_LABEL: Record<M.TrayExtra, string> = { chest: 'CHEST', 'dig.w': 'WALL', 'dig.c': 'ROOM', 'dig.p': 'CARVE' };
+const isPiece = (k: Armed): k is M.PieceKind => !!k && k in M.PIECES;
+const digKind = (k: Armed): 'w' | 'c' | 'p' | null => (k === 'dig.w' ? 'w' : k === 'dig.c' ? 'c' : k === 'dig.p' ? 'p' : null);
 
 export class DungeonScene implements DeptScene {
   root = new Container();
   private ctx: DeptCtx;
   private run: M.DungeonRun;
   private per: M.DungeonPersistent;
+  private grid: Grid;
   private sim: Sim;
   private groups: UpgradeGroup[];
 
@@ -127,15 +149,17 @@ export class DungeonScene implements DeptScene {
   private heroLayer = new Container();
   private coinLayer = new Container();
   private fxG = new Graphics();
+  private dragG = new Graphics();
   private hit = new Container();
   private ui = new Container();
   private uiG!: Graphics;
   private bannerG = new Graphics();
   private banner = new PixelText('', '#e8c04a');
+  private ritualLayer = new Container();
 
   // views
   private pieceViews = new Map<number, PieceView>();
-  private chestViews: Graphics[] = [];
+  private chestViews = new Map<number, Graphics>();
   private heroViews: HeroView[] = [];
   private minionViews: Graphics[] = [];
   private clerk = new Graphics();
@@ -159,12 +183,15 @@ export class DungeonScene implements DeptScene {
   private glareBtn!: Button;
   private trapBtn!: Button;
   private shopBtn!: Button;
-  private slots: { kind: M.PieceKind | 'chest'; btn: Button }[] = [];
+  private tab = 0;
+  private tabBtns: Button[] = [];
+  private slotBtns: Button[] = [];
   private slotBox!: Container;
   private panel!: Container;
   private panelTitle!: PixelText;
   private panelInfo!: PixelText;
   private pUp!: Button;
+  private pUp1!: Button;
   private pA!: Button;
   private pB!: Button;
   private pMove!: Button;
@@ -189,14 +216,17 @@ export class DungeonScene implements DeptScene {
   private overlayDirty = true;
   private slowT = 0;
   private flavorT = 40;
-  private lastStruggle = -1e9;
-  private struggleGlow = 0;
   private champName = '';
   private hoardLevel = -1;
-  private glowTarget: Button | null = null;
-  private glowTile: [number, number] | null = null;
   private coinLife = M.COIN_LIFE;
   private revDirty = -1;
+  /** Pointer gestures: a press on a piece (hold to drag), a drag from the tray. */
+  private press: { id: number; x: number; y: number; t: number } | null = null;
+  private dragPiece: number | null = null;
+  private trayDrag: { kind: Armed; x: number; y: number; active: boolean } | null = null;
+  private hover: [number, number] | null = null;
+  private justDropped = -1;
+  private ritual: { done: (score: number) => void } | null = null;
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -204,13 +234,18 @@ export class DungeonScene implements DeptScene {
     this.run = ctx.save.run as M.DungeonRun;
     this.per = ctx.save.persistent as M.DungeonPersistent;
     this.run.lure = Math.max(0, Math.min(this.run.lure, this.run.lureMax));
-    this.applyStarterKit();
+    if (this.run.floor >= (this.per.floors ?? 1)) M.switchFloor(this.run, 0);
+    // Cycle start (01 §4): last cycle's layout becomes ghosts; Master Mason rebuilds what it can.
+    if (M.startCycle(this.run, this.per, ctx.save.cycle.n)) ctx.saveSoon();
+    if (this.per.mason) M.masonRebuild(this.run, this.per);
+    this.grid = M.gridOf(this.run, this.per);
     this.sim = new Sim({
       pieces: this.run.pieces,
-      chests: this.run.chests,
+      bait: this.run.bait,
       ws: this.run.ws,
       lure: this.run.lure,
       party: this.run.party,
+      grid: this.grid,
       seed: (Date.now() & 0x7fffffff) ^ 0x5bd1e995,
       live: true,
       ...dungeonImports(ctx.save.imports),
@@ -219,6 +254,7 @@ export class DungeonScene implements DeptScene {
     this.groups = buildGroups(ctx, {
       changed: () => this.layoutChanged(),
       lureBought: () => this.onLureBought(),
+      floor: (f) => this.travel(f),
     });
     this.root.addChild(
       this.bg,
@@ -230,42 +266,33 @@ export class DungeonScene implements DeptScene {
       this.heroLayer,
       this.fxG,
       this.coinLayer,
+      this.dragG,
       this.bannerG,
       this.banner,
       this.ui,
       this.hit,
+      this.ritualLayer,
     );
+    live.lureParty = false;
     this.buildLayout();
     this.syncPieces();
     this.updateBlueprint();
     ctx.raiseSkill(M.heldLure(this.run));
   }
 
-  // ---------- cycle start ----------
-
-  /** After a Fall: last cycle's layout becomes ghosts and the kit adds 10% of its value (01 §4, §7). */
-  private applyStarterKit(): void {
-    const n = this.ctx.save.cycle.n;
-    const bp = this.per.bp;
-    if (bp.cycle >= n) return;
-    const starter = (g: M.Ghost) => STARTER_SLITS.some(([x, y]) => g.x === x && g.y === y && g.k === 'arrow');
-    const fresh = bp.pieces.filter((g) => !starter(g));
-    const keep = this.per.ghosts.filter((g) => !fresh.some((f) => f.x === g.x && f.y === g.y));
-    this.per.ghosts = [...fresh, ...keep];
-    if (bp.value > 0) this.run.bank += 0.1 * bp.value;
-    this.per.bp = { cycle: n, pieces: [], value: 0 };
-    this.ctx.saveSoon();
-  }
-
   private updateBlueprint(): void {
-    this.per.bp = {
-      cycle: this.ctx.save.cycle.n,
-      pieces: this.run.pieces.map((p) => ({ k: p.k, x: p.x, y: p.y })),
-      value: M.layoutValue(this.run),
-    };
+    this.per.bp = M.blueprint(this.run, this.ctx.save.cycle.n);
   }
 
   // ---------- layout ----------
+
+  private tx(x: number): number {
+    return this.bx + x * TILE;
+  }
+
+  private ty(y: number): number {
+    return this.by + y * TILE;
+  }
 
   private buildLayout(): void {
     const c = this.ctx.content();
@@ -278,21 +305,7 @@ export class DungeonScene implements DeptScene {
     this.topY = Math.max(c.y + 1, this.by - TOP_H);
 
     this.drawBackground();
-
-    // Fixed board art: Ledger-Bones and the Hoard.
-    this.hoard.position.set(this.bx + HOARD[0] * TILE, this.by + HOARD[1] * TILE);
-    this.clerk.position.set(this.bx + HOARD[0] * TILE - 3, this.by + HOARD[1] * TILE + 15);
-    this.pieceLayer.addChild(this.hoard, this.clerk);
-    this.clerk.context = clerkArt(0);
-
-    // Chest spots.
-    this.chestViews.forEach((g) => g.destroy());
-    this.chestViews = LOOPS.map((l) => {
-      const g = new Graphics(chestArt(false, false));
-      g.position.set(this.bx + l.chest[0] * TILE, this.by + l.chest[1] * TILE);
-      this.pieceLayer.addChild(g);
-      return g;
-    });
+    this.placeBoardArt();
 
     // UI.
     this.ui.removeChildren().forEach((ch) => ch.destroy({ children: true }));
@@ -348,31 +361,29 @@ export class DungeonScene implements DeptScene {
     this.shopBtn = mk({ w: this.uw - (aw + gap) * 3, h: ABIL_H - 1, label: 'WORKSHOP', sub: '', ...dark, onTap: () => this.openShop() }, x0 + (aw + gap) * 3, ay);
     this.badge.position.set(this.shopBtn.x + this.shopBtn.width - 7, ay - 3);
 
-    // Tray: 8 build slots in two rows.
-    this.slots = [];
-    const kinds: (M.PieceKind | 'chest')[] = ['arrow', 'brazier', 'ballista', 'crypt', 'ogre', 'mire', 'spikes', 'chest'];
+    // Tray: a tab row (TOWER LAIR RUNE DIG) over four build slots (01 §10).
     const sw = Math.floor((this.uw - gap * 3) / 4);
-    kinds.forEach((k, i) => {
-      const col = i % 4;
-      const row = Math.floor(i / 4);
-      const w = col === 3 ? this.uw - (sw + gap) * 3 : sw;
-      const btn = mk(
-        { w, h: 18, label: k === 'chest' ? 'CHEST' : M.PIECES[k].short, sub: '', ...this.slotColor(k), onTap: () => this.arm(k) },
-        x0 + col * (sw + gap),
-        this.trayY + row * 21,
-        this.slotBox,
-      );
-      this.slots.push({ kind: k, btn });
+    this.tabBtns = M.TABS.map((t, i) => {
+      const w = i === 3 ? this.uw - (sw + gap) * 3 : sw;
+      return mk({ w, h: 12, label: t.label, ...dark, onTap: () => this.setTab(i) }, x0 + i * (sw + gap), this.trayY, this.slotBox);
+    });
+    this.slotBtns = [0, 1, 2, 3].map((i) => {
+      const w = i === 3 ? this.uw - (sw + gap) * 3 : sw;
+      const b = mk({ w, h: 22, label: '', sub: '', onTap: () => this.tapSlot(i) }, x0 + i * (sw + gap), this.trayY + 15, this.slotBox);
+      b.on('pointerdown', (e: FederatedPointerEvent) => this.trayDown(i, e));
+      b.on('pointerupoutside', (e: FederatedPointerEvent) => this.trayUp(e));
+      return b;
     });
 
     // Selected-piece panel.
     const py = this.trayY;
     this.panelTitle.position.set(x0, py + 1);
     this.panelInfo.position.set(x0, py + 9);
-    const bw = Math.floor((this.uw - gap * 3) / 4);
+    const bw = sw;
     this.pUp = mk({ w: bw * 2 + gap, h: 20, label: 'UPGRADE', sub: '', onTap: () => this.panelAction('up') }, x0, py + 18, this.panel);
-    this.pA = mk({ w: bw, h: 20, label: 'A', sub: '', color: 0x5a9ad8, shade: 0x2a5a8a, onTap: () => this.panelAction('a') }, x0, py + 18, this.panel);
-    this.pB = mk({ w: bw, h: 20, label: 'B', sub: '', color: 0x5a9ad8, shade: 0x2a5a8a, onTap: () => this.panelAction('b') }, x0 + bw + gap, py + 18, this.panel);
+    this.pUp1 = mk({ w: bw, h: 20, label: 'UP', sub: '', onTap: () => this.panelAction('up') }, x0, py + 18, this.panel);
+    this.pA = mk({ w: bw, h: 20, label: 'A', sub: '', color: SWAP_COL[0], shade: SWAP_COL[1], onTap: () => this.panelAction('a') }, x0, py + 18, this.panel);
+    this.pB = mk({ w: bw, h: 20, label: 'B', sub: '', color: SWAP_COL[0], shade: SWAP_COL[1], onTap: () => this.panelAction('b') }, x0 + bw + gap, py + 18, this.panel);
     this.pMove = mk({ w: bw, h: 20, label: 'MOVE', ...dark, onTap: () => this.panelAction('move') }, x0 + (bw + gap) * 2, py + 18, this.panel);
     this.pSell = mk({ w: this.uw - (bw + gap) * 3, h: 20, label: 'SELL', sub: '', color: C.red, shade: 0x7a2020, textColor: C.ink, onTap: () => this.panelAction('sell') }, x0 + (bw + gap) * 3, py + 18, this.panel);
     mk({ w: 16, h: 13, label: 'X', ...dark, onTap: () => this.select(null) }, right - 16, py, this.panel);
@@ -392,12 +403,32 @@ export class DungeonScene implements DeptScene {
     this.hit.on('pointerdown', (e: FederatedPointerEvent) => this.onDown(e));
     this.hit.on('globalpointermove', (e: FederatedPointerEvent) => this.onMove(e));
     this.hit.on('pointerup', (e: FederatedPointerEvent) => this.onUp(e));
-    this.hit.on('pointerupoutside', () => (this.aim = null));
+    this.hit.on('pointerupoutside', (e: FederatedPointerEvent) => this.onUpOutside(e));
     this.overlayDirty = true;
   }
 
-  private slotColor(k: M.PieceKind | 'chest'): { color: number; shade: number; textColor: string } {
+  /** Hoard, Ledger-Bones and the Bait Chest spots (after a layout or grid change). */
+  private placeBoardArt(): void {
+    const [hx, hy] = this.grid.hoard;
+    this.hoard.position.set(this.tx(hx), this.ty(hy));
+    this.clerk.position.set(this.tx(hx) - 3, this.ty(hy) + 15);
+    if (!this.hoard.parent) this.pieceLayer.addChild(this.hoard, this.clerk);
+    this.clerk.context = clerkArt(0);
+    this.hoardLevel = -1;
+    for (const [, g] of this.chestViews) g.destroy();
+    this.chestViews.clear();
+    for (const spot of this.grid.spots) {
+      const g = new Graphics(chestArt(this.run.bait.includes(spot), false));
+      g.position.set(this.tx(spot % COLS), this.ty(Math.floor(spot / COLS)));
+      this.pieceLayer.addChild(g);
+      this.chestViews.set(spot, g);
+    }
+  }
+
+  private slotColor(k: Armed): { color: number; shade: number; textColor: string } {
     if (k === 'chest') return { color: 0xc8a040, shade: 0x8a6a20, textColor: '#140c1c' };
+    if (digKind(k)) return { color: 0xa08a6a, shade: 0x6a5a40, textColor: '#140c1c' };
+    if (!isPiece(k)) return { color: C.edge, shade: 0x3a2046, textColor: C.ink };
     const slot = M.PIECES[k].slot;
     if (slot === 'wall') return { color: 0x8fb04f, shade: 0x4a6a22, textColor: '#140c1c' };
     if (slot === 'chamber') return { color: 0x5a9ad8, shade: 0x2a5a8a, textColor: '#140c1c' };
@@ -407,10 +438,11 @@ export class DungeonScene implements DeptScene {
   private drawBackground(): void {
     const c = this.ctx.content();
     const L = this.ctx.layout;
+    const G = this.grid;
     this.bg.cacheAsTexture(false);
     const g = this.bg.clear();
     g.rect(0, c.y, L.w, L.h - c.y).fill(PAL.rock);
-    let seed = 777;
+    let seed = 777 + G.f * 31;
     const r = () => ((seed = (seed * 16807) % 2147483647) % 1000) / 1000;
     for (let i = 0; i < 90; i++) g.rect(Math.floor(r() * L.w), c.y + Math.floor(r() * c.h), 2 + Math.floor(r() * 6), 1).fill(PAL.rockSpeck);
     // Cave ceiling above the board: stalactites, and chains with lanterns when there is room.
@@ -422,77 +454,85 @@ export class DungeonScene implements DeptScene {
         g.rect(x + Math.floor((4 - w) / 2), c.y + k, w, 1).fill(PAL.rockSpeck);
       }
     }
+    const lamp = G.f === 2 ? 0x6ab0d0 : G.f === 1 ? 0xd0c08a : 0x6ad08a;
     if (zone > 44) {
       for (const fx of [0.18, 0.82]) {
         const x = Math.round(c.x + c.w * fx);
         const len = Math.min(zone - 16, 14 + Math.floor(zone * 0.3));
         for (let y = c.y; y < c.y + len; y += 3) g.rect(x, y, 1, 2).fill(0x4a4458);
         const ly = c.y + len;
-        g.rect(x - 3, ly, 7, 9).fill(OUTLINE).rect(x - 2, ly + 1, 5, 7).fill(0x3a3440).rect(x - 1, ly + 2, 3, 5).fill(0x6ad08a).rect(x, ly + 3, 1, 2).fill(0xd0ffd8);
-        g.circle(x, ly + 4, 14).fill({ color: 0x6ad08a, alpha: 0.05 });
-        g.circle(x, ly + 4, 8).fill({ color: 0x6ad08a, alpha: 0.07 });
+        g.rect(x - 3, ly, 7, 9).fill(OUTLINE).rect(x - 2, ly + 1, 5, 7).fill(0x3a3440).rect(x - 1, ly + 2, 3, 5).fill(lamp).rect(x, ly + 3, 1, 2).fill(0xd0ffd8);
+        g.circle(x, ly + 4, 14).fill({ color: lamp, alpha: 0.05 });
+        g.circle(x, ly + 4, 8).fill({ color: lamp, alpha: 0.07 });
       }
     }
     // Board frame.
     const { bx, by } = this;
     g.rect(bx - 2, by - 2, BOARD_W + 4, BOARD_H + 4).fill(OUTLINE);
+    const wallC = G.f === 1 ? [0x3a3a40, 0x4c4c54, 0x2a2a30] : G.f === 2 ? [0x2d3a4a, 0x3c4d5e, 0x1f2a37] : [PAL.wall, PAL.wallLight, PAL.wallDark];
     for (let y = 0; y < ROWS; y++)
       for (let x = 0; x < COLS; x++) {
         const px = bx + x * TILE;
         const py = by + y * TILE;
-        const k = tileKind(x, y);
-        const ch = MAP[y][x];
-        const loop = ch === 'a' || ch === 'b' || ch === 'A' || ch === 'B';
+        const k = tileKind(G, x, y);
+        const i = idx(x, y);
+        const loop = G.loop[i] === 1;
         if (k === 'rock') {
           g.rect(px, py, TILE, TILE).fill(PAL.rock);
           if (r() < 0.6) g.rect(px + Math.floor(r() * 12), py + Math.floor(r() * 12), 3, 2).fill(PAL.rockSpeck);
+          // Diggable: a faint pick-mark grid so the player sees where DIG works.
+          g.rect(px + 7, py + 7, 2, 2).fill(0x2a1f37);
         } else if (k === 'wall') {
-          g.rect(px, py, TILE, TILE).fill(PAL.wallDark);
-          // Bricks.
+          g.rect(px, py, TILE, TILE).fill(wallC[2]);
           for (let row = 0; row < 4; row++) {
             const off = row % 2 ? 4 : 0;
             for (let col = -1; col < 2; col++) {
               const bx0 = px + off + col * 8;
-              const x0 = Math.max(px, bx0 + 1);
-              const x1 = Math.min(px + TILE, bx0 + 8);
-              if (x1 - x0 <= 0) continue;
-              g.rect(x0, py + row * 4 + 1, x1 - x0, 3).fill(PAL.wall);
-              g.rect(x0, py + row * 4 + 1, x1 - x0, 1).fill(PAL.wallLight);
+              const xa = Math.max(px, bx0 + 1);
+              const xb = Math.min(px + TILE, bx0 + 8);
+              if (xb - xa <= 0) continue;
+              g.rect(xa, py + row * 4 + 1, xb - xa, 3).fill(wallC[0]);
+              g.rect(xa, py + row * 4 + 1, xb - xa, 1).fill(wallC[1]);
             }
           }
+          if (G.dug[i]) g.rect(px, py, TILE, 1).fill(0x8a7a5a);
         } else if (k === 'chamber') {
           g.rect(px, py, TILE, TILE).fill(PAL.chamber);
           g.rect(px + 1, py + 1, TILE - 2, TILE - 2).fill(PAL.chamberLight);
           g.rect(px + 2, py + 2, TILE - 4, TILE - 4).fill(PAL.chamber);
-          for (let i = 0; i < 3; i++) g.rect(px + 3 + Math.floor(r() * 9), py + 3 + Math.floor(r() * 9), 1, 1).fill(0x3a5a3a);
+          for (let n = 0; n < 3; n++) g.rect(px + 3 + Math.floor(r() * 9), py + 3 + Math.floor(r() * 9), 1, 1).fill(0x3a5a3a);
+          if (G.dug[i]) g.rect(px, py, TILE, 1).fill(0x8a7a5a);
         } else {
-          const base = loop ? PAL.loop : PAL.path;
-          const light = loop ? PAL.loopLight : PAL.pathLight;
+          const water = G.water[i] === 1;
+          const base = water ? 0x2a4a6a : loop ? PAL.loop : PAL.path;
+          const light = water ? 0x3a6a8a : loop ? PAL.loopLight : PAL.pathLight;
           g.rect(px, py, TILE, TILE).fill(base);
-          // Flagstones.
-          g.rect(px + 1, py + 1, 6, 6).fill(light).rect(px + 9, py + 2, 6, 5).fill(light).rect(px + 2, py + 9, 5, 6).fill(light).rect(px + 8, py + 9, 7, 6).fill(light);
-          g.rect(px + 1, py + 6, 6, 1).fill(PAL.pathDark).rect(px + 9, py + 6, 6, 1).fill(PAL.pathDark);
+          if (water) {
+            g.rect(px + 1, py + 4, 5, 1).fill(light).rect(px + 8, py + 9, 6, 1).fill(light).rect(px + 3, py + 13, 4, 1).fill(light);
+          } else {
+            g.rect(px + 1, py + 1, 6, 6).fill(light).rect(px + 9, py + 2, 6, 5).fill(light).rect(px + 2, py + 9, 5, 6).fill(light).rect(px + 8, py + 9, 7, 6).fill(light);
+            g.rect(px + 1, py + 6, 6, 1).fill(PAL.pathDark).rect(px + 9, py + 6, 6, 1).fill(PAL.pathDark);
+          }
         }
       }
     // Path edges: a dark lip where floor meets wall, so the corridor reads.
     for (let y = 0; y < ROWS; y++)
       for (let x = 0; x < COLS; x++) {
-        if (!isWalkable(x, y)) continue;
+        if (!isWalkable(G, x, y)) continue;
         const px = bx + x * TILE;
         const py = by + y * TILE;
-        if (!isWalkable(x, y - 1)) g.rect(px, py, TILE, 1).fill(OUTLINE);
-        if (!isWalkable(x, y + 1)) g.rect(px, py + TILE - 1, TILE, 1).fill(0x2a2030);
-        if (!isWalkable(x - 1, y)) g.rect(px, py, 1, TILE).fill(OUTLINE);
-        if (!isWalkable(x + 1, y)) g.rect(px + TILE - 1, py, 1, TILE).fill(0x2a2030);
+        if (!isWalkable(G, x, y - 1)) g.rect(px, py, TILE, 1).fill(OUTLINE);
+        if (!isWalkable(G, x, y + 1)) g.rect(px, py + TILE - 1, TILE, 1).fill(0x2a2030);
+        if (!isWalkable(G, x - 1, y)) g.rect(px, py, 1, TILE).fill(OUTLINE);
+        if (!isWalkable(G, x + 1, y)) g.rect(px + TILE - 1, py, 1, TILE).fill(0x2a2030);
       }
     // Entry archway.
-    const ex = bx + ENTRY[0] * TILE;
-    const ey = by + ENTRY[1] * TILE;
+    const ex = this.tx(G.entry[0]);
+    const ey = this.ty(G.entry[1]);
     g.rect(ex + 1, ey, 14, 9).fill(OUTLINE);
     g.rect(ex + 2, ey, 12, 1).fill(0x6a5a7a);
     for (let i = 3; i < 14; i += 3) g.rect(ex + i, ey + 1, 1, 7).fill(0x4a4458);
     g.rect(ex + 1, ey + 3, 14, 1).fill(0x4a4458);
-    // Loop letters on the chest spots' sides are drawn by the chests themselves.
     // Bottom control strip.
     const stripY = this.abilY - 2;
     g.rect(0, stripY, L.w, L.h - stripY).fill(0x1c1028);
@@ -527,11 +567,11 @@ export class DungeonScene implements DeptScene {
         v = { g, pips, key: '', k: p.k };
         this.pieceViews.set(p.id, v);
       }
-      const key = `${p.k}.${p.l}.${p.b}.${p.x}.${p.y}`;
+      const key = `${p.k}.${p.l}.${p.b}.${p.b2 ?? 0}.${p.x}.${p.y}`;
       if (key !== v.key) {
         v.key = key;
         v.g.context = pieceArt(p.k, this.tierOf(p.l), p.b, 0);
-        v.g.position.set(this.bx + p.x * TILE, this.by + p.y * TILE);
+        v.g.position.set(this.tx(p.x), this.ty(p.y));
         // Level pips along the bottom edge (one per level past 1, max 9).
         const pg = v.pips.clear();
         const n = p.l - 1;
@@ -539,46 +579,40 @@ export class DungeonScene implements DeptScene {
           const w = Math.min(n, 9) * 2 - 1;
           pg.rect(-1, -1, w + 2, 3).fill(OUTLINE);
           for (let i = 0; i < Math.min(n, 9); i++) pg.rect(i * 2, 0, 1, 1).fill(i >= 8 ? GOLD : i >= 3 ? 0x6ac0d0 : 0xd8d0b0);
-          v.pips.position.set(this.bx + p.x * TILE + Math.floor((TILE - w) / 2), this.by + p.y * TILE + TILE - 2);
+          v.pips.position.set(this.tx(p.x) + Math.floor((TILE - w) / 2), this.ty(p.y) + TILE - 2);
         }
       }
     }
-    // Ghost blueprints and chests.
+    // Ghost blueprints (this floor's).
     const g = this.ghostG.clear();
     this.ghostLayer.removeChildren().forEach((c) => c.destroy());
+    let shown = 0;
     for (const gh of this.per.ghosts) {
-      if (this.pieceAt(gh.x, gh.y)) continue;
+      if ((gh.f ?? 0) !== this.run.floor || M.pieceAt(this.run, gh.x, gh.y) || shown >= 80) continue;
+      shown++;
       const sil = new Graphics(pieceArt(gh.k, 0, 0, 0));
-      sil.position.set(this.bx + gh.x * TILE, this.by + gh.y * TILE);
+      sil.position.set(this.tx(gh.x), this.ty(gh.y));
       sil.alpha = 0.3;
       this.ghostLayer.addChild(sil);
-      const px = this.bx + gh.x * TILE;
-      const py = this.by + gh.y * TILE;
+      const px = this.tx(gh.x);
+      const py = this.ty(gh.y);
       g.rect(px + 2, py + 2, TILE - 4, TILE - 4).fill({ color: 0x6ac0d0, alpha: 0.18 });
-      g.rect(px + 2, py + 2, TILE - 4, 1).fill({ color: 0x6ac0d0, alpha: 0.6 });
-      g.rect(px + 2, py + TILE - 3, TILE - 4, 1).fill({ color: 0x6ac0d0, alpha: 0.6 });
-      g.rect(px + 2, py + 2, 1, TILE - 4).fill({ color: 0x6ac0d0, alpha: 0.6 });
-      g.rect(px + TILE - 3, py + 2, 1, TILE - 4).fill({ color: 0x6ac0d0, alpha: 0.6 });
+      g.rect(px + 2, py + 2, TILE - 4, 1).rect(px + 2, py + TILE - 3, TILE - 4, 1).rect(px + 2, py + 2, 1, TILE - 4).rect(px + TILE - 3, py + 2, 1, TILE - 4).fill({ color: 0x6ac0d0, alpha: 0.6 });
     }
-    this.chestViews.forEach((cv, i) => (cv.context = chestArt(!!this.run.chests[i], false)));
+    for (const [spot, cv] of this.chestViews) cv.context = chestArt(this.run.bait.includes(spot), false);
     this.overlayDirty = true;
   }
 
-  private pieceAt(x: number, y: number): M.PieceSave | undefined {
-    return this.run.pieces.find((p) => p.x === x && p.y === y);
-  }
-
   private ghostAt(x: number, y: number): number {
-    return this.per.ghosts.findIndex((g) => g.x === x && g.y === y && !this.pieceAt(x, y));
+    return this.per.ghosts.findIndex((g) => g.x === x && g.y === y && (g.f ?? 0) === this.run.floor && !M.pieceAt(this.run, x, y));
   }
 
   private validTile(k: M.PieceKind, x: number, y: number): boolean {
-    if (this.pieceAt(x, y)) return false;
-    const slot = M.PIECES[k].slot;
-    const kind = tileKind(x, y);
-    if (slot === 'wall') return kind === 'wall';
-    if (slot === 'chamber') return kind === 'chamber' && !!lairPost(x, y);
-    return isRuneTile(x, y);
+    return M.validTile(this.grid, this.run, k, x, y);
+  }
+
+  private canDigAt(k: 'w' | 'c' | 'p', x: number, y: number): boolean {
+    return canDig(this.grid, x, y, k) && !M.pieceAt(this.run, x, y);
   }
 
   /** The idle sim reruns when run.rev changes; bump it 1.5 s after the last edit (01 §3 debounce). */
@@ -586,19 +620,34 @@ export class DungeonScene implements DeptScene {
     this.revDirty = this.time;
   }
 
-  /** Called after every change the sim depends on. */
-  private layoutChanged(): void {
-    this.touch();
+  private settleMap(): Map<number, number> {
     const settle = new Map<number, number>();
     for (const [id, until] of this.settleUntil) {
       const left = until - this.time;
       if (left > 0) settle.set(id, left);
       else this.settleUntil.delete(id);
     }
-    this.sim.setLayout(this.run.pieces, this.run.chests, this.run.ws, settle);
+    return settle;
+  }
+
+  /** Called after every change the sim depends on. */
+  private layoutChanged(): void {
+    this.touch();
+    this.sim.setLayout(this.run.pieces, this.run.bait, this.run.ws, this.settleMap());
     this.syncPieces();
     this.updateBlueprint();
     this.run.stats.bestPieces = Math.max(this.run.stats.bestPieces, this.run.pieces.length);
+  }
+
+  /** Dig or a floor switch changed the grid: re-route, redraw the floor. */
+  private regrid(): void {
+    this.grid = M.gridOf(this.run, this.per);
+    this.touch();
+    this.sim.setLayout(this.run.pieces, this.run.bait, this.run.ws, this.settleMap(), this.grid);
+    this.drawBackground();
+    this.placeBoardArt();
+    this.syncPieces();
+    this.updateBlueprint();
   }
 
   private place(k: M.PieceKind, x: number, y: number): boolean {
@@ -612,25 +661,22 @@ export class DungeonScene implements DeptScene {
       this.floatAt(x + 0.5, y + 0.2, `NEED ${fm(cost)}`, '#e05050');
       return false;
     }
-    const p: M.PieceSave = { id: this.run.nextId++, k, x, y, l: 1, b: 0, inv: cost };
+    const p: M.PieceSave = { id: this.run.nextId++, k, x, y, l: 1, b: 0, b2: 0, inv: cost };
     this.run.pieces.push(p);
     this.run.stats.placed++;
     this.placedAt.set(p.id, this.time);
-    const gi = this.per.ghosts.findIndex((g) => g.x === x && g.y === y);
+    const gi = this.ghostAt(x, y);
     if (gi >= 0) this.per.ghosts.splice(gi, 1);
     this.layoutChanged();
     this.puff(x + 0.5, y + 0.5, 0xd8d0b0, 6);
     this.ctx.haptic(8);
-    if (k === 'ballista' && !this.ctx.seen('d.ballista')) {
-      this.ctx.markSeen('d.ballista');
-      this.ctx.say('firstBallista', { milestone: true });
-    }
+    if (k === 'ballista') this.ctx.say('firstBallista', { type: 'first_upgrade', key: 'ballista' });
     return true;
   }
 
   private upgrade(p: M.PieceSave, branch: 0 | 1 | 2): void {
     if (p.l >= M.MAX_LEVEL) return;
-    const needBranch = p.l + 1 === M.BRANCH_LEVEL;
+    const needBranch = M.branchAt(p.l);
     if (needBranch && !branch) return;
     const cost = M.levelCost(p.k, p.l);
     if (!this.ctx.spend(cost)) return;
@@ -638,13 +684,28 @@ export class DungeonScene implements DeptScene {
     p.inv += cost;
     this.run.stats.upgrades++;
     if (needBranch) {
-      p.b = branch;
+      if (p.l === M.BRANCH_LEVEL2) p.b2 = branch;
+      else p.b = branch;
       this.run.stats.branches++;
-      if (!this.ctx.seen('d.branch')) {
-        this.ctx.markSeen('d.branch');
-        this.ctx.say('firstBranch', { milestone: true });
-      }
+      this.ctx.say('firstBranch', { type: 'first_upgrade', key: 'branch' });
     }
+    this.layoutChanged();
+    this.sparkle(p.x + 0.5, p.y + 0.5);
+    this.ctx.haptic(10);
+  }
+
+  /** Swap a chosen branch for the other one (50% of that level's price; 01 §6A). Free for an old
+   * save's L10 piece that never had an L10 branch to choose. */
+  private swap(p: M.PieceSave, which: 1 | 2, to?: 1 | 2): void {
+    const cur = which === 1 ? p.b : (p.b2 ?? 0);
+    const next: 1 | 2 = to ?? (cur === 1 ? 2 : 1);
+    if (cur === next) return;
+    const free = which === 2 && !cur;
+    const cost = free ? 0 : M.swapCost(p.k, which);
+    if (cost > 0 && !this.ctx.spend(cost)) return;
+    if (which === 1) p.b = next;
+    else p.b2 = next;
+    p.inv += cost;
     this.layoutChanged();
     this.sparkle(p.x + 0.5, p.y + 0.5);
     this.ctx.haptic(10);
@@ -665,61 +726,141 @@ export class DungeonScene implements DeptScene {
   }
 
   private moveTo(p: M.PieceSave, x: number, y: number): boolean {
+    if (p.x === x && p.y === y) return false;
     if (!this.validTile(p.k, x, y)) return false;
     this.puff(p.x + 0.5, p.y + 0.5, 0x8a7a9a, 5);
     p.x = x;
     p.y = y;
     this.settleUntil.set(p.id, this.time + M.SETTLE_S);
+    this.run.stats.moved++;
     this.layoutChanged();
     this.puff(x + 0.5, y + 0.5, 0xd8d0b0, 5);
+    this.ctx.haptic(8);
     return true;
   }
 
-  private buyChest(i: number): void {
-    if (this.run.chests[i]) return;
-    const cost = M.chestCost(this.run);
-    if (!this.ctx.spend(cost)) {
-      this.floatAt(LOOPS[i].chest[0] + 0.5, LOOPS[i].chest[1], `NEED ${fm(cost)}`, '#e05050');
+  private buyChest(spot: number): void {
+    if (this.run.bait.includes(spot) || !this.grid.spots.includes(spot)) return;
+    if (this.sim.runes.some((r) => idx(r.x, r.y) === spot)) {
+      this.ctx.game.toast('A RUNE SITS THERE. SELL IT FIRST.');
       return;
     }
-    this.run.chests[i] = 1;
-    this.layoutChanged();
-    this.sparkle(LOOPS[i].chest[0] + 0.5, LOOPS[i].chest[1] + 0.5);
-    this.ctx.haptic(12);
-    if (!this.ctx.seen('d.chestBought')) {
-      this.ctx.markSeen('d.chestBought');
-      this.ctx.say('chestPlaced', { milestone: true });
+    const x = spot % COLS;
+    const y = Math.floor(spot / COLS);
+    const cost = M.chestCost(this.run);
+    if (!this.ctx.spend(cost)) {
+      this.floatAt(x + 0.5, y, `NEED ${fm(cost)}`, '#e05050');
+      return;
     }
+    this.run.bait.push(spot);
+    this.layoutChanged();
+    this.sparkle(x + 0.5, y + 0.5);
+    this.ctx.haptic(12);
+    if (this.run.bait.length === 1) this.ctx.say('chestPlaced', { type: 'first_upgrade', key: 'chest' });
   }
 
-  private sellChest(i: number): void {
-    if (!this.run.chests[i]) return;
+  private sellChest(spot: number): void {
+    if (!this.run.bait.includes(spot)) return;
     const refund = M.chestRefund(this.run);
-    this.run.chests[i] = 0;
+    this.run.bait = this.run.bait.filter((b) => b !== spot);
     this.run.bank += refund;
     this.layoutChanged();
-    this.floatAt(LOOPS[i].chest[0] + 0.5, LOOPS[i].chest[1], `+${fm(refund)}`, C.goldText);
+    this.floatAt((spot % COLS) + 0.5, Math.floor(spot / COLS), `+${fm(refund)}`, C.goldText);
     this.select(null);
   }
 
-  private rebuildGhost(i: number): boolean {
-    const g = this.per.ghosts[i];
-    if (!g) return false;
-    if (this.pieceAt(g.x, g.y)) {
-      this.per.ghosts.splice(i, 1);
+  private dugList(): import('./map').DugTile[] {
+    const f = this.run.floor;
+    return (this.per.dug[f] ??= []);
+  }
+
+  /** Dig (01 §6D): rock -> wall / chamber; rock or wall -> corridor next to a walkable tile. */
+  private dig(k: 'w' | 'c' | 'p', x: number, y: number): boolean {
+    if (!this.canDigAt(k, x, y)) return false;
+    const list = this.dugList();
+    const cost = M.digCost(list.length);
+    if (!this.ctx.spend(cost)) {
+      this.floatAt(x + 0.5, y + 0.2, `NEED ${fm(cost)}`, '#e05050');
       return false;
     }
-    return this.place(g.k, g.x, g.y);
+    const i = idx(x, y);
+    const old = list.findIndex((d) => d.i === i);
+    if (old >= 0) list.splice(old, 1);
+    list.push({ i, k });
+    this.run.stats.dug++;
+    this.regrid();
+    this.puff(x + 0.5, y + 0.5, 0x8a7a5a, 10);
+    this.shakeT = 0.12;
+    this.ctx.haptic(12);
+    this.ctx.saveSoon();
+    if (k === 'p' && this.grid.spots.includes(i)) this.floatAt(x + 0.5, y, 'CHEST SPOT!', C.goldText);
+    return true;
+  }
+
+  /** Fill a dug tile back in (free, no refund): gentle undo for a bad carve. */
+  private fill(i: number): void {
+    const list = this.dugList();
+    const k = list.findIndex((d) => d.i === i);
+    if (k < 0) return;
+    const x = i % COLS;
+    const y = Math.floor(i / COLS);
+    if (M.pieceAt(this.run, x, y)) {
+      this.ctx.game.toast('SELL THE PIECE ON IT FIRST.');
+      return;
+    }
+    if (this.run.bait.includes(i)) this.sellChest(i);
+    list.splice(k, 1);
+    this.regrid();
+    this.puff(x + 0.5, y + 0.5, 0x3a2f48, 8);
+    this.select(null);
+    this.ctx.saveSoon();
+  }
+
+  /** Travel to floor f (each floor keeps its own layout; 01 §6D). */
+  private travel(f: number): void {
+    if (f === this.run.floor || f >= (this.per.floors ?? 1)) return;
+    M.switchFloor(this.run, f);
+    this.grid = M.gridOf(this.run, this.per);
+    this.sim = new Sim({
+      pieces: this.run.pieces,
+      bait: this.run.bait,
+      ws: this.run.ws,
+      lure: this.run.lure,
+      party: this.run.party,
+      grid: this.grid,
+      seed: (Date.now() & 0x7fffffff) ^ 0x2545f491,
+      live: true,
+      ...dungeonImports(this.ctx.save.imports),
+    });
+    this.sim.stealFn = (h) => this.steal(h);
+    for (const c of this.coins) this.collect(c, false);
+    this.placedAt.clear();
+    this.settleUntil.clear();
+    this.select(null);
+    this.touch();
+    this.drawBackground();
+    this.placeBoardArt();
+    this.syncPieces();
+    this.updateBlueprint();
+    this.showBanner(FLOORS[f].name.toUpperCase());
+    if (f > 0) this.ctx.say(`floor${f}`, { type: 'tier_reached', key: `floor${f}` });
+    this.ctx.saveSoon();
   }
 
   private rebuildAll(): void {
     let built = 0;
     for (let guard = 0; guard < 80; guard++) {
-      const i = this.per.ghosts.findIndex((g) => !this.pieceAt(g.x, g.y) && this.run.bank >= M.placeCost(this.run, g.k) && (M.PIECES[g.k].slot !== 'path' || M.runeCount(this.run) < M.runeSlots(this.run)));
-      if (i < 0 || !this.rebuildGhost(i)) break;
+      const i = M.rebuildable(this.run, this.per).find((j) => this.run.bank >= M.placeCost(this.run, this.per.ghosts[j].k));
+      if (i === undefined) break;
+      const p = M.rebuildGhost(this.run, this.per, i);
+      if (!p) break;
+      this.placedAt.set(p.id, this.time);
       built++;
     }
-    if (built) this.ctx.game.toast(`REBUILT ${built} FROM BLUEPRINTS.`);
+    if (built) {
+      this.layoutChanged();
+      this.ctx.game.toast(`REBUILT ${built} FROM BLUEPRINTS.`);
+    }
     this.select(null);
   }
 
@@ -747,9 +888,9 @@ export class DungeonScene implements DeptScene {
   }
 
   private setLure(T: number): void {
-    this.run.lure = T;
+    this.run.lure = Math.max(0, Math.min(T, this.run.lureMax));
     this.touch();
-    this.sim.setLure(T);
+    this.sim.setLure(this.run.lure);
   }
 
   private onLureBought(): void {
@@ -760,18 +901,13 @@ export class DungeonScene implements DeptScene {
     const T = r.lureMax;
     const newMax = T > this.per.bestLure;
     if (newMax) this.per.bestLure = T;
-    if (T === M.KNIGHT_LURE && !this.ctx.seen('d.knights')) {
-      this.ctx.markSeen('d.knights');
-      this.ctx.say('knights', { milestone: true });
-    } else if (T === M.ROGUE_LURE && !this.ctx.seen('d.rogues')) {
-      this.ctx.markSeen('d.rogues');
-      this.ctx.say('rogues', { milestone: true });
-    } else if (T === 1 && !this.ctx.seen('d.lure1')) {
-      this.ctx.markSeen('d.lure1');
-      this.ctx.say('lureFirst', { milestone: true });
-    } else if (newMax && T % 5 === 0) {
-      this.ctx.say('dialRaised', { milestone: true, vars: { n: T } });
-    }
+    const hero = M.NEW_HERO_AT[T];
+    if (hero) {
+      // New hero type (tier_reached), with its micro-lesson.
+      this.ctx.say(`hero.${hero}`, { type: 'tier_reached', key: `hero.${hero}` });
+      this.ctx.lesson(`${hero}s`);
+    } else if (T === 1) this.ctx.lesson('lure');
+    else if (newMax && T % 5 === 0) this.ctx.say('dialRaised', { type: 'dial_raised', key: `lure${T}`, vars: { n: T } });
     this.ctx.saveSoon();
   }
 
@@ -787,11 +923,10 @@ export class DungeonScene implements DeptScene {
     s.bestGong = Math.max(s.bestGong, this.sim.gongStack);
     this.shakeT = 0.25;
     this.ctx.haptic(20);
-    this.floatAt(ENTRY[0] + 0.5, ENTRY[1] + 1, `GONG! +${Math.round(this.sim.gongStack * M.GONG_STEP * 100)}%`, C.goldText);
-    if (this.sim.gongStack >= 5 && !this.ctx.seen('d.perfect')) {
-      this.ctx.markSeen('d.perfect');
-      this.ctx.say('perfect', { milestone: true });
-    }
+    const [ex, ey] = this.grid.entry;
+    this.floatAt(ex + 0.5, ey + 1, `GONG! +${Math.round(this.sim.gongStack * M.GONG_STEP * 100)}%`, C.goldText);
+    if (s.gongs === 1) this.ctx.say('gongTip', { type: 'first_upgrade', key: 'gong' });
+    if (this.sim.gongStack >= M.GONG_MAX) this.ctx.say('perfect', { type: 'first_upgrade', key: 'perfect' });
   }
 
   private armGlare(): void {
@@ -819,7 +954,7 @@ export class DungeonScene implements DeptScene {
     this.overlayDirty = true;
   }
 
-  /** Highest-priority hero near a point: sack carriers, then Champions, then the nearest. */
+  /** Glare snapping (01 §5.3): sack carriers, then Cleric > Wizard > Champion > nearest. */
   private snap(px: number, py: number, radius: number): SimHero | null {
     let best: SimHero | null = null;
     let bestScore = Infinity;
@@ -829,7 +964,8 @@ export class DungeonScene implements DeptScene {
       const hy = this.by + h.y * TILE - 3;
       const d = Math.hypot(hx - px, hy - py);
       if (d > radius) continue;
-      const score = d - (h.sack > 0 ? 1000 : 0) - (h.type === 'champ' ? 500 : 0);
+      const pri = h.sack > 0 ? 4000 : h.type === 'cleric' ? 3000 : h.type === 'wizard' ? 2000 : h.type === 'champ' ? 1000 : 0;
+      const score = d - pri;
       if (score < bestScore) {
         bestScore = score;
         best = h;
@@ -860,7 +996,28 @@ export class DungeonScene implements DeptScene {
 
   // ---------- selection & tray ----------
 
-  private arm(k: M.PieceKind | 'chest'): void {
+  private slotKind(i: number): Armed {
+    return (M.TABS[this.tab]?.kinds[i] as Armed) ?? null;
+  }
+
+  private setTab(i: number): void {
+    if (i === this.tab) return;
+    this.tab = i;
+    if (this.armed && !M.TABS[i].kinds.includes(this.armed as M.PieceKind)) this.armed = null;
+    this.btnCache.clear();
+    this.overlayDirty = true;
+  }
+
+  private tapSlot(i: number): void {
+    const wasDrag = this.trayDrag?.active;
+    this.trayDrag = null;
+    if (wasDrag) return;
+    if (this.justDropped >= 0 && this.time - this.justDropped < 0.15) return;
+    const k = this.slotKind(i);
+    if (k) this.arm(k);
+  }
+
+  private arm(k: Armed): void {
     this.trapArmed = false;
     this.glareArmed = false;
     this.moving = false;
@@ -897,19 +1054,30 @@ export class DungeonScene implements DeptScene {
       const p = this.selectedPiece();
       if (!p) return this.select(null);
       if (a === 'up') this.upgrade(p, 0);
-      else if (a === 'a') this.upgrade(p, 1);
-      else if (a === 'b') this.upgrade(p, 2);
-      else if (a === 'move') {
+      else if (a === 'a' || a === 'b') {
+        const pick: 1 | 2 = a === 'a' ? 1 : 2;
+        if (M.branchAt(p.l)) this.upgrade(p, pick);
+        else if (p.l >= M.MAX_LEVEL && !p.b2) this.swap(p, 2, pick);
+        else if (p.l >= M.MAX_LEVEL) this.swap(p, a === 'a' ? 1 : 2);
+        else if (a === 'b' && p.l >= M.BRANCH_LEVEL) this.swap(p, 1);
+      } else if (a === 'move') {
         this.moving = !this.moving;
         this.overlayDirty = true;
       } else if (a === 'sell') this.sell(p);
     } else if (s.t === 'chest') {
-      if (a === 'up') this.buyChest(s.i);
-      else if (a === 'sell') this.sellChest(s.i);
+      if (a === 'up') this.buyChest(s.spot);
+      else if (a === 'sell') this.sellChest(s.spot);
     } else if (s.t === 'ghost') {
       if (a === 'up') {
-        if (this.rebuildGhost(s.i)) this.select(null);
+        const p = M.rebuildGhost(this.run, this.per, s.i);
+        if (p) {
+          this.placedAt.set(p.id, this.time);
+          this.layoutChanged();
+          this.select(null);
+        } else this.ctx.game.toast('NOT ENOUGH PLUNDER (OR NO RUNE SLOT).');
       } else if (a === 'sell') this.rebuildAll();
+    } else if (s.t === 'dug') {
+      if (a === 'sell') this.fill(s.i);
     }
   }
 
@@ -929,16 +1097,24 @@ export class DungeonScene implements DeptScene {
 
   // ---------- input ----------
 
+  private localXY(gx: number, gy: number): { x: number; y: number; tx: number; ty: number } {
+    const p = this.root.toLocal({ x: gx, y: gy });
+    return { x: p.x, y: p.y, tx: Math.floor((p.x - this.bx) / TILE), ty: Math.floor((p.y - this.by) / TILE) };
+  }
+
   private local(e: FederatedPointerEvent): { x: number; y: number; tx: number; ty: number } {
-    const p = this.root.toLocal(e.global);
-    const tx = Math.floor((p.x - this.bx) / TILE);
-    const ty = Math.floor((p.y - this.by) / TILE);
-    return { x: p.x, y: p.y, tx, ty };
+    return this.localXY(e.global.x, e.global.y);
+  }
+
+  private inBoard(tx: number, ty: number): boolean {
+    return tx >= 0 && ty >= 0 && tx < COLS && ty < ROWS;
   }
 
   private onDown(e: FederatedPointerEvent): void {
+    this.trayDrag = null;
+    if (this.ritual) return;
     const { x, y, tx, ty } = this.local(e);
-    const inB = tx >= 0 && ty >= 0 && tx < COLS && ty < ROWS;
+    const inB = this.inBoard(tx, ty);
 
     // 1. Coins (a greedy grab beats everything; they sit on top).
     const coin = this.coins.find((c) => c.fly <= 0 && Math.abs(c.x - x) <= 7 && Math.abs(c.y - y) <= 7);
@@ -948,7 +1124,7 @@ export class DungeonScene implements DeptScene {
     }
     if (!inB) return;
 
-    // 2. Moving a piece.
+    // 2. Moving a piece (MOVE button).
     const sp = this.selectedPiece();
     if (this.moving && sp) {
       if (!this.moveTo(sp, tx, ty)) this.ctx.game.toast('MOVE: TAP A GLOWING TILE.');
@@ -959,26 +1135,34 @@ export class DungeonScene implements DeptScene {
 
     // 3. Trapdoor.
     if (this.trapArmed) {
-      if (isWalkable(tx, ty) && tileKind(tx, ty) !== 'entry' && tileKind(tx, ty) !== 'hoard') {
+      const k = tileKind(this.grid, tx, ty);
+      if (isWalkable(this.grid, tx, ty) && k !== 'entry' && k !== 'hoard') {
         if (this.sim.openTrap(tx, ty)) this.ctx.haptic(12);
       }
       this.trapArmed = false;
       return;
     }
 
-    // 4. Building.
+    // 4. Building and digging.
     if (this.armed) {
-      if (this.armed === 'chest') {
-        const i = LOOPS.findIndex((l) => l.chest[0] === tx && l.chest[1] === ty);
-        if (i >= 0) {
-          this.buyChest(i);
-          this.armed = null;
-          this.refreshTray();
+      const a = this.armed;
+      const dk = digKind(a);
+      if (a === 'chest') {
+        const spot = idx(tx, ty);
+        if (this.grid.spots.includes(spot) && !this.run.bait.includes(spot)) {
+          this.buyChest(spot);
+          if (this.run.bank < M.chestCost(this.run) || this.run.bait.length >= this.grid.spots.length) this.armed = null;
           this.overlayDirty = true;
           return;
         }
-      } else if (this.validTile(this.armed, tx, ty)) {
-        if (this.place(this.armed, tx, ty) && this.run.bank < M.placeCost(this.run, this.armed)) {
+      } else if (dk) {
+        if (this.canDigAt(dk, tx, ty)) {
+          if (this.dig(dk, tx, ty) && this.run.bank < M.digCost(this.dugList().length)) this.armed = null;
+          this.overlayDirty = true;
+          return;
+        }
+      } else if (isPiece(a) && this.validTile(a, tx, ty)) {
+        if (this.place(a, tx, ty) && this.run.bank < M.placeCost(this.run, a)) {
           this.armed = null;
           this.overlayDirty = true;
         }
@@ -999,16 +1183,21 @@ export class DungeonScene implements DeptScene {
     }
     this.glareArmed = false;
 
-    // 6. Selection.
-    const p = this.pieceAt(tx, ty);
+    // 6. A piece: tap selects (on release), hold drags (01 §11).
+    const p = M.pieceAt(this.run, tx, ty);
     if (p) {
-      const cur = this.sel;
-      this.select(cur?.t === 'piece' && cur.id === p.id ? null : { t: 'piece', id: p.id });
+      this.press = { id: p.id, x, y, t: this.time };
       return;
     }
-    const ci = LOOPS.findIndex((l) => l.chest[0] === tx && l.chest[1] === ty);
-    if (ci >= 0) {
-      this.select({ t: 'chest', i: ci });
+    this.tapSelect(tx, ty);
+  }
+
+  /** Selection of a chest spot, a ghost or a dug tile (pieces select on release). */
+  private tapSelect(tx: number, ty: number): void {
+    const i = idx(tx, ty);
+    if (this.grid.spots.includes(i)) {
+      const cur = this.sel;
+      this.select(cur?.t === 'chest' && cur.spot === i ? null : { t: 'chest', spot: i });
       return;
     }
     const gi = this.ghostAt(tx, ty);
@@ -1016,25 +1205,138 @@ export class DungeonScene implements DeptScene {
       this.select({ t: 'ghost', i: gi });
       return;
     }
+    if (this.grid.dug[i]) {
+      this.select({ t: 'dug', i });
+      return;
+    }
     this.select(null);
   }
 
   private onMove(e: FederatedPointerEvent): void {
-    if (!this.aim) return;
-    const { x, y } = this.local(e);
-    const h = this.snap(x, y, 20);
-    if (h) this.aim.h = h;
+    if (this.aim) {
+      const { x, y } = this.local(e);
+      const h = this.snap(x, y, 20);
+      if (h) this.aim.h = h;
+      return;
+    }
+    const { x, y, tx, ty } = this.local(e);
+    if (this.press && this.dragPiece === null) {
+      const far = Math.hypot(x - this.press.x, y - this.press.y) > DRAG_PX;
+      if (far && this.time - this.press.t < M.HOLD_MS / 1000) this.press = null; // a swipe, not a hold
+      else if (far || this.time - this.press.t >= M.HOLD_MS / 1000) this.startPieceDrag();
+    }
+    const td = this.trayDrag;
+    if (td && !td.active && (Math.hypot(x - td.x, y - td.y) > DRAG_PX || this.inBoard(tx, ty))) {
+      td.active = true;
+      this.armed = td.kind;
+      this.sel = null;
+      this.moving = false;
+      this.refreshTray();
+      this.overlayDirty = true;
+    }
+    if (this.dragPiece !== null || td?.active) {
+      const h: [number, number] | null = this.inBoard(tx, ty) ? [tx, ty] : null;
+      if (h?.[0] !== this.hover?.[0] || h?.[1] !== this.hover?.[1]) this.hover = h;
+    }
   }
 
-  private onUp(_e: FederatedPointerEvent): void {
+  private startPieceDrag(): void {
+    if (!this.press) return;
+    const p = this.run.pieces.find((q) => q.id === this.press!.id);
+    this.press = null;
+    if (!p) return;
+    this.dragPiece = p.id;
+    this.hover = [p.x, p.y];
+    this.sel = { t: 'piece', id: p.id };
+    this.moving = true;
+    this.armed = null;
+    this.refreshTray();
+    this.overlayDirty = true;
+    this.ctx.haptic(10);
+  }
+
+  private onUp(e: FederatedPointerEvent): void {
+    if (this.trayDrag) {
+      this.trayUp(e);
+      return;
+    }
     const a = this.aim;
     this.aim = null;
-    if (a?.h) this.fireGlare(a.h);
+    if (a?.h) {
+      this.fireGlare(a.h);
+      return;
+    }
+    if (this.dragPiece !== null) {
+      this.dropPiece(e);
+      return;
+    }
+    const pr = this.press;
+    this.press = null;
+    if (pr) {
+      const cur = this.sel;
+      this.select(cur?.t === 'piece' && cur.id === pr.id ? null : { t: 'piece', id: pr.id });
+    }
+  }
+
+  private onUpOutside(e: FederatedPointerEvent): void {
+    this.aim = null;
+    this.press = null;
+    if (this.dragPiece !== null) this.dropPiece(e);
+  }
+
+  private dropPiece(e: FederatedPointerEvent): void {
+    const id = this.dragPiece;
+    this.dragPiece = null;
+    this.hover = null;
+    this.moving = false;
+    this.overlayDirty = true;
+    const p = this.run.pieces.find((q) => q.id === id);
+    if (!p) return;
+    const { tx, ty } = this.local(e);
+    if (this.inBoard(tx, ty) && !(tx === p.x && ty === p.y)) {
+      if (!this.moveTo(p, tx, ty)) this.ctx.game.toast('MOVE: DROP IT ON A GLOWING TILE.');
+    }
+    this.sel = { t: 'piece', id: p.id };
+    this.refreshTray();
+  }
+
+  /** A press on a tray slot: a drag from it builds where it lands (01 §11). */
+  private trayDown(i: number, e: FederatedPointerEvent): void {
+    const k = this.slotKind(i);
+    if (!k) return;
+    const { x, y } = this.local(e);
+    this.trayDrag = { kind: k, x, y, active: false };
+  }
+
+  private trayUp(e: FederatedPointerEvent): void {
+    const td = this.trayDrag;
+    this.trayDrag = null;
+    this.hover = null;
+    if (!td?.active) return;
+    this.justDropped = this.time;
+    const { tx, ty } = this.local(e);
+    const k = td.kind;
+    let ok = false;
+    if (this.inBoard(tx, ty)) {
+      const dk = digKind(k);
+      if (k === 'chest') {
+        const spot = idx(tx, ty);
+        if (this.grid.spots.includes(spot) && !this.run.bait.includes(spot)) {
+          this.buyChest(spot);
+          ok = true;
+        }
+      } else if (dk) ok = this.dig(dk, tx, ty);
+      else if (isPiece(k)) ok = this.place(k, tx, ty);
+    }
+    this.armed = null;
+    this.overlayDirty = true;
+    if (!ok && this.inBoard(tx, ty)) this.ctx.game.toast('DROP IT ON A GLOWING TILE.');
   }
 
   // ---------- coins and juice ----------
 
   private collect(c: Coin, grab: boolean): void {
+    if (c.fly > 0) return;
     const amount = c.amount * (grab ? 1 + M.GRAB_BONUS : 1);
     this.ctx.earn(amount);
     if (grab) {
@@ -1107,6 +1409,10 @@ export class DungeonScene implements DeptScene {
           this.spawnCoin(this.bx + e.x * TILE, this.by + e.y * TILE, e.amount);
           this.floatAt(e.x, e.y - 1, `+${fm(e.amount)}`, C.goldText);
         }
+        if (e.greed) {
+          s.greedKills++;
+          this.sparkle(e.x, e.y - 0.3);
+        }
         if (e.sack > 0) {
           this.run.bank += e.sack;
           const bonus = this.ctx.earn(e.sack * M.RECOVER_BONUS);
@@ -1114,10 +1420,7 @@ export class DungeonScene implements DeptScene {
           this.floatAt(e.x, e.y - 1.6, `SACK +${fm(e.sack + bonus)}`, '#fff0a0');
           this.sparkle(e.x, e.y);
           this.ctx.haptic(25);
-          if (!this.ctx.seen('d.recovered')) {
-            this.ctx.markSeen('d.recovered');
-            this.ctx.say('recovered', { milestone: true });
-          }
+          this.ctx.say('recovered', { type: 'hazard_first', key: 'recovered' });
         }
         if (e.hero === 'champ') this.onChampSlain();
         break;
@@ -1126,49 +1429,54 @@ export class DungeonScene implements DeptScene {
         s.thieves++;
         this.floatAt(e.x, e.y - 1, e.sack > 0 ? `-${fm(e.sack)}` : 'GRAB!', '#e05050');
         this.ctx.haptic(30);
-        if (!this.ctx.seen('d.thief')) {
-          this.ctx.markSeen('d.thief');
-          this.ctx.say('thief', { milestone: true });
-        }
+        this.ctx.say('thief', { type: 'hazard_first', key: 'thief' });
         break;
       case 'escape':
         s.escaped++;
-        this.floatAt(ENTRY[0] + 0.5, ENTRY[1] + 0.6, e.sack > 0 ? 'ESCAPED!' : 'FLED', '#e05050');
+        this.floatAt(this.grid.entry[0] + 0.5, this.grid.entry[1] + 0.6, e.sack > 0 ? 'ESCAPED!' : 'FLED', '#e05050');
         break;
       case 'rune':
         if (e.kind === 'spikes') this.puff(e.x + 0.5, e.y + 0.5, 0xe0e0f0, 3);
-        else this.puff(e.x + 0.5, e.y + 0.7, 0x6ac04a, 3);
+        else if (e.kind === 'confusion') {
+          this.puff(e.x + 0.5, e.y + 0.5, 0xd060e0, 5);
+          this.floatAt(e.x + 0.5, e.y - 0.2, '?', '#e080ff');
+        } else this.puff(e.x + 0.5, e.y + 0.7, 0x6ac04a, 3);
         break;
       case 'trapped':
         s.traps++;
+        s.captured++;
         this.floatAt(e.x, e.y - 1, 'AAAA!', C.ink);
         this.puff(e.x, e.y, 0x3a2a1a, 6);
         this.ctx.haptic(15);
+        break;
+      case 'sunk':
+        s.captured++;
+        this.floatAt(e.x, e.y - 1, 'GLORP', '#8ad06a');
+        break;
+      case 'dispel':
+        s.dispels++;
+        this.addTracer({ kind: 'dispel', x1: this.bx + e.x * TILE, y1: this.by + e.y * TILE - 6, x2: this.tx(e.rx) + 8, y2: this.ty(e.ry) + 8, life: 0.4, max: 0.4, miss: false });
+        this.floatAt(e.rx + 0.5, e.ry, 'DISPEL', '#b080ff');
+        this.ctx.say('dispel', { type: 'hazard_first', key: 'dispel' });
         break;
       case 'party':
         if (e.champ) {
           this.champName = CHAMP_NAMES[Math.floor(rand() * CHAMP_NAMES.length)];
           this.showBanner(this.champName);
           this.ctx.haptic(30);
-          if (!this.ctx.seen('d.champion')) {
-            this.ctx.markSeen('d.champion');
-            this.ctx.say('champion', { milestone: true });
-          }
+          this.ctx.say('champion', { type: 'hazard_first', key: 'champion' });
         }
+        if (this.sim.lure >= 1) live.lureParty = true;
         this.run.party = this.sim.partyN;
         break;
       case 'partyDone':
         this.checkStruggle();
         break;
       case 'minionDown':
-        this.puff(e.x, e.y, 0xe8e0c8, 6);
+        this.puff(e.x, e.y, e.split ? 0x5ad06a : 0xe8e0c8, e.split ? 9 : 6);
         break;
       case 'loot':
         s.detours++;
-        if (!this.ctx.seen('d.detour')) {
-          this.ctx.markSeen('d.detour');
-          this.ctx.say('detour', { milestone: true });
-        }
         break;
     }
   }
@@ -1184,20 +1492,26 @@ export class DungeonScene implements DeptScene {
       M.recordChamp(r, this.sim.lure);
       this.ctx.raiseSkill(M.heldLure(r));
     }
-    if (!this.ctx.seen('d.champSlain')) {
-      this.ctx.markSeen('d.champSlain');
-      this.ctx.say('champSlain', { milestone: true });
-    }
+    this.ctx.say('champSlain', { type: 'tier_reached', key: 'champSlain' });
     this.ctx.saveSoon();
   }
 
+  /** Struggle (01 §4): leaks > 30% over 20 parties -> "Lower Lure?" with a one-tap offer. */
   private checkStruggle(): void {
     if (this.sim.history.length < 20 || this.run.lure === 0) return;
     const leak = this.sim.leakFrac();
-    if (leak <= 0.3 || this.time - this.lastStruggle < 30 * 60) return;
-    this.lastStruggle = this.time;
-    this.struggleGlow = this.time + 15;
-    this.ctx.say('struggle', { milestone: true, vars: { n: Math.round(leak * 100) } });
+    if (leak <= 0.3) return;
+    this.ctx.say('struggle', {
+      type: 'struggle',
+      vars: { n: Math.round(leak * 100) },
+      offer: () => {
+        if (this.run.lure > 0) {
+          this.setLure(this.run.lure - 1);
+          this.sim.history.length = 0;
+          this.ctx.game.toast(`LURE ${this.run.lure}. BOUGHT TIERS STAY BOUGHT.`);
+        }
+      },
+    });
   }
 
   private showBanner(text: string): void {
@@ -1229,6 +1543,7 @@ export class DungeonScene implements DeptScene {
       this.revDirty = -1;
       this.run.rev++;
     }
+    if (this.press && this.dragPiece === null && this.time - this.press.t >= M.HOLD_MS / 1000) this.startPieceDrag();
     if (this.glareCd > 0) this.glareCd = Math.max(0, this.glareCd - dt);
     if (this.shakeT > 0) {
       this.shakeT -= dt;
@@ -1252,9 +1567,22 @@ export class DungeonScene implements DeptScene {
     this.renderPieces();
     this.renderCoins(dt);
     this.renderFx(dt);
+    this.renderDrag();
     if (this.overlayDirty) this.drawOverlay();
     this.overlayG.alpha = 0.65 + 0.35 * Math.sin(this.time * 6);
     this.updateUi();
+    this.updateLive();
+  }
+
+  private updateLive(): void {
+    const on = live.on;
+    for (const k of PREVIEW_ORDER) on[k] = false;
+    for (const h of this.sim.heroes) if (!h.dead && !h.gone) on[h.type] = true;
+    live.heroes = this.sim.heroes.length;
+    live.gongReady = this.sim.gongReady;
+    live.trapReady = this.sim.trapCharges > 0;
+    live.glareReady = this.glareCd <= 0;
+    live.coins = this.coins.length;
   }
 
   private renderHeroes(a: number): void {
@@ -1289,8 +1617,8 @@ export class DungeonScene implements DeptScene {
       if (Math.abs(dx) > 1e-4) v.g.scale.x = dx > 0 ? 1 : -1;
       const moving = !h.blocked && h.stunT <= 0;
       v.g.context = heroArt(h.type, moving ? (frameT + h.id) % 2 : 0, h.flash > 0);
-      v.g.alpha = h.slowT > 0 ? 0.85 : 1;
-      const top = h.type === 'champ' ? 13 : h.type === 'knight' ? 10 : 9;
+      v.g.alpha = h.slowT > 0 || h.gloomF > 0 ? 0.85 : 1;
+      const top = h.type === 'champ' ? 13 : h.type === 'knight' || h.type === 'wizard' ? 10 : 9;
       v.sack.visible = h.sack > 0;
       if (h.sack > 0) v.sack.position.set(x, y - top - 4);
       const showHp = h.hp < h.maxHp;
@@ -1321,11 +1649,11 @@ export class DungeonScene implements DeptScene {
         continue;
       }
       g.visible = true;
-      const off = m.kind === 'ogre' ? [0, 0] : [[-4, -3], [4, 3], [0, -5]][m.n] ?? [0, 0];
+      const off = m.kind === 'ogre' || (m.kind === 'slime' && !m.split) ? [0, 0] : m.kind === 'slime' ? ([[-4, -2], [4, 2], [0, -5]][m.n - 1] ?? [0, 0]) : ([[-4, -3], [4, 3], [0, -5], [-1, 4]][m.n] ?? [0, 0]);
       g.position.set(Math.round(this.bx + m.px * TILE + off[0]), Math.round(this.by + m.py * TILE + 5 + off[1]));
       const p = this.run.pieces.find((q) => q.id === m.id);
       const swing = m.blocked.length > 0 && Math.floor(this.time * 4) % 2 === 0 ? 1 : 0;
-      g.context = minionArt(m.kind, swing, p ? this.tierOf(p.l) : 0);
+      g.context = minionArt(m.kind, swing, p ? this.tierOf(p.l) : 0, m.split);
       g.alpha = m.hp < m.maxHp * 0.35 ? 0.7 : 1;
     }
   }
@@ -1338,27 +1666,30 @@ export class DungeonScene implements DeptScene {
       if (!v) continue;
       const settling = tw.settle > 0;
       v.g.alpha = settling ? (Math.floor(this.time * 6) % 2 ? 0.4 : 0.8) : 1;
-      if (tw.kind === 'brazier') {
+      if (tw.kind === 'brazier' || tw.kind === 'eye') {
         const p = this.run.pieces.find((q) => q.id === tw.id);
-        if (p) v.g.context = pieceArt('brazier', this.tierOf(p.l), p.b, tw.active ? fr : 0);
+        if (p) v.g.context = pieceArt(tw.kind, this.tierOf(p.l), p.b, tw.active ? fr : 0);
+        if (tw.kind === 'eye') tw.active = false;
       }
     }
     for (const r of this.sim.runes) {
       const v = this.pieceViews.get(r.id);
       if (!v) continue;
       const p = this.run.pieces.find((q) => q.id === r.id);
-      if (r.kind === 'spikes' && p) v.g.context = pieceArt('spikes', this.tierOf(p.l), p.b, r.charges >= 1 ? 0 : 1);
-      v.g.alpha = r.settle > 0 ? 0.5 : r.flash > 0 ? 1 : 0.9;
+      if ((r.kind === 'spikes' || r.kind === 'confusion') && p) {
+        const spent = r.kind === 'spikes' ? r.charges < 1 : r.coolT > 0;
+        v.g.context = pieceArt(r.kind, this.tierOf(p.l), p.b, spent ? 1 : 0);
+      }
+      v.g.alpha = r.off > 0 ? 0.3 : r.settle > 0 ? 0.5 : r.flash > 0 ? 1 : 0.9;
     }
     for (const m of this.sim.minions) {
+      if (m.split) continue;
       const v = this.pieceViews.get(m.id);
       if (v) v.g.alpha = !m.alive && m.respawnT > m.respawn - 0.1 ? 0.6 : 1;
     }
     // Chests glint every 2 s.
     const glint = this.time % 2 < 0.2;
-    this.chestViews.forEach((cv, i) => {
-      if (this.run.chests[i]) cv.context = chestArt(true, glint);
-    });
+    for (const [spot, cv] of this.chestViews) if (this.run.bait.includes(spot)) cv.context = chestArt(true, glint);
     // Ledger-Bones settles back after a throw.
     if (Math.floor(this.time * 4) % 3 === 0) this.clerk.context = clerkArt(0);
     // Hoard pile grows with the bank.
@@ -1401,8 +1732,12 @@ export class DungeonScene implements DeptScene {
 
   private renderFx(dt: number): void {
     const g = this.fxG.clear();
-    // Brazier embers.
+    // Brazier embers, Eye of Gloom haze.
     for (const tw of this.sim.towers) {
+      if (tw.kind === 'eye' && tw.settle <= 0) {
+        g.circle(this.bx + tw.x * TILE, this.by + tw.y * TILE, tw.range * TILE).fill({ color: 0x6a3ab0, alpha: 0.06 });
+        continue;
+      }
       if (tw.kind !== 'brazier' || !tw.active) continue;
       const cx = this.bx + tw.x * TILE;
       const cy = this.by + tw.y * TILE;
@@ -1412,11 +1747,17 @@ export class DungeonScene implements DeptScene {
         g.rect(Math.round(cx + Math.cos(ang) * r * 0.7), Math.round(cy + Math.sin(ang) * r * 0.7), 1, 1).fill(k % 2 ? 0xf07a20 : 0xffd040);
       }
     }
+    // Clerics' healing glow.
+    for (const h of this.sim.heroes) {
+      if (h.type !== 'cleric' || h.dead || h.gone) continue;
+      g.circle(Math.round(this.bx + h.x * TILE), Math.round(this.by + h.y * TILE), M.CLERIC_RANGE * TILE).fill({ color: 0xfff0a0, alpha: 0.07 });
+      if (Math.floor(this.time * 3 + h.id) % 3 === 0) g.rect(Math.round(this.bx + h.x * TILE) + 5, Math.round(this.by + h.y * TILE) - 12, 1, 3).rect(Math.round(this.bx + h.x * TILE) + 4, Math.round(this.by + h.y * TILE) - 11, 3, 1).fill(0x8fd14f);
+    }
     // Trapdoor.
     const tr = this.sim.trap;
     if (tr) {
-      const px = this.bx + tr.x * TILE;
-      const py = this.by + tr.y * TILE;
+      const px = this.tx(tr.x);
+      const py = this.ty(tr.y);
       g.rect(px + 1, py + 1, TILE - 2, TILE - 2).fill(OUTLINE);
       g.rect(px + 2, py + 2, TILE - 4, TILE - 4).fill(0x000000);
       const swing = tr.t > M.TRAP_OPEN - 0.15 ? 6 : 2;
@@ -1437,6 +1778,9 @@ export class DungeonScene implements DeptScene {
         g.rect(x, y, 2, t.kind === 'clerk' ? 2 : 1).fill(t.kind === 'clerk' ? 0xe8e0c8 : t.miss ? 0x8a8a9a : 0xf4e8c1);
       } else if (t.kind === 'ballista') {
         g.moveTo(t.x1, t.y1).lineTo(t.x2, t.y2).stroke({ width: 1, color: 0xe8e0c8, alpha: t.life / t.max });
+      } else if (t.kind === 'dispel') {
+        g.moveTo(t.x1, t.y1).lineTo(t.x2, t.y2).stroke({ width: 1, color: 0xb080ff, alpha: t.life / t.max });
+        g.circle(t.x2, t.y2, 3 + f * 6).stroke({ width: 1, color: 0xb080ff, alpha: t.life / t.max });
       } else {
         const al = t.life / t.max;
         g.moveTo(t.x1, t.y1).lineTo(t.x2, t.y2).stroke({ width: 3, color: 0xc0306a, alpha: al });
@@ -1468,35 +1812,70 @@ export class DungeonScene implements DeptScene {
     }
   }
 
-  /** Placement glow, selection ring, onboarding highlight. Redrawn only when state changes. */
+  /** The piece under a drag (from the tray or a held piece), at the hovered tile. */
+  private renderDrag(): void {
+    const g = this.dragG.clear();
+    const hv = this.hover;
+    if (!hv) return;
+    let k: M.PieceKind | null = null;
+    let ok = false;
+    if (this.dragPiece !== null) {
+      const p = this.run.pieces.find((q) => q.id === this.dragPiece);
+      if (!p) return;
+      k = p.k;
+      ok = (hv[0] === p.x && hv[1] === p.y) || this.validTile(p.k, hv[0], hv[1]);
+    } else if (this.trayDrag?.active) {
+      const a = this.trayDrag.kind;
+      const dk = digKind(a);
+      if (isPiece(a)) {
+        k = a;
+        ok = this.validTile(a, hv[0], hv[1]);
+      } else if (dk) ok = this.canDigAt(dk, hv[0], hv[1]);
+      else ok = this.grid.spots.includes(idx(hv[0], hv[1])) && !this.run.bait.includes(idx(hv[0], hv[1]));
+    }
+    const px = this.tx(hv[0]);
+    const py = this.ty(hv[1]);
+    const col = ok ? 0xfff0a0 : 0xe05050;
+    g.rect(px, py, TILE, 1).rect(px, py + TILE - 1, TILE, 1).rect(px, py + 1, 1, TILE - 2).rect(px + TILE - 1, py + 1, 1, TILE - 2).fill(col);
+    if (k && ok && M.PIECES[k].slot === 'wall') {
+      const range = k === 'arrow' ? 3 : k === 'ballista' ? 5 : k === 'eye' ? 2 : 1.5;
+      g.circle(px + 8, py + 8, range * TILE).stroke({ width: 1, color: 0xfff0a0, alpha: 0.6 });
+    }
+  }
+
+  /** Placement glow, selection ring. Redrawn only when state changes. */
   private drawOverlay(): void {
     this.overlayDirty = false;
     const g = this.overlayG.clear();
     const tileGlow = (x: number, y: number, color: number) => {
-      const px = this.bx + x * TILE;
-      const py = this.by + y * TILE;
+      const px = this.tx(x);
+      const py = this.ty(y);
       g.rect(px + 1, py + 1, TILE - 2, TILE - 2).fill({ color, alpha: 0.18 });
       g.rect(px, py, TILE, 1).rect(px, py + TILE - 1, TILE, 1).rect(px, py + 1, 1, TILE - 2).rect(px + TILE - 1, py + 1, 1, TILE - 2).fill(color);
     };
     const sp = this.selectedPiece();
-    const kind: M.PieceKind | null = this.moving && sp ? sp.k : this.armed && this.armed !== 'chest' ? this.armed : null;
+    const kind: M.PieceKind | null = this.moving && sp ? sp.k : isPiece(this.armed) ? this.armed : null;
     if (kind) {
       for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (this.validTile(kind, x, y)) tileGlow(x, y, this.moving ? 0x6ac0d0 : 0xfff0a0);
     }
-    if (this.armed === 'chest') LOOPS.forEach((l, i) => !this.run.chests[i] && tileGlow(l.chest[0], l.chest[1], GOLD));
+    const dk = digKind(this.armed);
+    if (dk) for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (this.canDigAt(dk, x, y)) tileGlow(x, y, 0xc0a070);
+    if (this.armed === 'chest') for (const spot of this.grid.spots) if (!this.run.bait.includes(spot)) tileGlow(spot % COLS, Math.floor(spot / COLS), GOLD);
     const s = this.sel;
     if (sp) {
       tileGlow(sp.x, sp.y, 0xffffff);
       const tw = this.sim.towers.find((t) => t.id === sp.id);
       if (tw) g.circle(this.bx + tw.x * TILE, this.by + tw.y * TILE, tw.range * TILE).stroke({ width: 1, color: 0xfff0a0, alpha: 0.8 });
-      const post = M.PIECES[sp.k].slot === 'chamber' ? lairPost(sp.x, sp.y) : null;
+      const ru = this.sim.runes.find((r) => r.id === sp.id);
+      if (ru?.kind === 'greed') g.circle(this.tx(ru.x) + 8, this.ty(ru.y) + 8, ru.radius * TILE).stroke({ width: 1, color: GOLD, alpha: 0.8 });
+      const post = M.PIECES[sp.k].slot === 'chamber' ? lairPost(this.grid, sp.x, sp.y) : null;
       if (post) tileGlow(post[0], post[1], 0x6ac0d0);
-    } else if (s?.t === 'chest') tileGlow(LOOPS[s.i].chest[0], LOOPS[s.i].chest[1], GOLD);
+    } else if (s?.t === 'chest') tileGlow(s.spot % COLS, Math.floor(s.spot / COLS), GOLD);
+    else if (s?.t === 'dug') tileGlow(s.i % COLS, Math.floor(s.i / COLS), 0xc0a070);
     else if (s?.t === 'ghost') {
       const gh = this.per.ghosts[s.i];
       if (gh) tileGlow(gh.x, gh.y, 0x6ac0d0);
     }
-    if (this.glowTile && !kind) tileGlow(this.glowTile[0], this.glowTile[1], 0xfff0a0);
   }
 
   // ---------- UI ----------
@@ -1530,11 +1909,15 @@ export class DungeonScene implements DeptScene {
     const target = this.ctx.def.skillTarget(this.ctx.save.cycle.n);
     const champs = r.champs.filter((t) => t >= target).length;
     let hint = '';
+    const a = this.armed;
     if (this.trapArmed) hint = 'TAP THE PATH UNDER A VISITOR';
     else if (this.glareArmed) hint = 'TAP NEAR A VISITOR TO GLARE';
+    else if (this.dragPiece !== null) hint = 'DROP ON A GLOWING TILE. 3S SETTLE';
     else if (this.moving) hint = 'TAP A GLOWING TILE TO MOVE';
-    else if (this.armed === 'chest') hint = 'TAP A GLOWING LOOP END';
-    else if (this.armed) hint = `TAP A GLOWING ${M.PIECES[this.armed].slot === 'wall' ? 'WALL' : M.PIECES[this.armed].slot === 'chamber' ? 'CHAMBER' : 'PATH TILE'}`;
+    else if (a === 'chest') hint = 'TAP A GLOWING LOOP END';
+    else if (a === 'dig.p') hint = `CARVE A CORRIDOR: ${fm(M.digCost(this.dugList().length))}`;
+    else if (a === 'dig.w' || a === 'dig.c') hint = `DIG ROCK INTO A ${a === 'dig.w' ? 'WALL' : 'CHAMBER'}: ${fm(M.digCost(this.dugList().length))}`;
+    else if (isPiece(a)) hint = `${M.PIECES[a].role}`;
     if (hint) this.status.set(hint, C.goldText);
     else {
       const gong = sim.gongStack > 0 ? `  GONG+${Math.round(sim.gongStack * M.GONG_STEP * 100)}%` : '';
@@ -1552,36 +1935,41 @@ export class DungeonScene implements DeptScene {
     // Tray or panel.
     if (this.sel) this.updatePanel();
     else {
-      for (const { kind, btn } of this.slots) {
+      this.tabBtns.forEach((b, i) => {
+        const on = i === this.tab;
+        this.setBtn(b, M.TABS[i].label, undefined, true, on ? [0xa06ad0, 0x6a3a8a] : [0x3a2a4a, 0x241830]);
+      });
+      this.slotBtns.forEach((btn, i) => {
+        const kind = this.slotKind(i);
+        if (!kind) {
+          btn.visible = false;
+          return;
+        }
+        let label = '';
+        let sub = '';
+        let ok = false;
         if (kind === 'chest') {
-          const full = r.chests[0] && r.chests[1];
+          const full = r.bait.length >= this.grid.spots.length;
           const cost = M.chestCost(r);
-          this.setBtn(btn, 'CHEST', full ? 'PLACED' : fm(cost), !full && r.bank >= cost);
-        } else {
+          label = 'CHEST';
+          sub = full ? 'ALL SET' : fm(cost);
+          ok = !full && r.bank >= cost;
+        } else if (digKind(kind)) {
+          const cost = M.digCost(this.dugList().length);
+          label = EXTRA_LABEL[kind as M.TrayExtra];
+          sub = fm(cost);
+          ok = r.bank >= cost;
+        } else if (isPiece(kind)) {
           const cost = M.placeCost(r, kind);
           const full = M.PIECES[kind].slot === 'path' && M.runeCount(r) >= M.runeSlots(r);
-          this.setBtn(btn, M.PIECES[kind].short, full ? 'FULL' : fm(cost), !full && r.bank >= cost);
+          label = M.PIECES[kind].short;
+          sub = full ? 'FULL' : fm(cost);
+          ok = !full && r.bank >= cost;
         }
         const isArmed = this.armed === kind;
-        const ck = `armed.${isArmed}`;
-        if ((btn as any)._armedKey !== ck) {
-          (btn as any)._armedKey = ck;
-          const sc = this.slotColor(kind);
-          if (isArmed) btn.setColor(0xfff0a0, 0xc0a040);
-          else btn.setColor(sc.color, sc.shade);
-        }
-      }
-    }
-
-    // Onboarding / lesson glow around a button.
-    const b = this.glowTarget;
-    if (b && b.visible && b.parent?.visible !== false && Math.floor(this.time * 3) % 2 === 0) {
-      const gx = b.x;
-      const gy = b.y;
-      const bw = b.width;
-      const bh = b.height;
-      pg.rect(gx - 2, gy - 2, bw + 4, 1).rect(gx - 2, gy + bh + 1, bw + 4, 1).rect(gx - 2, gy - 1, 1, bh + 2).rect(gx + bw + 1, gy - 1, 1, bh + 2);
-      pg.fill(0xfff0a0);
+        const sc = this.slotColor(kind);
+        this.setBtn(btn, label, sub, ok || isArmed, isArmed ? [0xfff0a0, 0xc0a040] : [sc.color, sc.shade]);
+      });
     }
   }
 
@@ -1601,7 +1989,7 @@ export class DungeonScene implements DeptScene {
         g.rect(x, y + 2, 2, 1).fill(0x5a4a6a);
         x += 5;
       }
-      for (const t of ['squire', 'rogue', 'knight', 'champ'] as M.HeroType[]) {
+      for (const t of PREVIEW_ORDER) {
         const n = counts.get(t);
         if (!n || ti >= this.previewTexts.length) continue;
         const label = `${n}`;
@@ -1628,51 +2016,79 @@ export class DungeonScene implements DeptScene {
     const r = this.run;
     const s = this.sel!;
     const hide = (...bs: Button[]) => bs.forEach((b) => (b.visible = false));
+    const maxInfo = Math.floor(this.uw / 4);
     if (s.t === 'piece') {
       const p = this.selectedPiece();
       if (!p) return this.select(null);
       const d = M.PIECES[p.k];
       const br = p.b ? ` ${d.branches[p.b - 1].toUpperCase()}` : '';
-      this.panelTitle.set(`${d.name.toUpperCase()} L${p.l}${br}`, C.ink);
-      this.panelInfo.set(this.moving ? 'TAP A GLOWING TILE. SETTLES 3S.' : this.pieceInfo(p), this.moving ? C.goldText : C.inkDim);
+      const br2 = p.b2 && p.l >= M.BRANCH_LEVEL2 ? `+${d.branches2[p.b2 - 1].toUpperCase()}` : '';
+      this.panelTitle.set(`${d.short} L${p.l}${br}${br2}`.slice(0, maxInfo - 5), C.ink);
+      this.panelInfo.set((this.moving ? 'TAP OR DRAG TO A GLOWING TILE' : this.pieceInfo(p)).slice(0, maxInfo), this.moving ? C.goldText : C.inkDim);
       const placed = this.placedAt.get(p.id);
       const undo = placed !== undefined && this.time - placed < M.UNDO_S;
       const refund = undo ? p.inv : p.inv * M.SELL_REFUND;
       this.setBtn(this.pSell, undo ? 'UNDO' : 'SELL', `+${fm(refund)}`, true, SELL_COL);
       this.setBtn(this.pMove, this.moving ? 'CANCEL' : 'MOVE', undefined, true);
-      if (p.l >= M.MAX_LEVEL) {
-        hide(this.pA, this.pB);
-        this.setBtn(this.pUp, 'MAX LEVEL', undefined, false);
-      } else if (p.l + 1 === M.BRANCH_LEVEL) {
-        const cost = M.levelCost(p.k, p.l);
-        this.pUp.visible = false;
-        this.setBtn(this.pA, d.branches[0].toUpperCase().slice(0, 10), fm(cost), r.bank >= cost);
-        this.setBtn(this.pB, d.branches[1].toUpperCase().slice(0, 10), fm(cost), r.bank >= cost);
-        if (!this.moving) this.panelInfo.set(`L5: ${d.branchDesc[0]} / ${d.branchDesc[1]}`.slice(0, Math.floor(this.uw / 4)), C.inkDim);
+      const cost = M.levelCost(p.k, p.l);
+      if (M.branchAt(p.l)) {
+        // Branch level (L5 or L10): pick one of two.
+        const names = p.l + 1 === M.BRANCH_LEVEL2 ? d.branches2 : d.branches;
+        const descs = p.l + 1 === M.BRANCH_LEVEL2 ? d.branchDesc2 : d.branchDesc;
+        hide(this.pUp, this.pUp1);
+        this.setBtn(this.pA, names[0].toUpperCase().slice(0, 9), fm(cost), r.bank >= cost, SWAP_COL);
+        this.setBtn(this.pB, names[1].toUpperCase().slice(0, 9), fm(cost), r.bank >= cost, SWAP_COL);
+        if (!this.moving) this.panelInfo.set(`L${p.l + 1}: ${descs[0]} / ${descs[1]}`.slice(0, maxInfo), C.inkDim);
+      } else if (p.l >= M.MAX_LEVEL) {
+        hide(this.pUp, this.pUp1);
+        if (!p.b2) {
+          // An older save's L10 piece: the L10 branch is a free pick.
+          this.setBtn(this.pA, d.branches2[0].toUpperCase().slice(0, 9), 'FREE', true, SWAP_COL);
+          this.setBtn(this.pB, d.branches2[1].toUpperCase().slice(0, 9), 'FREE', true, SWAP_COL);
+        } else {
+          const c1 = M.swapCost(p.k, 1);
+          const c2 = M.swapCost(p.k, 2);
+          this.setBtn(this.pA, `L5>${d.branches[p.b === 1 ? 1 : 0].toUpperCase().slice(0, 6)}`, fm(c1), r.bank >= c1, SWAP_COL);
+          this.setBtn(this.pB, `L10>${d.branches2[p.b2 === 1 ? 1 : 0].toUpperCase().slice(0, 5)}`, fm(c2), r.bank >= c2, SWAP_COL);
+        }
+      } else if (p.l >= M.BRANCH_LEVEL) {
+        // L5-9: upgrade (one slot) and swap the L5 branch.
+        hide(this.pUp, this.pA);
+        this.setBtn(this.pUp1, `L${p.l + 1}`, fm(cost), r.bank >= cost);
+        const c1 = M.swapCost(p.k, 1);
+        this.setBtn(this.pB, `>${d.branches[p.b === 1 ? 1 : 0].toUpperCase().slice(0, 8)}`, fm(c1), r.bank >= c1, SWAP_COL);
       } else {
-        hide(this.pA, this.pB);
-        const cost = M.levelCost(p.k, p.l);
+        hide(this.pA, this.pB, this.pUp1);
         this.setBtn(this.pUp, `UPGRADE L${p.l + 1}`, fm(cost), r.bank >= cost);
       }
     } else if (s.t === 'chest') {
-      const owned = !!r.chests[s.i];
-      this.panelTitle.set(`BAIT CHEST, LOOP ${LOOPS[s.i].name}`, C.goldText);
-      this.panelInfo.set(owned ? 'NON-ROGUES DETOUR THROUGH HERE' : 'PULLS PARTIES DOWN THIS LOOP', C.inkDim);
-      hide(this.pA, this.pB, this.pMove);
+      const owned = r.bait.includes(s.spot);
+      const carved = s.spot >= 0 && this.grid.dug[s.spot] === 1;
+      this.panelTitle.set(carved ? 'BAIT CHEST, CARVED POCKET' : 'BAIT CHEST, LOOP END', C.goldText);
+      this.panelInfo.set(owned ? 'NON-ROGUES DETOUR THROUGH HERE' : 'PULLS PARTIES DOWN TO HERE', C.inkDim);
+      hide(this.pA, this.pB, this.pMove, this.pUp1);
       if (owned) {
         this.pUp.visible = false;
         this.setBtn(this.pSell, 'SELL', `+${fm(M.chestRefund(r))}`, true, SELL_COL);
       } else {
         const cost = M.chestCost(r);
         this.setBtn(this.pUp, 'PLACE CHEST', fm(cost), r.bank >= cost);
-        this.pSell.visible = false;
+        if (carved) this.setBtn(this.pSell, 'FILL', 'FREE', true, [0x8a7a5a, 0x5a4a30]);
+        else this.pSell.visible = false;
       }
+    } else if (s.t === 'dug') {
+      if (!this.grid.dug[s.i]) return this.select(null);
+      const k = tileKind(this.grid, s.i % COLS, Math.floor(s.i / COLS));
+      this.panelTitle.set(`DUG ${k === 'path' ? 'CORRIDOR' : k.toUpperCase()}`, '#c0a070');
+      this.panelInfo.set(k === 'path' ? 'HEROES TAKE THE SHORTEST WAY' : 'BUILD ON IT, OR FILL IT IN', C.inkDim);
+      hide(this.pA, this.pB, this.pMove, this.pUp, this.pUp1);
+      this.setBtn(this.pSell, 'FILL', 'FREE', true, [0x8a7a5a, 0x5a4a30]);
     } else {
       const gh = this.per.ghosts[s.i];
-      if (!gh || this.pieceAt(gh.x, gh.y)) return this.select(null);
+      if (!gh || M.pieceAt(r, gh.x, gh.y)) return this.select(null);
       this.panelTitle.set(`BLUEPRINT: ${M.PIECES[gh.k].name.toUpperCase()}`, '#6ac0d0');
-      this.panelInfo.set(`${this.per.ghosts.length} GHOSTS FROM YOUR LAST DUNGEON`, C.inkDim);
-      hide(this.pA, this.pB, this.pMove);
+      this.panelInfo.set(this.per.mason ? 'MASTER MASON REBUILDS THESE' : 'GHOSTS FROM YOUR LAST DUNGEON', C.inkDim);
+      hide(this.pA, this.pB, this.pMove, this.pUp1);
       const cost = M.placeCost(r, gh.k);
       this.setBtn(this.pUp, 'REBUILD', fm(cost), r.bank >= cost);
       this.setBtn(this.pSell, 'ALL', undefined, true, [0x6ac0d0, 0x2a6a7a]);
@@ -1683,18 +2099,28 @@ export class DungeonScene implements DeptScene {
     const f1 = (n: number) => (n < 10 ? (Math.round(n * 10) / 10).toString() : fm(n));
     const tw = this.sim.towers.find((t) => t.id === p.id);
     if (tw) {
-      if (tw.kind === 'brazier') return `BURN ${f1(tw.dps)}/S  RANGE ${f1(tw.range)}`;
-      if (tw.kind === 'ballista') return `${f1(tw.dmg)} DMG  PIERCE ${tw.pierce}  R${f1(tw.range)}`;
-      return `${f1(tw.dmg)} DMG ${f1(tw.rate)}/S R${f1(tw.range)}${tw.bleed ? ' BLEED' : ''}`;
+      if (tw.kind === 'brazier') return `BURN ${f1(tw.dps)}/S R${f1(tw.range)}${tw.slow ? ' SLOW' : ''}`;
+      if (tw.kind === 'ballista') return `${f1(tw.dmg)} DMG PIERCE ${tw.pierce} R${f1(tw.range)}`;
+      if (tw.kind === 'eye') return `SLOW ${Math.round(tw.slow * 100)}% R${f1(tw.range)}${tw.vuln ? ' +20% DMG' : ''}`;
+      return `${f1(tw.dmg)} DMG ${f1(tw.rate)}/S R${f1(tw.range)}${tw.bleed ? ' BLEED' : ''}${tw.pierceArmor ? ' AP' : ''}`;
     }
-    const ms = this.sim.minions.filter((m) => m.id === p.id);
-    if (ms.length) return `${ms.length}X ${f1(ms[0].maxHp)}HP ${f1(ms[0].dps)}DPS BLOCK ${ms[0].cap}`;
+    const ms = this.sim.minions.filter((m) => m.id === p.id && !m.split);
+    if (ms.length) {
+      const extra = p.k === 'slime' ? ` SPLIT ${this.sim.minions.filter((m) => m.id === p.id && m.split).length}` : ` BLOCK ${ms[0].cap}`;
+      return `${ms.length}X ${f1(ms[0].maxHp)}HP ${f1(ms[0].dps)}DPS${extra}`;
+    }
     const ru = this.sim.runes.find((x) => x.id === p.id);
-    if (ru) return ru.kind === 'mire' ? `SLOW ${Math.round(ru.slow * 100)}% FOR ${f1(ru.slowDur)}S${ru.stun ? ' +TRAP' : ''}` : `${f1(ru.dmg)} DMG  ${ru.charges}/${ru.maxCharges} CHARGES`;
+    if (ru) {
+      const off = ru.off > 0 ? ' DISPELLED' : '';
+      if (ru.kind === 'mire') return `SLOW ${Math.round(ru.slow * 100)}% ${f1(ru.slowDur)}S${ru.stun ? ' +TRAP' : ''}${off}`;
+      if (ru.kind === 'spikes') return `${f1(ru.dmg)} DMG ${ru.charges}/${ru.maxCharges} CHARGES${off}`;
+      if (ru.kind === 'greed') return `KILLS +${Math.round(ru.bonus * 100)}% R${f1(ru.radius)}${off}`;
+      return `BACKWARD ${f1(ru.confuse)}S, CD ${f1(ru.cool)}S${off}`;
+    }
     return '';
   }
 
-  // ---------- slow checks: lessons, onboarding glow, flavour ----------
+  // ---------- slow checks: lessons, Master Mason, flavour ----------
 
   private obStep(): string | null {
     const d = this.ctx.save;
@@ -1713,43 +2139,227 @@ export class DungeonScene implements DeptScene {
       b.rect(4, 2, 1, 3).fill(0xffffff);
       b.rect(4, 6, 1, 1).fill(0xffffff);
     }
-    // Onboarding highlights.
     const step = this.obStep();
     this.coinLife = step === 'coin' ? 4 : M.COIN_LIFE;
-    let glow: Button | null = null;
-    let tile: [number, number] | null = null;
-    const slot = (k: M.PieceKind | 'chest') => this.slots.find((s) => s.kind === k)?.btn ?? null;
-    if (step === 'place') {
-      glow = this.armed === 'arrow' ? null : slot('arrow');
-      if (!this.pieceAt(...SUGGESTED_TILE)) tile = SUGGESTED_TILE;
-    } else if (step === 'glare') glow = this.glareBtn;
-    else if (step === 'upgrade') {
-      if (this.sel?.t === 'piece') glow = this.pUp.visible ? this.pUp : this.pA;
-      else {
-        const p = r.pieces.find((q) => q.k === 'arrow');
-        if (p) tile = [p.x, p.y];
+    if (step === 'place' && this.tab !== 0 && !this.armed) this.setTab(0);
+    // Master Mason (00 §2.5): rebuild affordable blueprints at L1.
+    if (this.per.mason && !this.ritual) {
+      const before = r.pieces.length;
+      const built = M.masonRebuild(r, this.per, 4);
+      if (built) {
+        for (const p of r.pieces.slice(before)) this.placedAt.set(p.id, this.time);
+        this.layoutChanged();
+        this.ctx.float(`MASON +${built}`, this.bx + BOARD_W / 2, this.by + 12, '#6ac0d0');
       }
-    } else if (step === 'trap') glow = this.trapBtn;
-    else if (step === 'gong') glow = this.gongBtn;
-    // Micro-lesson: Bait Chests once affordable (01 §18).
-    if (!step && !r.chests[0] && !r.chests[1] && r.bank >= M.chestCost(r) && !this.ctx.seen('d.chestLesson')) {
-      this.ctx.markSeen('d.chestLesson');
-      this.ctx.say('chestLesson', { milestone: true });
     }
-    if (!step && this.ctx.seen('d.chestLesson') && !this.ctx.seen('d.chestBought')) glow = slot('chest');
-    if (this.time < this.struggleGlow && this.run.lure > 0) glow = this.lureDown;
-    if (tile?.[0] !== this.glowTile?.[0] || tile?.[1] !== this.glowTile?.[1]) {
-      this.glowTile = tile;
-      this.overlayDirty = true;
+    // Micro-lessons as mechanics come within reach (01 §18; the core runs each once).
+    if (!step) {
+      if (!r.bait.length && r.bank >= M.chestCost(r)) this.ctx.lesson('chests');
+      else if (r.lureMax === 0 && r.bank >= M.lureCost(1) && r.stats.placed >= 1) this.ctx.lesson('lure');
+      else if (r.stats.upgrades === 0 && r.pieces.some((p) => r.bank >= M.levelCost(p.k, p.l))) this.ctx.lesson('levels');
+      else if (M.runeCount(r) === 0 && r.bank >= M.placeCost(r, 'mire') && r.stats.placed >= 3) this.ctx.lesson('runes');
+      else if (r.stats.branches === 0 && r.pieces.some((p) => p.l + 1 === M.BRANCH_LEVEL && r.bank >= M.levelCost(p.k, p.l))) this.ctx.lesson('branch');
+      else if ((this.per.floors ?? 1) < 2 && r.bank >= FLOORS[1].cost) this.ctx.lesson('floors');
+      else if (r.stats.dug === 0 && r.bait.length >= 1 && r.lureMax >= 6 && r.bank >= 4 * M.digCost(this.dugList().length)) this.ctx.lesson('dig');
     }
-    this.glowTarget = glow;
     // Flavour (the core rate-limits non-milestone lines); never during intense moments.
     this.flavorT -= 0.5;
-    const intense = this.sim.champOnField || this.sim.heroes.some((h) => h.sack > 0) || this.aim !== null || this.trapArmed;
-    if (this.flavorT <= 0 && !intense) {
+    if (this.flavorT <= 0 && !this.isIntense()) {
       this.flavorT = 45;
       this.ctx.say('flavor');
     }
+  }
+
+  // ---------- core hooks ----------
+
+  /** 01 §18: a Champion on the field, a thief carrying a sack, a Glare or Trapdoor being aimed, a
+   * party within 4 tiles of the Hoard, or the 3 s before a party enters (the preview is changing). */
+  isIntense(): boolean {
+    if (this.aim || this.trapArmed || this.glareArmed || this.dragPiece !== null || this.ritual) return true;
+    if (this.sim.partyTimer < 3) return true;
+    for (const h of this.sim.heroes) {
+      if (h.dead || h.gone) continue;
+      if (h.type === 'champ' || h.sack > 0) return true;
+      if (h.dir > 0 && h.route.len - h.dist < 4) return true;
+    }
+    return false;
+  }
+
+  private btnRect(b: Button | undefined | null): Rect | null {
+    if (!b || !b.visible || b.parent?.visible === false) return null;
+    return { x: b.x, y: b.y, w: b.width, h: b.height };
+  }
+
+  private tileRect(x: number, y: number): Rect {
+    return { x: this.tx(x), y: this.ty(y), w: TILE, h: TILE };
+  }
+
+  private heroRect(h: SimHero | undefined): Rect | null {
+    if (!h) return null;
+    return { x: Math.round(this.bx + h.x * TILE) - 6, y: Math.round(this.by + h.y * TILE) - 8, w: 12, h: 13 };
+  }
+
+  /** The forward hero closest to the Hoard. */
+  private leadHero(type?: M.HeroType): SimHero | undefined {
+    let best: SimHero | undefined;
+    for (const h of this.sim.heroes) {
+      if (h.dead || h.gone || h.dir < 0 || (type && h.type !== type)) continue;
+      if (!best || h.dist / h.route.len > best.dist / best.route.len) best = h;
+    }
+    return best;
+  }
+
+  private slotRect(kind: Armed): Rect | null {
+    if (this.sel) return null;
+    const ti = M.TABS.findIndex((t) => t.kinds.includes(kind as M.PieceKind));
+    if (ti < 0) return null;
+    if (ti !== this.tab) return this.btnRect(this.tabBtns[ti]);
+    const si = M.TABS[ti].kinds.indexOf(kind as M.PieceKind);
+    return this.btnRect(this.slotBtns[si]);
+  }
+
+  /** Onboarding / lesson targets (OnboardingStep.target). */
+  targetRect(id: string): Rect | null {
+    const r = this.run;
+    switch (id) {
+      case 'coin': {
+        const c = this.coins.find((k) => k.fly <= 0);
+        return c ? { x: Math.round(c.x) - 4, y: Math.round(c.y) - 4, w: 8, h: 8 } : null;
+      }
+      case 'tile.suggested': {
+        const [x, y] = FLOORS[r.floor].suggested;
+        return M.pieceAt(r, x, y) ? null : this.tileRect(x, y);
+      }
+      case 'glare':
+        return this.glareCd <= 0 ? (this.heroRect(this.leadHero()) ?? this.btnRect(this.glareBtn)) : this.btnRect(this.glareBtn);
+      case 'trap': {
+        if (!this.trapArmed) return this.btnRect(this.trapBtn);
+        const h = this.leadHero();
+        return h ? this.tileRect(Math.floor(h.x), Math.floor(h.y)) : null;
+      }
+      case 'btn.gong':
+        return this.btnRect(this.gongBtn);
+      case 'btn.glare':
+        return this.btnRect(this.glareBtn);
+      case 'btn.trap':
+        return this.btnRect(this.trapBtn);
+      case 'workshop':
+        return this.btnRect(this.shopBtn);
+      case 'lure.up':
+        return this.btnRect(this.lureUp);
+      case 'lure.down':
+        return this.btnRect(this.lureDown);
+      case 'preview':
+        return { x: this.x0, y: this.topY, w: Math.max(20, this.lureDown.x - 4 - this.x0), h: 12 };
+      case 'chest.flow': {
+        if (this.armed !== 'chest') return this.slotRect('chest');
+        const spot = this.grid.spots.find((s) => !r.bait.includes(s));
+        return spot === undefined ? null : this.tileRect(spot % COLS, Math.floor(spot / COLS));
+      }
+      case 'chest.placed': {
+        const spot = r.bait[0];
+        return spot === undefined ? null : this.tileRect(spot % COLS, Math.floor(spot / COLS));
+      }
+      case 'piece.upgrade': {
+        if (this.sel?.t === 'piece') return this.btnRect(this.pUp.visible ? this.pUp : this.pUp1.visible ? this.pUp1 : this.pA);
+        const p = r.pieces.find((q) => r.bank >= M.levelCost(q.k, q.l) && !M.branchAt(q.l)) ?? r.pieces[0];
+        return p ? this.tileRect(p.x, p.y) : null;
+      }
+      case 'piece.branch': {
+        if (this.sel?.t === 'piece') return this.btnRect(this.pA);
+        const p = r.pieces.find((q) => q.l + 1 === M.BRANCH_LEVEL);
+        return p ? this.tileRect(p.x, p.y) : null;
+      }
+      case 'dig.flow': {
+        if (this.armed !== 'dig.p') return this.slotRect('dig.p');
+        for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (this.canDigAt('p', x, y) && this.grid.kind[idx(x, y)] === K_ROCK) return this.tileRect(x, y);
+        return null;
+      }
+      default:
+        if (id.startsWith('slot.')) return this.slotRect(id.slice(5) as Armed);
+        if (id.startsWith('hero.')) return this.heroRect(this.leadHero(id.slice(5) as M.HeroType));
+        if (id.startsWith('tab.')) return this.btnRect(this.tabBtns[M.TABS.findIndex((t) => t.id === id.slice(4))]);
+        return null;
+    }
+  }
+
+  /**
+   * Return ritual (01 §13, 00 §5.3): the visitors your Trapdoors and Sinkholes caught while you
+   * were away sit in a cell. Tap each to ransom them; score = share ransomed within 6 s.
+   */
+  returnRitual(haul: number): Promise<number> {
+    if (this.ritual || !(haul > 0)) return Promise.resolve(0);
+    return new Promise<number>((resolve) => {
+      const layer = this.ritualLayer;
+      const n = Math.max(3, Math.min(6, 2 + Math.floor(Math.log10(Math.max(10, haul)))));
+      const types: M.HeroType[] = ['squire', 'rogue', 'knight', 'cleric', 'wizard', 'squire'];
+      const cx = this.bx + BOARD_W / 2;
+      const cy = this.by + BOARD_H / 2;
+      const w = Math.min(BOARD_W - 8, 20 * n + 16);
+      const box = { x: Math.round(cx - w / 2), y: Math.round(cy - 30), w, h: 60 };
+      const g = new Graphics();
+      const title = new PixelText('CAPTIVES! TAP TO RANSOM', C.goldText);
+      const sub = new PixelText(`+5% OF ${fm(haul)} PLUNDER`, C.inkDim);
+      layer.addChild(g, title, sub);
+      title.position.set(Math.round(cx - title.width / 2), box.y + 4);
+      sub.position.set(Math.round(cx - sub.width / 2), box.y + 12);
+      const captives = Array.from({ length: n }, (_, i) => {
+        const v = new Graphics(heroArt(types[i % types.length], 0));
+        const x = box.x + 16 + i * Math.floor((w - 32) / Math.max(1, n - 1));
+        v.position.set(x, box.y + 44);
+        layer.addChild(v);
+        return { v, x, y: box.y + 38, freed: false };
+      });
+      let t = 0;
+      const T = 6;
+      let freed = 0;
+      layer.eventMode = 'static';
+      layer.hitArea = new Rectangle(this.bx, this.by, BOARD_W, BOARD_H);
+      const finish = (score: number) => {
+        if (!this.ritual) return;
+        this.ritual = null;
+        layer.removeAllListeners();
+        layer.eventMode = 'none';
+        layer.removeChildren().forEach((c) => c.destroy());
+        resolve(Math.max(0, Math.min(1, score)));
+      };
+      layer.on('pointerdown', (e: FederatedPointerEvent) => {
+        const { x, y } = this.local(e);
+        const c = captives.find((k) => !k.freed && Math.abs(k.x - x) <= 10 && Math.abs(k.y - y) <= 12);
+        if (!c) return;
+        c.freed = true;
+        freed++;
+        c.v.alpha = 0.25;
+        this.ctx.float('RANSOM!', c.x, c.y - 12, C.goldText);
+        this.ctx.haptic(10);
+        this.sparkle((c.x - this.bx) / TILE, (c.y - this.by) / TILE);
+        if (freed >= n) finish(1);
+      });
+      const draw = () => {
+        g.clear();
+        g.rect(box.x - 1, box.y - 1, box.w + 2, box.h + 2).fill(OUTLINE).rect(box.x, box.y, box.w, box.h).fill({ color: 0x1a0e24, alpha: 0.95 });
+        g.rect(box.x, box.y, box.w, 1).fill(GOLD);
+        // Cell bars over the captives.
+        for (let x = box.x + 6; x < box.x + box.w - 4; x += 6) if (!captives.some((c) => c.freed && Math.abs(c.x - x) < 6)) g.rect(x, box.y + 22, 1, 30).fill(0x6a6a7a);
+        g.rect(box.x + 4, box.y + 22, box.w - 8, 1).fill(0x8a8a9a).rect(box.x + 4, box.y + 51, box.w - 8, 1).fill(0x8a8a9a);
+        drawBar(g, box.x + 4, box.y + box.h - 6, box.w - 8, 4, 1 - t / T, GOLD);
+      };
+      this.ritual = {
+        done: (score) => finish(score),
+      };
+      let last = performance.now();
+      const tick = () => {
+        if (!this.ritual) return;
+        const now = performance.now();
+        t += Math.min(0.1, (now - last) / 1000);
+        last = now;
+        draw();
+        if (t >= T) finish(freed / n);
+        else requestAnimationFrame(tick);
+      };
+      draw();
+      requestAnimationFrame(tick);
+    });
   }
 
   resize(_layout: Layout): void {
@@ -1758,6 +2368,7 @@ export class DungeonScene implements DeptScene {
       v.pips.destroy();
     });
     this.pieceViews.clear();
+    this.ritual?.done(0);
     this.buildLayout();
     this.syncPieces();
   }
@@ -1771,6 +2382,7 @@ export class DungeonScene implements DeptScene {
 
   destroy(): void {
     if (this.revDirty >= 0) this.run.rev++;
+    this.ritual?.done(0);
     this.hit.removeAllListeners();
     this.coinPool.forEach((g) => g.destroy());
     this.coinPool = [];
