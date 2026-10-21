@@ -101,9 +101,16 @@ export class ManagerBubble extends Container {
     const g = this.toastBg.clear();
     drawPanel(g, 0, 0, w, m.h + 8, 0x1c1028, C.gold);
     this.toastText.position.set(4, 4);
-    this.toastBox.position.set(L.safe.l + 4, L.h - L.safe.b - m.h - 14);
+    this.toastBox.position.set(L.safe.l + 4, this.toastY());
     this.toastBox.visible = true;
     this.toastTimer = 3.5;
+  }
+
+  /** Toasts sit at the top, under the HUD (and under a manager line if one is showing), never over controls. */
+  private toastY(): number {
+    const L = this.game.layout;
+    const base = L.safe.t + HUD_H + 2;
+    return this.bubble.visible ? this.bubble.y + this.bubble.height + 2 : base;
   }
 
   private dismiss(): void {
@@ -121,6 +128,7 @@ export class ManagerBubble extends Container {
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastBox.visible = false;
+      else this.toastBox.y = this.toastY();
     }
 
     // Advance onboarding.
