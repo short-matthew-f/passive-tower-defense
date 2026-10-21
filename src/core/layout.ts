@@ -3,6 +3,7 @@
 
 export const BASE_W = 180;
 export const BASE_H = 320;
+const TOP_GUARD_CSS = 28;
 
 export interface Layout {
   /** Logical size in game pixels. */
@@ -39,11 +40,14 @@ export function computeLayout(): Layout {
   const h = Math.floor(devH / scale);
   const ins = readSafeInsets();
   const toGame = (css: number) => Math.ceil((css * dpr) / scale);
+  // iOS 26 blurs web content for ~25pt below the status bar (the "scroll edge" haze). On notched
+  // devices, keep UI out of that band; the HUD paints a solid color there so the blur is invisible.
+  const topGuard = ins.t > 20 ? TOP_GUARD_CSS : 0;
   return {
     w,
     h,
     scale,
-    safe: { t: toGame(ins.t), r: toGame(ins.r), b: toGame(ins.b), l: toGame(ins.l) },
+    safe: { t: toGame(ins.t + topGuard), r: toGame(ins.r), b: toGame(ins.b), l: toGame(ins.l) },
     device: { w: w * scale, h: h * scale, cssW: (w * scale) / dpr, cssH: (h * scale) / dpr, dpr },
   };
 }
