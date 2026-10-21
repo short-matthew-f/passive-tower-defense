@@ -51,6 +51,7 @@ export interface SpireStats {
   singularities: number;
   voidStars: number;
   maxTier: number; // this cycle, including T11
+  essence: number; // Essence earned by merges this cycle (Goods export counter)
 }
 
 export interface SpireRun {
@@ -83,7 +84,7 @@ export interface SpirePersistent {
 export type SpireSave = DeptSave<SpireRun, SpirePersistent>;
 
 export function defaultStats(): SpireStats {
-  return { drops: 0, merges: 0, bestChain: 0, vents: 0, dropsSinceVent: 0, singularities: 0, voidStars: 0, maxTier: 0 };
+  return { drops: 0, merges: 0, bestChain: 0, vents: 0, dropsSinceVent: 0, singularities: 0, voidStars: 0, maxTier: 0, essence: 0 };
 }
 
 export function defaultRun(): SpireRun {
@@ -193,7 +194,8 @@ export const potentMult = (run: SpireRun) => potentMultL(lvOf(run, 'potent'));
 export const resCap = (run: SpireRun) => resCapL(lvOf(run, 'glass'));
 export const cascadeWindow = (run: SpireRun) => cascadeWindowL(lvOf(run, 'echo'));
 export const cooldown = (run: SpireRun) => cooldownL(lvOf(run, 'valve'));
-export const flaskW = (run: SpireRun) => BASE_FLASK_W + 6 * lvOf(run, 'wider');
+/** Flask width; `glass` = Ingots import level (Tempered Glass, +2 px each, 00 §4). */
+export const flaskW = (run: SpireRun, glass = 0) => BASE_FLASK_W + 6 * lvOf(run, 'wider') + 2 * Math.max(0, Math.min(3, glass));
 export const apprentices = (run: SpireRun) => lvOf(run, 'hire');
 
 export function arcanaMult(v: number): number {
@@ -240,8 +242,10 @@ export function evDropTable(tab: number[], ceiling: number): number {
   return ev;
 }
 
-export function apprenticeDropsPerMin(run: SpireRun): number {
-  return Math.min(12, apprentices(run) * 4 * (1 + 0.08 * lvOf(run, 'diligence')));
+/** Apprentice drops per minute; `fuel` = Souls import level (Spark Fuel, +5% each, still under
+ * the 12/min cap, 04 §16). */
+export function apprenticeDropsPerMin(run: SpireRun, fuel = 0): number {
+  return Math.min(12, apprentices(run) * 4 * (1 + 0.08 * lvOf(run, 'diligence')) * (1 + 0.05 * Math.max(0, Math.min(3, fuel))));
 }
 
 export function distillCeiling(run: SpireRun, per: SpirePersistent): number {
@@ -262,14 +266,29 @@ export function distillCeiling(run: SpireRun, per: SpirePersistent): number {
 export const IDLE_TUNE = 8;
 
 /** On-screen idle Arcana/s before core multipliers (04 §4). Pure and cheap. */
-export function idleRateOf(run: SpireRun, per: SpirePersistent): number {
-  const dpm = apprenticeDropsPerMin(run);
+export function idleRateOf(run: SpireRun, per: SpirePersistent, fuel = 0): number {
+  const dpm = apprenticeDropsPerMin(run, fuel);
   if (dpm <= 0) return 0;
   const ceil = distillCeiling(run, per);
   if (ceil < 2) return 0;
   const ev = evDropTable(spawnTable(run), ceil) * potentMult(run);
   const cdf = chainFactorL(lvOf(run, 'tutelage'));
   return (dpm / 60) * ev * cdf * arcanaMult(run.vIdle ?? 0) * IDLE_TUNE;
+}
+
+/** Essence (00 §4, 04 §16): T7+ merge = 1 (T11 and a Singularity = 5). */
+export const essenceFor = (tier: number) => (tier >= MAX_TIER ? 5 : tier >= 7 ? 1 : 0);
+
+/** Passive Essence per hour: the apprentices' T7+ creations. Each drop of tier t makes 1/2^(k-t)
+ * of a tier-k orb on the way up to the Distill Ceiling (the same model as evDropTable). */
+export function apprenticeEssencePerH(run: SpireRun, per: SpirePersistent, fuel = 0): number {
+  const dpm = apprenticeDropsPerMin(run, fuel);
+  const ceil = distillCeiling(run, per);
+  if (dpm <= 0 || ceil < 7) return 0;
+  const tab = spawnTable(run);
+  let perDrop = 0;
+  for (let t = 1; t <= tab.length; t++) for (let k = Math.max(7, t + 1); k <= ceil; k++) perDrop += (tab[t - 1] * essenceFor(k)) / 2 ** (k - t);
+  return dpm * 60 * perDrop * chainFactorL(lvOf(run, 'tutelage'));
 }
 
 /** Highest Volatility held under the Feat rule: since the last vent, or through the last 60 drops. */
@@ -305,7 +324,18 @@ export const spireEcon: DeptEcon = {
     const r = run(save);
     const p = per(save);
     if (!r || !r.lv || !p) return 0;
-    return idleRateOf(r, p);
+    return idleRateOf(r, p, save.imports?.souls ?? 0);
+  },
+  // Essence (00 §4, 04 §16): T7+ merges (T11 = 5).
+  goods: {
+    id: 'essence',
+    rate: (save) => {
+      const r = run(save);
+      const p = per(save);
+      if (!r || !r.lv || !p) return 0;
+      return apprenticeEssencePerH(r, p, save.imports?.souls ?? 0);
+    },
+    count: (save) => st(save).essence ?? 0,
   },
   // Infamy skill gate (04 §7, 00 §2.2): the Feat. Create tier t while Volatility >= v was held
   // (since the last vent, or for the last 60 drops). Score = t + v, a Singularity counts as 12.

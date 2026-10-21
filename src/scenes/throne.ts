@@ -9,6 +9,7 @@ import { DEPT_ORDER, type DeptId } from '../core/types';
 import { PixelText } from '../ui/font';
 import { Button, C, drawBar, drawPanel, drawSprite } from '../ui/widgets';
 import { openSettings } from './settings';
+import { openArmory } from '../ui/goods';
 
 const NAMES: Record<DeptId, string> = {
   cauldron: 'CAULDRON',
@@ -143,9 +144,10 @@ export class ThroneScene {
     const tabs: [string, () => void][] = [
       ['THRONE', () => this.openThrone()],
       ['ALTAR', () => this.openAltar()],
+      ['ARMORY', () => openArmory(game)],
       ['SETTINGS', () => openSettings(game)],
     ];
-    const tw = Math.floor((usableW - 8) / 3);
+    const tw = Math.floor((usableW - 4 * (tabs.length - 1)) / tabs.length);
     tabs.forEach(([label, fn], i) => {
       const b = new Button({ w: tw, h: 18, label, color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: fn });
       b.position.set(L.safe.l + 4 + i * (tw + 4), bottomBar + 4);

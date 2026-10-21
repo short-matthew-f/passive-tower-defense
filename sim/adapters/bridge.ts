@@ -202,6 +202,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
   const counters = { liveS: 0 };
 
   function startSession(save: DeptSave, env: SessionEnv): ActiveSession {
+    const skulls = () => save.imports?.bones ?? 0;
     const r = run(save);
     const p = per(save);
     M.normalize(r, p);
@@ -271,7 +272,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       const c = cur!;
       if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
       r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
-      env.earn(c.t.claimFare * mult * M.fareMult(r) * M.streakMult(r.streak));
+      env.earn(c.t.claimFare * mult * M.fareMult(r, skulls()) * M.streakMult(r.streak));
       r.stats.tolls++;
       heroSlipped();
       leave();
@@ -301,7 +302,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       if (c.t.hero) {
         const ev = M.evidence(c.t);
         const mult = c.t.showdown ? 10 : M.bountyMult(ev);
-        env.earn(c.t.kindFare * mult * M.fareMult(r));
+        env.earn(c.t.kindFare * M.unmaskPay(mult, save.imports?.captives ?? 0) * M.fareMult(r, skulls()));
         r.stats.unmasks++;
         p.bountiesLife++;
         if (ev >= 2) {
@@ -324,7 +325,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     function finishSearch(): void {
       const c = cur!;
       if (c.t.smuggler) {
-        env.earn(c.t.kindFare * 4 * M.fareMult(r));
+        env.earn(c.t.kindFare * 4 * M.fareMult(r, skulls()));
         r.stats.confisc++;
         c.phase = 'reveal';
         c.timer = 0.3;
@@ -338,7 +339,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       }
     }
     function goonPass(t: M.Traveler, atGate: boolean): void {
-      const amount = M.goonToll(r, t);
+      const amount = M.goonToll(r, t, skulls());
       if (amount > 0) env.earn(amount);
       if (atGate) {
         if (t.hero) r.stats.slipped++;

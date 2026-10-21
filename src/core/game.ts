@@ -17,6 +17,23 @@ import { computeLayout, type Layout } from './layout';
 import { acquireWriterLock, loadSave, requestPersistence, writeMirror, writeSave } from './save';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from './types';
 import { SEAL_COST, SEAL_DREAD } from './meta';
+import {
+  activeGoodsStep,
+  addGoods,
+  buyImport,
+  buyMarket,
+  EXPORT_OF,
+  GOODS,
+  importsOf,
+  lineOpen,
+  marketDay,
+  newActiveTrack,
+  offlineGoods,
+  passivePerH,
+  type ActiveGoodsTrack,
+  type GoodId,
+  type ImportNode,
+} from './goods';
 import { DeptHud, HUD_H } from '../ui/hud';
 import { ManagerBubble } from '../ui/manager';
 import { UpgradeSheet } from '../ui/sheet';
@@ -26,6 +43,7 @@ import { showReport, type ReportLine } from '../scenes/report';
 import { ThroneScene } from '../scenes/throne';
 import { haptic } from './haptics';
 import { formatNum } from './format';
+import { goodsGroup } from '../ui/goods';
 
 const AUTOSAVE_MS = 10_000;
 const IDLE_INPUT_MS = 10 * 60_000;
@@ -52,6 +70,8 @@ export class Game {
   private lastSave = 0;
   private lastInput = Date.now();
   private hiddenAt: number | null = null;
+  /** On-screen active Goods (core/goods.ts): the export counter's last value and token bucket. */
+  private goodsTrack: Partial<Record<DeptId, ActiveGoodsTrack>> = {};
   readOnly = false;
 
   constructor(app: Application, layout: Layout) {
@@ -136,8 +156,10 @@ export class Game {
       lines.push({ id, def, amount, legend: d.cycle.legendWaiting, infamy: inf.value });
     }
     this.addTribute(tribute);
+    const goods = offlineGoods(s, this.defs, elapsed);
+    for (const [g, amt] of Object.entries(goods)) addGoods(s, g as GoodId, amt);
     if (elapsed >= 60) {
-      showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute });
+      showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute, goods });
     }
     this.checkProgress(now);
   }
@@ -210,11 +232,18 @@ export class Game {
       const d = s.depts[id];
       if (!d) continue;
       const onScreen = this.current === id;
+      const def = this.defs[id];
       if (!onScreen) {
-        const def = this.defs[id];
         this.credit(d, def.idleRate(d) * coreMult(s, id, this.defs, now) * factor);
       }
       tribute += tributeRate(s, id, this.defs, onScreen && !idle) * factor;
+      // Goods (00 §4, §7): the passive rate everywhere; the active bonus while played on screen.
+      const good = EXPORT_OF[id];
+      addGoods(s, good, passivePerH(s, id, this.defs) / 3600);
+      if (onScreen && !idle) {
+        const tr = (this.goodsTrack[id] ??= newActiveTrack());
+        addGoods(s, good, activeGoodsStep(def, d, tr, 1));
+      }
     }
     this.addTribute(tribute);
     s.lastSeen = now;
@@ -268,6 +297,43 @@ export class Game {
     };
   }
 
+  // ---------- Goods ----------
+
+  /** Buys the next level of an import node with Goods (the Armory or the department's sheet). */
+  buyImportNode(node: ImportNode): boolean {
+    if (this.readOnly || !buyImport(this.save, node)) return false;
+    const d = this.save.depts[node.dept]!;
+    if (!d.seen[`goodsNode.${node.key}`]) {
+      d.seen[`goodsNode.${node.key}`] = 1;
+      d.seen[`goods.${node.key}`] = 1;
+      this.managerSay(node.dept, 'goodsLink', { milestone: true, vars: { good: GOODS[node.good].name.toUpperCase() } });
+    }
+    this.onImportsChanged(node.dept);
+    this.saveSoon();
+    return true;
+  }
+
+  /** Black Market: a bundle of Goods for Tribute at today's price. */
+  buyGoods(g: GoodId, qty?: number): boolean {
+    if (this.readOnly || !buyMarket(this.save, g, this.marketDay(), qty)) return false;
+    this.saveSoon();
+    return true;
+  }
+
+  marketDay(now = Date.now()): number {
+    return marketDay(now, new Date(now).getTimezoneOffset());
+  }
+
+  /** Lets the open department re-read import-driven state (flask width, crew, ladle charges). */
+  private onImportsChanged(id: DeptId): void {
+    if (this.current !== id || !this.scene || this.scene instanceof ThroneScene) return;
+    try {
+      this.scene.onImports?.();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   sealCost(id: DeptId): number {
     return SEAL_COST[id];
   }
@@ -306,6 +372,7 @@ export class Game {
     const scene = def.createScene(ctx);
     this.scene = scene;
     this.sceneLayer.addChild(scene.root);
+    this.goodsTrack[id] = newActiveTrack();
     if (!d.seen.intro) {
       d.seen.intro = 1;
       this.managerSay(id, 'intro', { milestone: true });
@@ -314,6 +381,12 @@ export class Game {
       this.managerSay(id, 'returnFall', { milestone: true });
     } else if (d.cycle.legendWaiting) {
       this.managerSay(id, 'legend', { milestone: true });
+    }
+    // goods_link (00 §5.4.3): an import line has opened since the last visit.
+    const opened = importsOf(id).find((n) => lineOpen(this.save, n) && !d.seen[`goods.${n.key}`]);
+    if (opened) {
+      for (const n of importsOf(id)) if (lineOpen(this.save, n)) d.seen[`goods.${n.key}`] = 1;
+      this.managerSay(id, 'goodsLink', { milestone: true, vars: { good: GOODS[opened.good].name.toUpperCase() } });
     }
     this.manager.startOnboarding(def, d);
   }
@@ -394,10 +467,11 @@ export class Game {
 
   openSheet(def: DeptDef, groups: UpgradeGroup[]): void {
     const d = this.save.depts[def.id];
+    const goods = goodsGroup(this, def.id);
     this.openCustomSheet('UPGRADES', () => ({
       text: `${formatNum(d?.run.bank ?? 0, this.save.meta.settings.notation)} ${def.currency}`,
       color: def.currencyColor,
-    }), groups);
+    }), goods ? [...groups, goods] : groups);
   }
 
   openCustomSheet(title: string, bank: () => { text: string; color: string }, groups: UpgradeGroup[]): void {

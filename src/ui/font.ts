@@ -28,11 +28,20 @@ const GLYPHS: Record<string, string> = {
   '\u0006': '010111010010000', // {arrow-up}
   '\u0007': '010010010111010', // {arrow-down}
   '\u0008': '101010101010101', // {dread}
+  // Goods (00 §4)
+  '\u000e': '010010111111111', // {potion}
+  '\u000f': '000011111111000', // {ingot}
+  '\u0010': '101111010111101', // {bone}
+  '\u0011': '111111101111111', // {crate} (Contraband)
+  '\u0012': '010111111111101', // {soul}
+  '\u0013': '010011111111010', // {essence}
+  '\u0014': '010101111111111', // {captive}
 };
 
 const ICONS: Record<string, string> = {
   coin: '\u0001', heart: '\u0002', skull: '\u0003', up: '\u0004', gem: '\u0005',
   uarr: '\u0006', darr: '\u0007', dread: '\u0008',
+  potion: '\u000e', ingot: '\u000f', bone: '\u0010', crate: '\u0011', soul: '\u0012', essence: '\u0013', captive: '\u0014',
 };
 
 export const LINE_H = 7; // 5px glyph + 2px leading

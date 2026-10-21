@@ -32,6 +32,7 @@ const pilk: ManagerDef = {
     wrathLesson: ['TWITCHIER FISH. RICHER CATCH...'],
     dialRaised: ["RIVER'S ANGRY. GOOD FISHING..."],
     baitLesson: ['BAIT ON THE HOOK. TAP BAIT TO SWAP.'],
+    goodsLink: ['%good% FOR THE BAIT... SEE GOODS.', 'A DELIVERY. SOULS GO MAD... GOODS TAB.'],
     infamy50: ['FERRYMEN TALK ABOUT YOU NOW...'],
     legend: ['SHE WANTS TO DRAIN MY RIVER. TAP LEGEND.'],
     fall: ['DRY AS A BONE. FOR NOW...'],

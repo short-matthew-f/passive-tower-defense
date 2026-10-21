@@ -100,7 +100,8 @@ export function buildGroups(ctx: DeptCtx, hooks: { onDig(): void; onDrum(): void
       id: 'hire',
       name: 'Hire Grunt',
       max: M.MAX_GOBLINS,
-      level: () => M.goblins(r()),
+      // Bone Miners (Bones import) take crew slots.
+      level: () => M.crewSize(r(), ctx.save.imports?.bones ?? 0),
       cost: () => M.hireCost(r()),
       desc: () => `+1 GOBLIN, ${f(M.goblinDps(M.GRUNT_DPS, r(), p()))} DPS`,
       apply: () => r().grunts++,
@@ -109,7 +110,7 @@ export function buildGroups(ctx: DeptCtx, hooks: { onDig(): void; onDrum(): void
       id: 'sapper',
       name: 'Hire Sapper',
       max: M.MAX_GOBLINS,
-      level: () => M.goblins(r()),
+      level: () => M.crewSize(r(), ctx.save.imports?.bones ?? 0),
       cost: () => M.sapperCost(r()),
       desc: () => 'HALF DPS, PLANTS A KEG / 20S',
       locked: () => (r().maxDepth < M.SAPPER_DEPTH ? `DEPTH ${M.SAPPER_DEPTH}` : null),

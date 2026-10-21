@@ -3,6 +3,7 @@ import { Container, Graphics } from 'pixi.js';
 import type { DeptDef } from '../core/dept';
 import type { Game } from '../core/game';
 import type { DeptId } from '../core/types';
+import { GOOD_ORDER, GOODS, type GoodId } from '../core/goods';
 import { formatNum, formatTime } from '../core/format';
 import { PixelText, wrap } from '../ui/font';
 import { Button, drawPanel, drawSprite } from '../ui/widgets';
@@ -21,6 +22,16 @@ export interface Report {
   cap: number;
   lines: ReportLine[];
   tribute: number;
+  /** Goods gained while away (00 §5.3). */
+  goods?: Partial<Record<GoodId, number>>;
+}
+
+/** "+12{potion} +6{bone}" for the whole Goods gained (empty when none reached a whole unit). */
+export function goodsGainedText(goods: Partial<Record<GoodId, number>> | undefined, notation: 'suffix' | 'sci' = 'suffix'): string {
+  if (!goods) return '';
+  return GOOD_ORDER.filter((g) => Math.floor(goods[g] ?? 0) >= 1)
+    .map((g) => `+${formatNum(Math.floor(goods[g] ?? 0), notation)}${GOODS[g].icon}`)
+    .join(' ');
 }
 
 const GOBBO = [
@@ -45,7 +56,8 @@ export function showReport(game: Game, r: Report): void {
 
   if (r.elapsed < 600) {
     const parts = r.lines.filter((l) => l.amount > 0).map((l) => `+${formatNum(l.amount, notation)} ${l.def.currency}`);
-    game.toast(`GOBBO: WHILE YOU WERE AWAY ${formatTime(r.elapsed)}: ${parts.join(', ')}, +${formatNum(r.tribute, notation)} TRIBUTE`);
+    const goods = goodsGainedText(r.goods, notation);
+    game.toast(`GOBBO: WHILE YOU WERE AWAY ${formatTime(r.elapsed)}: ${parts.join(', ')}, +${formatNum(r.tribute, notation)} TRIBUTE${goods ? `, GOODS ${goods}` : ''}`);
     return;
   }
 
@@ -56,7 +68,10 @@ export function showReport(game: Game, r: Report): void {
 
   const w = L.w - L.safe.l - L.safe.r - 12;
   const lineH = 18;
-  const h = 70 + r.lines.length * lineH + (r.capped ? 10 : 0) + 30;
+  const goodsText = goodsGainedText(r.goods, notation);
+  const goodsWrapped = goodsText ? wrap(`GOODS ${goodsText}`, w - 16) : '';
+  const goodsH = goodsWrapped ? goodsWrapped.split('\n').length * 7 + 3 : 0;
+  const h = 70 + r.lines.length * lineH + (r.capped ? 10 : 0) + goodsH + 30;
   const x = L.safe.l + 6;
   const y = Math.max(L.safe.t + 4, Math.floor((L.h - h) / 2));
   const g = new Graphics();
@@ -92,6 +107,12 @@ export function showReport(game: Game, r: Report): void {
   trib.position.set(x + 8, ly + 2);
   root.addChild(trib);
   ly += 12;
+  if (goodsWrapped) {
+    const gt = new PixelText(goodsWrapped, '#5a3a7a', null);
+    gt.position.set(x + 8, ly);
+    root.addChild(gt);
+    ly += goodsH;
+  }
   if (r.capped) {
     const cap = new PixelText(`CAP REACHED AT ${formatTime(r.cap)}`, '#a02020', null);
     cap.position.set(x + 8, ly);

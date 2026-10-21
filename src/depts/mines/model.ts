@@ -160,6 +160,18 @@ export const tapExpected = (r: MinesRun) => fistDamage(r) * (1 + critChance(r.cr
 // ---------- crew ----------
 
 export const goblins = (r: MinesRun) => r.grunts + r.sappers;
+/** Goblins on the wall: the hired crew plus `bones` free Bone Miners (Bones import, 00 §4), who
+ * swing like Grunts, come last in the crew order and take crew slots (the wall still holds
+ * MAX_GOBLINS). SIM-TUNED: as 3 extra goblins beyond the cap they added ~+35% to the crew's idle
+ * rate and pulled the drum-on on-screen ratio from 2.68x to 2.33x (02 §3: 2.4-3.0x); inside the cap
+ * they are three free hires, a post-Fall head start, as an import should be (small, 00 §4). */
+export const crewSize = (r: MinesRun, bones = 0) => Math.min(MAX_GOBLINS, goblins(r) + Math.max(0, Math.min(3, bones)));
+/** Crew slot i: hired Grunts, then Sappers, then Bone Miners. */
+export const isSapperSlot = (r: MinesRun, i: number) => i >= r.grunts && i < goblins(r);
+export const isBoneSlot = (r: MinesRun, i: number) => i >= goblins(r);
+/** Stamina Stew (Potions import, 00 §4): every Nth tap is a guaranteed crit (30/25/20; 0 = off). */
+export const stewEvery = (L: number) => (L > 0 ? 35 - 5 * Math.min(3, L) : 0);
+export const stewCrit = (L: number, taps: number) => L > 0 && taps > 0 && taps % stewEvery(L) === 0;
 export const hireCost = (r: MinesRun) => 25 * 1.6 ** goblins(r);
 export const sapperCost = (r: MinesRun) => 2 * hireCost(r);
 export const SAPPER_DEPTH = 10;
@@ -182,8 +194,8 @@ export function goblinDps(base: number, r: MinesRun, p: MinesPersistent): number
   return base * picksMult(r.picks) * tierMult(r.tier) * overdepth(r) * drumSync(r, p);
 }
 
-export function crewDps(r: MinesRun, p: MinesPersistent): number {
-  return goblinDps(r.grunts * GRUNT_DPS + r.sappers * SAPPER_DPS, r, p);
+export function crewDps(r: MinesRun, p: MinesPersistent, bones = 0): number {
+  return goblinDps((r.grunts + crewSize(r, bones) - goblins(r)) * GRUNT_DPS + r.sappers * SAPPER_DPS, r, p);
 }
 
 // ---------- shaft ----------
@@ -247,12 +259,12 @@ export const GOBLIN_HOP_S = 0.4;
 
 /** Rocks per second the crew breaks at depth d: each goblin swings for avgHP / DPS, then hops,
  * softly bounded by the regrowth ceiling (25 tiles / regrow time). */
-export function crewRocksPerSec(r: MinesRun, p: MinesPersistent, d = r.depth): number {
+export function crewRocksPerSec(r: MinesRun, p: MinesPersistent, d = r.depth, bones = 0): number {
   const hp = H(d) * AVG_HP_F;
   const rr = d === r.depth ? r : { ...r, depth: d };
   let rocks = 0;
   for (const [n, base] of [
-    [r.grunts, GRUNT_DPS],
+    [r.grunts + crewSize(r, bones) - goblins(r), GRUNT_DPS],
     [r.sappers, SAPPER_DPS],
   ]) {
     if (n <= 0) continue;
@@ -269,8 +281,14 @@ export function crewRocksPerSec(r: MinesRun, p: MinesPersistent, d = r.depth): n
  * Crew rocks/s (swing time plus hop per rock), bounded by the regrowth ceiling (25 tiles /
  * regrow time), x the average reward of the spawn mix.
  */
-export function idleNuggets(r: MinesRun, p: MinesPersistent): number {
-  return crewRocksPerSec(r, p) * R(r.depth) * AVG_REWARD_F;
+export function idleNuggets(r: MinesRun, p: MinesPersistent, bones = 0): number {
+  return crewRocksPerSec(r, p, r.depth, bones) * R(r.depth) * AVG_REWARD_F;
+}
+
+/** Ingots (00 §4, 02 §16): 2% of Ore Veins yield one. Veins are VEIN_P of the non-keg spawn mix. */
+export const INGOT_PER_VEIN = 0.02;
+export function crewIngotsPerH(r: MinesRun, p: MinesPersistent, bones = 0): number {
+  return crewRocksPerSec(r, p, r.depth, bones) * (VEIN_P / nonKeg) * INGOT_PER_VEIN * 3600;
 }
 
 /** Expected taps to break a common rock at depth d (lever hint). */

@@ -136,7 +136,8 @@ export const dropsPerSec = (run: CRun) => toadlings(run) / interval(lvOf(run, 'b
 export const rows = (run: CRun) => 10 + lvOf(run, 'row');
 export const goldCount = (run: CRun) => 1 + lvOf(run, 'gold');
 export const goldMult = (run: CRun) => 1.5 + 0.1 * lvOf(run, 'polish');
-export const ladleCharges = (run: CRun) => 3 + lvOf(run, 'charges');
+/** Ladle charges; `sigils` = Essence import level (Ladle Sigils, +1 each, 00 §4). */
+export const ladleCharges = (run: CRun, sigils = 0) => 3 + lvOf(run, 'charges') + Math.max(0, Math.min(3, sigils));
 export const ladleSecs = (run: CRun) => 4 + lvOf(run, 'longLadle');
 
 /** Fresher Stock: +25% per level, and x2 at every 25th level (the visible milestone, 00 §8). */
@@ -152,18 +153,25 @@ export function flow(run: CRun): IngId[] {
   return ING_ORDER.filter((i) => i !== 'mandrake' || lvOf(run, 'mandrake') > 0);
 }
 
-export function avgValue(run: CRun): number {
-  const f = flow(run);
-  const w = f.reduce((a, i) => a + INGREDIENTS[i].weight, 0);
-  return f.reduce((a, i) => a + INGREDIENTS[i].weight * ingValue(run, i), 0) / w;
+/** Flow weight of an ingredient. `exotic` = Contraband import level (Smuggled Spice, 00 §4):
+ * each level takes 4 weight off the Newt, so the pricier ingredients come more often. */
+export function ingWeight(ing: IngId, exotic = 0): number {
+  const w = INGREDIENTS[ing].weight;
+  return ing === 'newt' ? Math.max(10, w - 4 * Math.max(0, Math.min(3, exotic))) : w;
 }
 
-export function pickIngredient(run: CRun, r: number): IngId {
+export function avgValue(run: CRun, exotic = 0): number {
   const f = flow(run);
-  const w = f.reduce((a, i) => a + INGREDIENTS[i].weight, 0);
+  const w = f.reduce((a, i) => a + ingWeight(i, exotic), 0);
+  return f.reduce((a, i) => a + ingWeight(i, exotic) * ingValue(run, i), 0) / w;
+}
+
+export function pickIngredient(run: CRun, r: number, exotic = 0): IngId {
+  const f = flow(run);
+  const w = f.reduce((a, i) => a + ingWeight(i, exotic), 0);
   let x = r * w;
   for (const i of f) {
-    x -= INGREDIENTS[i].weight;
+    x -= ingWeight(i, exotic);
     if (x <= 0) return i;
   }
   return f[0];
@@ -216,22 +224,23 @@ export function expectedMult(run: CRun, malice = run.malice): number {
   return s;
 }
 
-export function evPerDrop(run: CRun): number {
-  return avgValue(run) * expectedMult(run);
+export function evPerDrop(run: CRun, exotic = 0): number {
+  return avgValue(run, exotic) * expectedMult(run);
 }
 
-/** On-screen idle Bile/s before core multipliers: toadling drops x value x E[mult]_random. */
-export function idleRateOf(run: CRun): number {
-  return dropsPerSec(run) * evPerDrop(run);
+/** On-screen idle Bile/s before core multipliers: toadling drops x value x E[mult]_random.
+ * `exotic` = Contraband import level (ingWeight). */
+export function idleRateOf(run: CRun, exotic = 0): number {
+  return dropsPerSec(run) * evPerDrop(run, exotic);
 }
 
 export const BATCH_IDLE_S = 8;
-export function batchPayout(run: CRun, p: CPersistent): number {
+export function batchPayout(run: CRun, p: CPersistent, exotic = 0): number {
   // Seed: 25x the average drop (spec) plus some seconds of idle income so Batches stay worth
   // chasing once the toadling rain dwarfs a single drop.
   // SIM-TUNED: 10 s -> 8 s, which holds active at ~2.5-3x on-screen idle (05 §3) once Bigger
   // Batches is levelled in later cycles. Batches are most of the Cauldron's active edge.
-  return (25 * evPerDrop(run) + BATCH_IDLE_S * idleRateOf(run)) * (1 + 0.2 * rlvOf(p, 'bigger'));
+  return (25 * evPerDrop(run, exotic) + BATCH_IDLE_S * idleRateOf(run, exotic)) * (1 + 0.2 * rlvOf(p, 'bigger'));
 }
 
 /** Highest Malice L with at least 5 Batches completed at Malice >= L this cycle (skill gate). */

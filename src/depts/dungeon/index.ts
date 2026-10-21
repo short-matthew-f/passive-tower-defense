@@ -40,6 +40,7 @@ export const dungeon: DeptDef = {
       champSlain: ['Champion slain. Two at the target Lure means Infamy.'],
       perfect: ['Perfect waves. Profit +40%. Keep ringing.'],
       struggle: ['Losses at %n%. Lower Lure? The dial is top left.'],
+      goodsLink: ['%good% arrived. Itemizing. See GOODS.', 'Imports logged, My Liege. GOODS tab.'],
       infamy50: ['Body count: up 50%, My Liege.'],
       legend: ['A Legend. Not in the budget. Tap LEGEND.', 'A Legend at the entry. Jaw. Dropped.'],
       returnFall: ['Blueprints saved. Tap a ghost to rebuild.'],

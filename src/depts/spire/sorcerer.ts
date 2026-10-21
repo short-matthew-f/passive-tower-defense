@@ -18,6 +18,7 @@ export const sorcerer: ManagerDef = {
     // Core triggers.
     intro: ['M-my lord! The Spire. Mind the flask. (It bites.)'],
     firstUpgrade: ['A purchase! The literature approves. Mostly.'],
+    goodsLink: ['%good%! For r-research. See GOODS.', 'Imports! The literature approves. GOODS tab.'],
     infamy50: ["We're c-cited in hero journals. Footnote 4."],
     legend: ['A hero. In MY flask. Oh no. Tap LEGEND...'],
     fall: ['The glass! The g-glass!'],

@@ -16,6 +16,7 @@ export const granny: ManagerDef = {
     // Core triggers.
     intro: ["Welcome to my kitchen, dearie. Mind the toadlings, they're the stew."],
     firstUpgrade: ['Ooh, a spender! Slurp. The pot likes you already.'],
+    goodsLink: ['%good% delivered! Ooh, naughty. See GOODS.', 'Smuggled treats for the pot! GOODS tab, dearie.'],
     infamy50: ['Folk smell my stew for miles, dearie.', 'Half the kingdom has a tummy ache. Lovely.'],
     legend: ['A hero at MY door? Wipe your feet, dearie.', "Someone tall is knocking. Let 'em in when you're ready."],
     fall: ['My pot! My lovely pot!'],

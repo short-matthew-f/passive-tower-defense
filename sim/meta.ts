@@ -19,6 +19,31 @@ import {
   tributeRate,
 } from '../src/core/economy';
 import type { DeptEcon } from '../src/core/dept';
+import {
+  activeGoodsStep,
+  addGoods,
+  buyImport,
+  buyMarket,
+  canBuyImport,
+  EXPORT_OF,
+  GOOD_ORDER,
+  GOODS,
+  goodsIncomePerH,
+  goodsStock,
+  importAdd,
+  importLv,
+  IMPORT_NODES,
+  lineOpen,
+  MARKET_BUNDLE,
+  marketCost,
+  newActiveTrack,
+  nodeCost,
+  offlineGoods,
+  passivePerH,
+  ROADS,
+  type ActiveGoodsTrack,
+  type GoodId,
+} from '../src/core/goods';
 import { BANNER, bannerId, DREAD_PERKS, RUINBORN, ruinbornId, SEAL_COST, SEAL_DREAD, THRONE_UPGRADES } from '../src/core/meta';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from '../src/core/types';
 import { childSeed } from './rng';
@@ -98,6 +123,9 @@ export interface SimConfig {
   initialMeta?: SaveRoot['meta'];
   /** Experiment: economy floor growth per Fall for every department (shipped default x3). */
   floorGrowth?: number;
+  /** Turn the Goods system off (no accrual, no imports, no Black Market or Roads): the pre-Goods
+   * baseline for before/after comparisons (`--no-goods`). */
+  noGoods?: boolean;
 }
 
 export const DEFAULT_CONFIG: Omit<SimConfig, 'adapters'> = {
@@ -156,6 +184,10 @@ export interface DeptTrack {
   cycleStartOnScreen: number;
   /** Copy of the meta state when this department unlocked (fixture for single-department runs). */
   metaAtUnlock?: SaveRoot['meta'];
+  /** Goods: this department's export earned (passive / active), and each import line's maxed time. */
+  goodsPassive: number;
+  goodsActive: number;
+  lineMaxedAt: Record<string, number>;
 }
 
 export interface DaySnap {
@@ -178,8 +210,22 @@ export interface SimEvent {
   text: string;
 }
 
+export interface GoodsTrack {
+  /** Goods bought on the Black Market, and Tribute spent there. */
+  marketGoods: number;
+  marketTribute: number;
+  /** Goods spent on import nodes. */
+  spent: Partial<Record<GoodId, number>>;
+  /** Import levels bought per day (all departments). */
+  levelsByDay: Record<number, number>;
+  /** Stock at each day's end. */
+  stockByDay: Record<number, Partial<Record<GoodId, number>>>;
+  roads: number;
+}
+
 export interface SimResult {
-  config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean; floorGrowth: number };
+  config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean; floorGrowth: number; noGoods: boolean };
+  goods: GoodsTrack;
   tracks: Record<string, DeptTrack>;
   snaps: DaySnap[];
   events: SimEvent[];
@@ -245,8 +291,14 @@ export function simulate(cfg: SimConfig): SimResult {
       ratioByDay: {},
       cycleStartT: 0,
       cycleStartOnScreen: 0,
+      goodsPassive: 0,
+      goodsActive: 0,
+      lineMaxedAt: {},
     };
   }
+  const goodsTrack: GoodsTrack = { marketGoods: 0, marketTribute: 0, spent: {}, levelsByDay: {}, stockByDay: {}, roads: 0 };
+  const activeGoods: Partial<Record<DeptId, ActiveGoodsTrack>> = {};
+  const useGoods = !cfg.noGoods;
 
   // Profile-derived constants for the meta buyer's value heuristics.
   const dayPlan = cfg.profile.day(1);
@@ -346,6 +398,15 @@ export function simulate(cfg: SimConfig): SimResult {
       tracks[id].aeCycleS += (factor * tt) / ratioEst(id);
       addTribute(tributeRate(s, id, defs, false) * factor * tcap, id);
     }
+    if (useGoods) {
+      // game.ts applyOffline: passive Goods under the offline cap.
+      const got = offlineGoods(s, defs, elapsed);
+      for (const [g, amt] of Object.entries(got)) {
+        addGoods(s, g as GoodId, amt);
+        const ex = GOODS[g as GoodId].exporter;
+        if (tracks[ex]) tracks[ex].goodsPassive += amt;
+      }
+    }
     checkProgress();
   }
   function snapshot(dayIdx: number): void {
@@ -366,6 +427,7 @@ export function simulate(cfg: SimConfig): SimResult {
         desc: byId[id]!.describe(d),
       };
     }
+    goodsTrack.stockByDay[dayIdx] = Object.fromEntries(GOOD_ORDER.map((g) => [g, goodsStock(s, g)]));
     snaps.push({
       day: dayIdx,
       t,
@@ -420,9 +482,10 @@ export function simulate(cfg: SimConfig): SimResult {
     const reserve = seal && s.meta.dreadLifetime >= (SEAL_DREAD[seal] ?? 0) ? SEAL_COST[seal] : 0;
     const ids = unlocked();
     const n = Math.max(1, ids.length);
+    if (useGoods) buyImportsWithGoods();
     // Tribute: Dark Banners, Curfew Bells, Treasury Vaults by value per Tribute.
     for (let guard = 0; guard < 200; guard++) {
-      const opts: { key: string; cost: number; value: number }[] = [];
+      const opts: { key: string; cost: number; value: number; qty?: number }[] = [];
       for (const id of ids) {
         const L = s.meta.throne[bannerId(id)] ?? 0;
         if (L < BANNER.max) opts.push({ key: bannerId(id), cost: BANNER.cost(L), value: 0.1 / (1 + 0.1 * L) / n });
@@ -435,14 +498,32 @@ export function simulate(cfg: SimConfig): SimResult {
             ? offlineShareGain(offlineCapSeconds(s), 3600)
             : u.id === 'treasury'
               ? 0.5 * offlineShareGain(tributeCapSeconds(s), 7200)
-              : 0;
+              : u.id === ROADS.id && useGoods
+                ? roadsValue(n)
+                : 0;
         if (v > 0) opts.push({ key: u.id, cost: u.cost(L), value: v });
+      }
+      if (useGoods) {
+        const m = marketOption(n);
+        if (m) opts.push(m);
       }
       opts.sort((a, b) => b.value / b.cost - a.value / a.cost);
       const pick = opts[0];
       if (!pick || s.meta.tribute - pick.cost < reserve) break;
+      if (pick.key.startsWith('market:')) {
+        // Black Market: buy the shortfall of one import node, then the node.
+        const node = IMPORT_NODES[Number(pick.key.slice(7))];
+        const qty = pick.qty ?? MARKET_BUNDLE;
+        const before = s.meta.tribute;
+        if (!buyMarket(s, node.good, day(), qty)) break;
+        goodsTrack.marketGoods += qty;
+        goodsTrack.marketTribute += before - s.meta.tribute;
+        buyImportsWithGoods();
+        continue;
+      }
       s.meta.tribute -= pick.cost;
       s.meta.throne[pick.key] = (s.meta.throne[pick.key] ?? 0) + 1;
+      if (pick.key === ROADS.id) goodsTrack.roads++;
     }
     // Dread perks by value per Dread.
     for (let guard = 0; guard < 200; guard++) {
@@ -469,6 +550,56 @@ export function simulate(cfg: SimConfig): SimResult {
       s.meta.dread -= pick.cost;
       s.meta.dreadPerks[pick.key] = perk(pick.key) + 1;
     }
+  }
+
+  // ----- Goods: import nodes, the Black Market, Imperial Roads -----
+
+  /** Value of one import level, as a share of the empire's income (the Throne bot's currency):
+   * +1.5% in one department plus its small mechanic (counted as another +0.5%). */
+  const IMPORT_VALUE = 0.02;
+  /** Buys every affordable import node with Goods, cheapest first (Goods have no other use). */
+  function buyImportsWithGoods(): void {
+    for (let guard = 0; guard < 64; guard++) {
+      const cands = IMPORT_NODES.filter((nd) => canBuyImport(s, nd)).sort((a, b) => nodeCost(s, a) - nodeCost(s, b));
+      const nd = cands[0];
+      if (!nd) return;
+      const c = nodeCost(s, nd);
+      buyImport(s, nd);
+      goodsTrack.spent[nd.good] = (goodsTrack.spent[nd.good] ?? 0) + c;
+      goodsTrack.levelsByDay[day()] = (goodsTrack.levelsByDay[day()] ?? 0) + 1;
+      const d = s.depts[nd.dept]!;
+      if (importLv(d, nd.key) >= nd.max) {
+        tracks[nd.dept].lineMaxedAt[nd.key] = t;
+        log('goods', `${nd.dept} ${nd.good} line maxed`, nd.dept);
+      }
+    }
+  }
+  function openUnmaxed(): typeof IMPORT_NODES {
+    return IMPORT_NODES.filter((nd) => byId[nd.dept] && lineOpen(s, nd) && importLv(s.depts[nd.dept], nd.key) < nd.max);
+  }
+  /** Imperial Roads: +10% of the passive Goods income over the next week, in import levels. */
+  function roadsValue(n: number): number {
+    const open = openUnmaxed();
+    if (!open.length) return 0;
+    const inc = goodsIncomePerH(s, defs);
+    const L = s.meta.throne[ROADS.id] ?? 0;
+    let perDay = 0;
+    for (const g of new Set(open.map((nd) => nd.good))) perDay += (inc[g] / (1 + 0.1 * L)) * 0.1 * 18;
+    const avgCost = open.reduce((a, nd) => a + nodeCost(s, nd), 0) / open.length;
+    return ((perDay * 7) / Math.max(1, avgCost)) * (IMPORT_VALUE / n);
+  }
+  /** The Black Market's best offer: the open node with the smallest Tribute shortfall. */
+  function marketOption(n: number): { key: string; cost: number; value: number; qty: number } | null {
+    let best: { key: string; cost: number; value: number; qty: number } | null = null;
+    for (const nd of openUnmaxed()) {
+      const short = nodeCost(s, nd) - goodsStock(s, nd.good);
+      if (short <= 0) continue;
+      const qty = Math.ceil(short / MARKET_BUNDLE) * MARKET_BUNDLE;
+      const cost = marketCost(s, day(), qty);
+      const value = IMPORT_VALUE / (1 + importAdd(s.depts[nd.dept])) / n;
+      if (!best || value / cost > best.value / best.cost) best = { key: `market:${IMPORT_NODES.indexOf(nd)}`, cost, value, qty };
+    }
+    return best;
   }
 
   // ----- Falls -----
@@ -558,6 +689,7 @@ export function simulate(cfg: SimConfig): SimResult {
     const tr = tracks[id];
     if (tr.firstEntryAt === null) tr.firstEntryAt = t;
     if (fallReady(id)) fall(id);
+    activeGoods[id] = newActiveTrack();
     const sess = byId[id]!.startSession(s.depts[id]!, envFor(id));
     sessionStats[id] = sess;
     shopOnce(id, sess);
@@ -599,6 +731,18 @@ export function simulate(cfg: SimConfig): SimResult {
       const tr2 = tributeRate(s, id, defs, id === cur);
       tribute += tr2;
       tracks[id].tribute += tr2;
+      if (useGoods) {
+        // game.ts econTick: passive Goods everywhere, the active bonus on screen.
+        const good = EXPORT_OF[id];
+        const pas = passivePerH(s, id, defs) / 3600;
+        addGoods(s, good, pas);
+        tracks[id].goodsPassive += pas;
+        if (id === cur) {
+          const act = activeGoodsStep(defs[id], od, (activeGoods[id] ??= newActiveTrack()), 1);
+          addGoods(s, good, act);
+          tracks[id].goodsActive += act;
+        }
+      }
     }
     s.meta.tribute += tribute;
     s.meta.tributeLifetime += tribute;
@@ -685,7 +829,8 @@ export function simulate(cfg: SimConfig): SimResult {
   for (const [id, sess] of Object.entries(sessionStats)) adapterStats[id] = sess.stats?.() ?? {};
 
   return {
-    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? 3 },
+    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? 3, noGoods: !!cfg.noGoods },
+    goods: goodsTrack,
     tracks,
     snaps,
     events,
@@ -701,7 +846,7 @@ export function simulate(cfg: SimConfig): SimResult {
 export function scan(o: unknown, where: string, out: string[], path = 'save'): void {
   if (typeof o === 'number') {
     if (!Number.isFinite(o) && !(o === Infinity && path.endsWith('.max'))) out.push(`${where}: ${path} = ${o}`);
-    else if (o < -1e-6 && /(bank|tribute|dread|gems|tokens|earnings)$/i.test(path)) out.push(`${where}: negative ${path} = ${o}`);
+    else if (o < -1e-6 && (/(bank|tribute|dread|gems|tokens|earnings)$/i.test(path) || /\.(goods|imports)\./.test(path))) out.push(`${where}: negative ${path} = ${o}`);
     return;
   }
   if (!o || typeof o !== 'object') return;

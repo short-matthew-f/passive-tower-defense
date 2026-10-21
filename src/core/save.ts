@@ -8,7 +8,7 @@ const LS_KEY = 'overlord-save-mirror';
 /** Migrations: migrations[n] upgrades a schema-n save to n+1. */
 const migrations: Record<number, (s: any) => any> = {};
 
-function migrate(raw: any): SaveRoot | null {
+export function migrate(raw: any): SaveRoot | null {
   if (!raw || typeof raw !== 'object' || typeof raw.schema !== 'number') return null;
   let s = raw;
   while (s.schema < SCHEMA) {
@@ -19,7 +19,11 @@ function migrate(raw: any): SaveRoot | null {
   // Fill fields added without a schema bump.
   const base = newSave(s.savedAt ?? Date.now());
   s.meta = { ...base.meta, ...s.meta, settings: { ...base.meta.settings, ...(s.meta?.settings ?? {}) } };
+  s.meta.goods = { ...base.meta.goods, ...(s.meta.goods ?? {}) };
+  for (const k of Object.keys(s.meta.goods)) if (!Number.isFinite(s.meta.goods[k])) s.meta.goods[k] = 0;
+  if (!s.meta.market || typeof s.meta.market.day !== 'number') s.meta.market = { ...base.meta.market };
   s.depts ??= {};
+  for (const d of Object.values(s.depts) as any[]) if (d && (typeof d.imports !== 'object' || !d.imports)) d.imports = {};
   return s as SaveRoot;
 }
 

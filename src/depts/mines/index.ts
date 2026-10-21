@@ -38,6 +38,7 @@ export const mines: DeptDef = {
       firstFrenzy: ['THAT FRENZY! DO AGAIN, BOSS!'],
       vein: ['SHINY!', 'GOLD! MINE! I MEAN YOURS!', 'VEIN! VEIN!'],
       gem: ['GEM! GEM! {gem}', 'PRETTY ROCK! {gem}'],
+      goodsLink: ['%good%! FOR US? SEE GOODS, BOSS!', 'SHINY DELIVERY! GOODS TAB, BOSS!'],
       infamy50: ['HEROES ARE TALKING ABOUT US, BOSS.'],
       legend: ['BIG HERO. BIG DRILL. UH OH.', 'A HERO AT THE SHAFT! TAP LEGEND, BOSS!'],
       returnFall: ['SHAFT IS GONE. GEMS ARE SAFE! DIG AGAIN, BOSS!'],

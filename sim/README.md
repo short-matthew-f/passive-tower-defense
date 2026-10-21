@@ -492,3 +492,60 @@ next floor still grows geometrically, only with a smaller base. x2 is the only v
 band, and it buys that with 2.4x the Dread rate (more Iron Fist and Ruinborn feed back into
 income) and a 50% Cauldron Dread share. No growth factor on its own brings weeks 2-4 into
 1.5-3 days.
+
+### Pass 4: Goods (cross-department links, 00 §4)
+
+Goods are in the meta sim exactly as in `game.ts` (`src/core/goods.ts` is shared): every second the
+passive rate of each unlocked exporter (its `goods.rate`, clamped to [2/h trickle, the Good's
+passive rate] x Imperial Roads) accrues on and off screen; the department on screen also earns the
+active bonus from its export counter (`goods.count`: Batches + drops / 3,000, veins x 2%, kills / 25,
+confiscations, rare+ catches + other catches / 10, T7+ merges), held to (active - passive) per hour
+by a 10-minute token bucket; `applyOffline` credits the passive rate under the offline cap. The
+importAdd group (+1.5% per import level, cap +18%) is in `coreMult`, not in Rank (like Banners:
+the Black Market sells Goods for Tribute). The Throne bot spends Goods on every affordable import
+node (cheapest first), and weighs Imperial Roads and a Black Market top-up (the open node with the
+smallest Tribute shortfall) against Banners by income share per Tribute (one import level =
++2% of one department: +1.5% plus its small mechanic). `--no-goods` turns all of it off and
+reproduces the pre-Goods build exactly (verified: identical `--quick` report to HEAD).
+
+The War Pit has no adapter yet, so Captives, the Pit's two import lines and the late-import band
+(W-19) aren't measured; the Pit's lines carry 00 §4's x1.5 lever (`LATE_LINE_MULT`) unmeasured.
+
+Goods-specific constants (sim-tuned, commented where they live):
+
+1. **Node cost** 40 -> 80 x 2.5^L (`NODE_BASE`). Node 1 ships alone (00 §4's fallback; lines max at
+   +4.5%), so 40 x 2.5^L priced a line at 390 Goods and a Good's two lines maxed 4-6 days after the
+   exporter unlocked (band ~12 ± 4). 80 puts the line's 780 Goods into its one node.
+2. **Black Market** 40 -> 400 Tribute (+2% per purchase per day, `MARKET_BASE`). Tribute runs ~10x the
+   arc (see "Still open"); at 40 a maxed line cost ~2% of a week-2 day's Tribute.
+3. **Bone Miners take crew slots** (`mines/model.ts` `crewSize`). As 3 goblins beyond the 8-goblin
+   cap they added ~35% to the crew's idle rate and pulled the Mines' drum-on on-screen ratio from
+   2.68x to 2.33x (CI-gated band 2.4-3.0x); inside the cap they are three free hires.
+
+Before (`--no-goods`) -> after, reference profile, 3 seeds:
+
+| Metric | Before | After |
+|---|---|---|
+| Goods earned per day (Potions / Ingots / Bones / Contraband / Souls / Essence), 30 d | — | 166 / 99 / 249 / 84 / 169 / 128 (~1% active: ~8 on-screen min a day per department) |
+| A Good's two lines maxed, days after the exporter unlocks (8-16) | — | Potions 9.1, Ingots 12.0, Bones 7.2 (WARN), Contraband 13.4 |
+| Goods group at day 7 / day 30 | — | +3.0-7.5% / +4.5-9.0% (Node-1 cap +9%) |
+| Black Market, 30 d | — | ~1,150 Goods for 2.8M Tribute (3.1% of lifetime Tribute); Roads L7-8 |
+| Lifetime Dread day 7 (145-439) | 304 [269-309] | 338 [300-342] |
+| Lifetime Dread day 14 / day 30 (seed medians) | 579 / 837 | 588 / 902 |
+| Weeks 2-4 average cycle, days, C / M / D / B / S / Sp (1.5-3) | 5.15 / 6.14 / 5.59 / 5.80 / 5.56 / 5.32 | 4.59 / 7.29 / 5.38 / 5.06 / 8.04 / 7.60 |
+| Falls in 30 days (seed 2), C / M / D / B / S / Sp | 9 / 5 / 5 / 4 / 3 / 3 | 9 / 5 / 5 / 4 / 4 / 4 |
+| Average cycle after the first Fall, days (30 d) | 3.19 / 5.10 / 4.80 / 5.80 / 5.56 / 5.32 | 2.88 / 4.80 / 4.64 / 5.06 / 8.04* / 7.60* |
+| Dread share day 30, Cauldron (<= 37.4%) | 39.3% | 36.4% |
+| Tribute shares day 30 | 10-27% | 10-26% |
+| Active : offline, 7 d (3-5x) | C 4.26 M 3.92 D 3.36 B 3.56 S 4.01 Sp 3.63 | C 4.52 M 4.02 D 3.33 B 3.60 S 4.29 Sp 4.57 [3.38-5.47] |
+
+\* Every Fall comes earlier with Goods (e.g. the Bridge's 4th Fall day 21.8 -> 19.5, the Styx's and
+the Spire's 4th Fall now lands on day 28-29 in every seed instead of one): the Styx and Spire
+averages rise only because that extra, long 4th cycle is now inside the 30-day window. Goods
+shorten cycles by ~5-10%; they don't fix the structural weeks 2-4 stretch (5-8 day cycles), which
+still needs the meta-level decision under "Still open".
+
+Watch: the Spire's active:offline reads 4.57x median with one seed at 5.47x (hard band 3-5x). Tempered
+Glass widens the flask 6 px at L3, which helps the live bot more than Spark Fuel's +15% apprentice
+drops help idle; it sits on ~20 baseline minutes of a lumpy payout (see Pass 3), so it's noted, not
+retuned. The Mines' gated ratio reads 2.57x [2.52-2.76].

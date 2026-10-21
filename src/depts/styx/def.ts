@@ -20,6 +20,16 @@ export const styxEcon: DeptEcon = {
     return M.idleObols(r);
   },
 
+  // Souls (00 §4, 03 §16): rare+ catch = 1, every 10th other catch = 1; netters on idle.
+  goods: {
+    id: 'souls',
+    rate: (save) => (run(save)?.lv ? M.netSoulsPerH(run(save)) : 0),
+    count: (save) => {
+      const s = stats(save);
+      return s.rares + Math.max(0, s.lands - s.rares) / 10;
+    },
+  },
+
   // Infamy skill gate (00 §2.2, 03 §7): land 20 souls at Wrath >= min(5 + 2N, 20) with <= 30%
   // escapes, including at least one rare or better, on screen.
   skillTarget: (n) => Math.min(5 + 2 * n, M.WRATH_MAX),

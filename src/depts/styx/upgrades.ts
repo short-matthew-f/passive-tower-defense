@@ -66,18 +66,20 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     node('poles', 'Longer Poles', (l) => `NET DEPTH ${pct(M.poleFrac(l))} -> ${pct(M.poleFrac(l + 1))} OF RIVER`),
   ];
 
+  // Debt Collectors (Contraband import) discounts Unpaid Debt.
+  const baitCost = (id: M.BaitId) => M.baitCost(id, ctx.save.imports?.contraband ?? 0);
   const bait = (id: M.BaitId): UpgradeEntry => ({
     id: `bait.${id}`,
     name: `${M.BAITS[id].name} x${M.BAITS[id].pack}`,
     max: Infinity,
     level: () => p().baits[id] ?? 0,
-    cost: () => M.BAITS[id].cost,
+    cost: () => baitCost(id),
     desc: () => M.BAITS[id].desc,
-    canAfford: () => r().bank >= M.BAITS[id].cost,
+    canAfford: () => r().bank >= baitCost(id),
     locked: () => (id === 'debt' && r().bands < 2 ? 'MURK FIRST' : null),
     buy: () => {
       if (id === 'debt' && r().bands < 2) return;
-      if (ctx.spend(M.BAITS[id].cost)) {
+      if (ctx.spend(baitCost(id))) {
         p().baits[id] = (p().baits[id] ?? 0) + M.BAITS[id].pack;
         r().stats.baitsCrafted++;
         hooks.onBuy(`bait.${id}`);

@@ -17,6 +17,7 @@ export const snarl: ManagerDef = {
     // Core triggers.
     intro: ["Chief. Welcome to the Pit. *tweet*"],
     firstUpgrade: ['Money down. Good bet.', 'Pliers. Every tooth counts.'],
+    goodsLink: ['%good%! Good stuff, Chief. GOODS tab.', 'Ghost dogs! Fainted come back! GOODS.'],
     infamy50: ['A Crown. Rivals are talking.'],
     legend: ['Barehanded type. Hide the pups. Tap LEGEND.'],
     fall: ['Cages open. Pups loose. Ugh.'],

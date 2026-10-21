@@ -212,7 +212,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function chooseBiter(): void {
-      const rar: M.Rarity = tutorial() ? 'common' : M.rollRarity(M.rarityWeights(r.bait, band, r.lv.scent, W()), rnd());
+      const rar: M.Rarity = tutorial() ? 'common' : M.rollRarity(M.rarityWeights(r.bait, band, r.lv.scent, W(), save.imports?.potions ?? 0), rnd());
       sp = M.speciesFor(band, rar);
       const d = 20 + 30 * rnd();
       phase = 'seek';
@@ -418,7 +418,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function land(): void {
-      const value = M.soulBase(sp, band) * M.comboMult(r.combo) * M.wrathActive(W()) * (r.bait === 'gilded' ? 2 : 1);
+      const value = M.soulBase(sp, band) * M.comboMult(r.combo) * M.wrathActive(W()) * (r.bait === 'gilded' ? M.gildedMult(save.imports?.potions ?? 0) : 1);
       landFirst = !(p.codex[sp.id] > 0);
       landValue = value;
       r.combo++;

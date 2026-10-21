@@ -12,7 +12,10 @@ export interface MetaUpgrade {
 export const THRONE_UPGRADES: MetaUpgrade[] = [
   { id: 'curfewBells', name: 'Curfew Bells', desc: '+1h offline cap, every department', max: 8, cost: (l) => 600 * 2 ** l },
   { id: 'treasury', name: 'Treasury Vaults', desc: '+2h Tribute offline cap', max: 8, cost: (l) => 200 * 1.8 ** l },
+  // Goods (00 §4, §5.2); also shown in the Armory.
+  { id: 'imperialRoads', name: 'Imperial Roads', desc: '+10% Goods trickle, every Good', max: 10, cost: (l) => 1000 * 2 ** l },
 ];
+export const ROADS_ID = 'imperialRoads';
 
 export const bannerId = (d: DeptId) => `banner.${d}`;
 export const BANNER = { max: 25, cost: (l: number) => 100 * 1.6 ** l, desc: '+10% income here' };

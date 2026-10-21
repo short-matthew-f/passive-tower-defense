@@ -1,6 +1,6 @@
 // The Dungeon's fixed-step simulation (specs/01 §14): pure TS, no Pixi. The live scene runs it at
 // 20 Hz and renders from it; idleRate runs the same code headless over a few seeds.
-import { COLS, HOARD, idx, lairPost, ROUTES, ROWS, type Route } from './map';
+import { COLS, HOARD, idx, lairPost, LOOPS, ROUTES, ROWS, type Route } from './map';
 import * as M from './model';
 
 export const STEP = 0.05; // 20 Hz
@@ -49,6 +49,9 @@ export interface SimHero {
   dead: boolean;
   gone: boolean;
   chestI: number;
+  /** Caged Bait (Captives import): baited loop entrances passed, and the glance timer. */
+  baitI: number;
+  glanceT: number;
 }
 
 export interface SimTower {
@@ -123,6 +126,9 @@ export interface SimSetup {
   party: number;
   seed: number;
   live: boolean;
+  /** Goods imports (00 §4): Iron-shod Towers armor pierce, Caged Bait level. */
+  ap?: number;
+  caged?: number;
 }
 
 interface PartyRec {
@@ -168,9 +174,18 @@ export class Sim {
   leaks = 0;
   private rng: () => number;
   private nextHero = 1;
+  /** Iron-shod Towers: armor ignored by tower and minion hits. */
+  ap = 0;
+  /** Caged Bait level: L1 rogues glance 1 s at each baited loop's entrance; L2-3 +10% purse each
+   * on parties that loot a Bait Chest. */
+  caged = 0;
+  /** Route distance (on the rogues' main path) of each baited loop's entrance. */
+  private baitAt: number[] = [];
 
   constructor(s: SimSetup) {
     this.live = s.live;
+    this.ap = Math.max(0, Math.min(3, s.ap ?? 0));
+    this.caged = Math.max(0, Math.min(3, s.caged ?? 0));
     this.lure = s.lure;
     this.ws = s.ws;
     this.partyN = s.party;
@@ -213,6 +228,9 @@ export class Sim {
   setLayout(pieces: M.PieceSave[], chests: [number, number], ws: M.Workshop, settle?: Map<number, number>): void {
     this.ws = ws;
     this.mask = (chests[0] ? 1 : 0) | (chests[1] ? 2 : 0);
+    this.baitAt = LOOPS.filter((_, i) => (this.mask >> i) & 1)
+      .map((l) => ROUTES[0].cum[l.from])
+      .sort((x, y) => x - y);
     for (const h of this.heroes) h.blocked = null;
     // Keep minion health/respawn and rune charges across rebuilds (upgrades must not heal for free).
     const oldM = new Map(this.minions.map((m) => [`${m.id}.${m.n}`, m]));
@@ -387,7 +405,7 @@ export class Sim {
       id: this.nextHero++, type, hp, maxHp: hp, armor: M.heroArmor(type, T), speed: d.spd, atk: d.atk * M.atkScale(T),
       bounty: d.b * M.bountyScale(T), dodge: d.dodge, route, dist: 0, seg: 0, x: route.xs[0], y: route.ys[0],
       px: route.xs[0], py: route.ys[0], dir: 1, slowT: 0, slowF: 0, bleedT: 0, bleedDps: 0, stunT: 0, blocked: null,
-      tile: -1, party, sack: 0, leaked: false, flash: 0, dead: false, gone: false, chestI: 0,
+      tile: -1, party, sack: 0, leaked: false, flash: 0, dead: false, gone: false, chestI: 0, baitI: 0, glanceT: 0,
     });
     this.spawned++;
   }
@@ -420,6 +438,10 @@ export class Sim {
         h.stunT -= dt;
         continue;
       }
+      if (h.glanceT > 0) {
+        h.glanceT -= dt;
+        continue;
+      }
       if (h.blocked) continue;
       let spd = h.speed * (h.dir < 0 ? 1.3 : 1);
       if (h.slowT > 0) spd *= 1 - h.slowF;
@@ -433,6 +455,11 @@ export class Sim {
         continue;
       }
       this.place(h);
+      if (h.type === 'rogue' && h.dir > 0 && this.caged > 0 && h.baitI < this.baitAt.length && h.dist >= this.baitAt[h.baitI]) {
+        // Caged Bait: a glance at the captive, no detour (Rogues still ignore Bait Chests, W-15).
+        h.baitI++;
+        h.glanceT = 1;
+      }
       if (h.dir > 0 && h.chestI < h.route.chestAt.length && h.dist >= h.route.chestAt[h.chestI]) {
         h.chestI++;
         const p = this.parties.get(h.party);
@@ -654,7 +681,7 @@ export class Sim {
 
   private hurt(h: SimHero, raw: number, ignoreArmor: boolean, glare = false): void {
     if (h.dead || h.gone) return;
-    const d = ignoreArmor ? raw : Math.max(1, raw - h.armor);
+    const d = ignoreArmor ? raw : Math.max(1, raw - Math.max(0, h.armor - this.ap));
     h.hp -= d;
     if (!ignoreArmor) h.flash = 0.08;
     if (h.hp <= 0) this.kill(h, glare);
@@ -665,7 +692,8 @@ export class Sim {
     this.release(h);
     const p = this.parties.get(h.party);
     const bonus = p?.bonus ?? 0;
-    const amount = h.leaked && h.type === 'champ' ? 0 : h.bounty * (1 + bonus) * M.plunderMult(this.ws);
+    const purse = p?.looted && this.caged > 1 ? 1 + 0.1 * (this.caged - 1) : 1;
+    const amount = h.leaked && h.type === 'champ' ? 0 : h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse;
     this.earned += amount;
     let net = amount;
     if (h.sack > 0) {
@@ -741,21 +769,34 @@ function fnv(s: string): number {
   return h >>> 0;
 }
 
-export function layoutHash(r: M.DungeonRun): string {
+/** Goods imports that change the floor (Iron-shod Towers, Caged Bait); 0/0 when none. */
+export interface DungeonImports {
+  ap: number;
+  caged: number;
+}
+const NO_IMPORTS: DungeonImports = { ap: 0, caged: 0 };
+export const dungeonImports = (imports: Record<string, number> | undefined): DungeonImports => ({
+  ap: Math.max(0, Math.min(3, imports?.ingots ?? 0)),
+  caged: Math.max(0, Math.min(3, imports?.captives ?? 0)),
+});
+
+export function layoutHash(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): string {
   const ps = r.pieces.map((p) => `${p.k[0]}${p.k[1]}${p.x},${p.y},${p.l},${p.b}`).sort().join(';');
   const w = r.ws;
-  return `${ps}|${r.chests[0]}${r.chests[1]}|${w.whet},${w.necro},${w.insc},${w.ledger}|${r.lure}`;
+  // No imports: the pre-Goods hash exactly (it seeds the idle sim, so the baseline stays put).
+  const ik = imp.ap || imp.caged ? `|${imp.ap},${imp.caged}` : '';
+  return `${ps}|${r.chests[0]}${r.chests[1]}|${w.whet},${w.necro},${w.insc},${w.ledger}|${r.lure}${ik}`;
 }
 
 /** Plunder/s (net of steals) and leak fraction for one tier, averaged over seeds. Each seed runs
  * until parties WARM..WARM+IDLE_PARTIES-1 are resolved and divides their net haul by their spacing. */
-export function simTier(r: M.DungeonRun, T: number, hash: string): { pps: number; leak: number } {
+export function simTier(r: M.DungeonRun, T: number, hash: string, imp: DungeonImports = NO_IMPORTS): { pps: number; leak: number } {
   let pps = 0;
   let leak = 0;
   for (let k = 0; k < IDLE_SEEDS; k++) {
     const seed = fnv(`${hash}#${k}`);
     const start = seed % 10;
-    const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: r.ws, lure: T, party: start, seed, live: false });
+    const sim = new Sim({ pieces: r.pieces, chests: r.chests, ws: r.ws, lure: T, party: start, seed, live: false, ap: imp.ap, caged: imp.caged });
     const first = start + WARM_PARTIES;
     const last = first + IDLE_PARTIES - 1;
     const maxSteps = Math.round(IDLE_MAX_S / STEP);
@@ -785,14 +826,14 @@ export function simTier(r: M.DungeonRun, T: number, hash: string): { pps: number
 }
 
 /** Cautious Mode (01 §3.3): the best tier among T..T-3 that holds the line (< 20% leaks). */
-export function cautiousRate(r: M.DungeonRun): number {
-  const hash = layoutHash(r);
-  const top = simTier(r, r.lure, hash);
+export function cautiousRate(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): number {
+  const hash = layoutHash(r, imp);
+  const top = simTier(r, r.lure, hash, imp);
   if (top.leak < 0.2 || r.lure === 0) return top.pps;
   let best = -1;
   let last = top;
   for (let k = 1; k <= 3 && r.lure - k >= 0; k++) {
-    last = simTier(r, r.lure - k, hash);
+    last = simTier(r, r.lure - k, hash, imp);
     if (last.leak < 0.2) best = Math.max(best, last.pps);
   }
   return best >= 0 ? best : last.pps;
@@ -802,19 +843,22 @@ export function cautiousRate(r: M.DungeonRun): number {
 const memo = new Map<string, number>();
 let lastRun: M.DungeonRun | null = null;
 let lastRev = -1;
+let lastImp = '';
 let lastVal = 0;
 
-export function idleRateOf(r: M.DungeonRun): number {
-  if (r === lastRun && r.rev === lastRev) return lastVal;
-  const key = layoutHash(r);
+export function idleRateOf(r: M.DungeonRun, imp: DungeonImports = NO_IMPORTS): number {
+  const ik = `${imp.ap},${imp.caged}`;
+  if (r === lastRun && r.rev === lastRev && ik === lastImp) return lastVal;
+  const key = layoutHash(r, imp);
   let v = memo.get(key);
   if (v === undefined) {
-    v = cautiousRate(r);
+    v = cautiousRate(r, imp);
     if (memo.size > 64) memo.clear();
     memo.set(key, v);
   }
   lastRun = r;
   lastRev = r.rev;
+  lastImp = ik;
   lastVal = v;
   return v;
 }

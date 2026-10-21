@@ -348,19 +348,34 @@ export function avgFare(m: number, booth: number): number {
   return tf / tw;
 }
 
-/** Tollpence multiplier on every fare, bounty and confiscation. */
-export const fareMult = (r: BridgeRun) => signageMult(r.lv.signage) * payoutMult(r.menace);
+/** Skulls on Posts (Bones import, 00 §4): +5% fare per level. */
+export const skullsMult = (skulls: number) => 1 + 0.05 * Math.max(0, Math.min(3, skulls));
+
+/** Tollpence multiplier on every fare, bounty and confiscation. `skulls` = Bones import level. */
+export const fareMult = (r: BridgeRun, skulls = 0) => signageMult(r.lv.signage) * payoutMult(r.menace) * skullsMult(skulls);
+
+/** Pillory (Captives import, 00 §4, W-15): an unmasked hero pays a 1x fare fine (L1) and the
+ * Unmask bounty rises 5% per further level. Returns the fare multiple an Unmask pays. */
+export function unmaskPay(bounty: number, pillory: number): number {
+  const L = Math.max(0, Math.min(3, pillory));
+  return bounty * (1 + 0.05 * Math.max(0, L - 1)) + (L >= 1 ? 1 : 0);
+}
 
 /** On-screen idle rate (Tollpence/s before core multipliers), 06 §3 closed form. Pure, cheap. */
-export function idleTollpence(r: BridgeRun): number {
+export function idleTollpence(r: BridgeRun, skulls = 0): number {
   const eff = goonEff(r.lv.goons);
   if (eff <= 0) return 0;
-  return TRAFFIC * avgFare(r.menace, r.lv.booth) * goonFlat(r.lv.pricing) * eff * fareMult(r);
+  return TRAFFIC * avgFare(r.menace, r.lv.booth) * goonFlat(r.lv.pricing) * eff * fareMult(r, skulls);
 }
 
 /** Tollpence the goons collect from one traveler (bench overflow, naps, idle gate). */
-export function goonToll(r: BridgeRun, t: Traveler): number {
-  return t.kindFare * goonFlat(r.lv.pricing) * goonEff(r.lv.goons) * fareMult(r);
+export function goonToll(r: BridgeRun, t: Traveler, skulls = 0): number {
+  return t.kindFare * goonFlat(r.lv.pricing) * goonEff(r.lv.goons) * fareMult(r, skulls);
+}
+
+/** Contraband (00 §4, 06 §16): goon crates, each goon seizes max(1, Sniffer) per 5 h. */
+export function crateContrabandPerH(r: BridgeRun): number {
+  return (r.lv.goons * Math.max(1, r.lv.sniffer)) / 5;
 }
 
 /** Highest Menace M with >= 5 evidence-backed Unmasks at Menace >= M this cycle. */

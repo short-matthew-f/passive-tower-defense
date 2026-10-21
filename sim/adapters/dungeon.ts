@@ -26,7 +26,7 @@ import type { DeptSave } from '../../src/core/types';
 import { dungeonEcon } from '../../src/depts/dungeon/def';
 import { COLS, lairPost, isRuneTile, ROUTES, ROWS, STARTER_SLITS, tileKind } from '../../src/depts/dungeon/map';
 import * as M from '../../src/depts/dungeon/model';
-import { idleRateOf, Sim, STEP, type SimHero } from '../../src/depts/dungeon/sim';
+import { dungeonImports, idleRateOf, Sim, STEP, type SimHero } from '../../src/depts/dungeon/sim';
 import { buildGroups } from '../../src/depts/dungeon/upgrades';
 import { childSeed, makeRng } from '../rng';
 import type { ActiveSession, AdapterFactory, BotGoals, SessionEnv } from '../types';
@@ -370,6 +370,7 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
       party: r.party,
       seed: childSeed(seed, `dungeon.sim.${sessions++}`),
       live: true,
+      ...dungeonImports(save.imports),
     });
     sim.stealFn = (h) => {
       const amount = Math.max(0, Math.min(M.stealBase(h.type, h.bounty), 0.02 * r.bank));

@@ -10,7 +10,7 @@ import { PixelText, measure } from '../../ui/font';
 import { Button, C } from '../../ui/widgets';
 import * as M from './model';
 import { COLS, HOARD, ENTRY, LOOPS, MAP, ROWS, SUGGESTED_TILE, STARTER_SLITS, TILE, isRuneTile, isWalkable, lairPost, tileKind } from './map';
-import { Sim, STEP, type SimEvent, type SimHero } from './sim';
+import { dungeonImports, Sim, STEP, type SimEvent, type SimHero } from './sim';
 import {
   chestArt,
   clerkArt,
@@ -213,6 +213,7 @@ export class DungeonScene implements DeptScene {
       party: this.run.party,
       seed: (Date.now() & 0x7fffffff) ^ 0x5bd1e995,
       live: true,
+      ...dungeonImports(ctx.save.imports),
     });
     this.sim.stealFn = (h) => this.steal(h);
     this.groups = buildGroups(ctx, {
@@ -1759,6 +1760,13 @@ export class DungeonScene implements DeptScene {
     this.pieceViews.clear();
     this.buildLayout();
     this.syncPieces();
+  }
+
+  /** A Goods import was bought: Iron-shod Towers and Caged Bait apply to the live floor at once. */
+  onImports(): void {
+    const imp = dungeonImports(this.ctx.save.imports);
+    this.sim.ap = imp.ap;
+    this.sim.caged = imp.caged;
   }
 
   destroy(): void {

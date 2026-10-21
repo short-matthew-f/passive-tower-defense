@@ -41,6 +41,8 @@ export interface CoreHooks {
   batch?(payout: number, tokens: number): void;
   drop?(x: number, toadling: number): void;
   overflow?(amount: number): void;
+  /** DeptSave.imports (Goods, 00 §4): read live, so a purchase applies at once. */
+  imports?: Record<string, number>;
 }
 
 export class CauldronCore {
@@ -74,10 +76,24 @@ export class CauldronCore {
     this.seed = seed;
     this.board = this.makeBoard();
     this.rnd = () => this.board.rand();
-    this.charges = ladleCharges(run);
+    this.charges = ladleCharges(run, this.sigils);
     if (!run.ticket) run.ticket = newTicket(run, this.rnd);
-    if (!run.spoon || run.spoon.length < 2) run.spoon = [pickIngredient(run, this.rnd()), pickIngredient(run, this.rnd())];
+    if (!run.spoon || run.spoon.length < 2) run.spoon = [pickIngredient(run, this.rnd(), this.exotic), pickIngredient(run, this.rnd(), this.exotic)];
     this.syncToadlings();
+  }
+
+  /** Contraband import level (Smuggled Spice). */
+  get exotic(): number {
+    return this.hooks.imports?.contraband ?? 0;
+  }
+
+  /** Essence import level (Ladle Sigils). */
+  get sigils(): number {
+    return this.hooks.imports?.essence ?? 0;
+  }
+
+  get maxCharges(): number {
+    return ladleCharges(this.run, this.sigils);
   }
 
   private key(): string {
@@ -92,7 +108,7 @@ export class CauldronCore {
   /** Rebuild the board after an upgrade or Malice change; balls in flight carry over. */
   refresh(): boolean {
     this.syncToadlings();
-    this.charges = Math.min(this.charges, ladleCharges(this.run));
+    this.charges = Math.min(this.charges, this.maxCharges);
     if (this.key() === this.boardKey) return false;
     const old = this.board;
     this.board = this.makeBoard();
@@ -119,7 +135,7 @@ export class CauldronCore {
 
   update(dt: number): void {
     // Ladle charges recharge one at a time.
-    const maxC = ladleCharges(this.run);
+    const maxC = this.maxCharges;
     if (this.charges < maxC) {
       this.chargeT += dt;
       if (this.chargeT >= CHARGE_S) {
@@ -160,10 +176,10 @@ export class CauldronCore {
   }
 
   private toadlingDrop(i: number): void {
-    const ing = pickIngredient(this.run, this.rnd());
+    const ing = pickIngredient(this.run, this.rnd(), this.exotic);
     if (this.board.balls.length >= MAX_BALLS) {
       // Over the cap: resolve instantly at the expected value.
-      const amount = this.hooks.earn(evPerDrop(this.run));
+      const amount = this.hooks.earn(evPerDrop(this.run, this.exotic));
       this.run.stats.drops++;
       this.hooks.overflow?.(amount);
       return;
@@ -192,7 +208,7 @@ export class CauldronCore {
   toss(k: number): IngId | null {
     if (!this.canToss()) return null;
     const ing = this.run.spoon[0];
-    this.run.spoon = [this.run.spoon[1], pickIngredient(this.run, this.rnd())];
+    this.run.spoon = [this.run.spoon[1], pickIngredient(this.run, this.rnd(), this.exotic)];
     this.tossT = this.tossCooldown;
     this.board.drop(ing, k * COL_W + COL_W / 2 + (this.rnd() - 0.5) * 2, true);
     return ing;
@@ -233,7 +249,7 @@ export class CauldronCore {
 
   private completeBatch(): void {
     const run = this.run;
-    const payout = this.hooks.earn(batchPayout(run, this.per));
+    const payout = this.hooks.earn(batchPayout(run, this.per, this.exotic));
     run.stats.batches++;
     run.batchByMal[run.malice] = (run.batchByMal[run.malice] ?? 0) + 1;
     this.per.tokens += 1;

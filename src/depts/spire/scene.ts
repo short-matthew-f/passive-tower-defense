@@ -194,6 +194,7 @@ export class SpireScene implements DeptScene {
       drop: () => sfx.drop(this.vol()),
       newTier: (t) => this.onNewTier(t),
       page: (n, why) => this.onPage(n, why),
+      imports: ctx.save.imports,
     });
     // Hold the skill gate after a reload.
     ctx.raiseSkill(this.run.featBest);
@@ -642,7 +643,7 @@ export class SpireScene implements DeptScene {
     // Apprentices distill while you watch (the idle rate, credited once a second).
     this.idleT += dt;
     if (this.idleT >= 1) {
-      const rate = idleRateOf(this.run, this.per);
+      const rate = idleRateOf(this.run, this.per, this.ctx.save.imports?.souls ?? 0);
       this.idleAcc += rate * this.idleT;
       this.idleT = 0;
       if (this.idleAcc > 0) {
@@ -742,7 +743,7 @@ export class SpireScene implements DeptScene {
   /** The cosmetic Apprentice Flask: homunculi toss orbs at the apprentice drop rate. */
   private updateApprentices(dt: number): void {
     const n = apprentices(this.run);
-    const dpm = apprenticeDropsPerMin(this.run);
+    const dpm = apprenticeDropsPerMin(this.run, this.ctx.save.imports?.souls ?? 0);
     if (n > 0 && dpm > 0) {
       this.apprT += dt;
       const every = 60 / dpm;
@@ -1059,6 +1060,12 @@ export class SpireScene implements DeptScene {
     this.pagesText.position.set(c.x + c.w - 11 - this.pagesText.width, this.barY + 5);
     this.volUp.setEnabled(run.vol < run.volBought || run.volBought < VOL_MAX);
     this.volDown.setEnabled(run.vol > 0);
+  }
+
+  /** Tempered Glass bought: widen the flask now (the frame loop redraws when the width changes). */
+  onImports(): void {
+    this.core.refresh();
+    if (this.core.flask.w !== this.flaskWDrawn) this.resize(this.ctx.layout);
   }
 
   destroy(): void {

@@ -197,13 +197,13 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
       wallDepth = r.depth;
     }
     function syncGoblins(): void {
-      const want = M.goblins(r);
+      const want = M.crewSize(r, save.imports?.bones ?? 0);
       while (gobs.length < want) {
-        const sapper = gobs.length >= r.grunts;
+        const sapper = M.isSapperSlot(r, gobs.length);
         gobs.push({ sapper, tile: -1, x: rnd() * M.GRID * T, y: M.GRID * T, hop: 0, plant: SAPPER_PLANT * rnd() });
       }
       gobs.length = want;
-      gobs.forEach((g, i) => (g.sapper = i >= r.grunts));
+      gobs.forEach((g, i) => (g.sapper = M.isSapperSlot(r, i)));
     }
     rebuildWall(true);
     syncGoblins();
@@ -338,7 +338,7 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
         return;
       }
       let dmg = M.fistDamage(r);
-      if (rnd() < M.critChance(r.critC)) {
+      if (rnd() < M.critChance(r.critC) || M.stewCrit(save.imports?.potions ?? 0, r.stats.taps)) {
         dmg *= M.critMult(r.critP);
         r.stats.crits++;
       }

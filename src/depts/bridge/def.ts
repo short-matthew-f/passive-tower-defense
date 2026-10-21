@@ -28,7 +28,14 @@ export const bridgeEcon: DeptEcon = {
   idleRate(save) {
     const r = run(save);
     if (!r || !r.lv) return 0;
-    return M.idleTollpence(r);
+    return M.idleTollpence(r, save.imports?.bones ?? 0);
+  },
+
+  // Contraband (00 §4, 06 §16): each confiscation = 1 (active); goon crates (passive).
+  goods: {
+    id: 'contraband',
+    rate: (save) => (run(save)?.lv ? M.crateContrabandPerH(run(save)) : 0),
+    count: (save) => st(save).confisc,
   },
 
   // Infamy skill gate (00 §2.2, 06 §7): 5 evidence-backed Unmasks at Menace >= min(4 + 2N, 20).

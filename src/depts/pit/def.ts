@@ -29,6 +29,7 @@ export interface PitStats {
   battlesWon: number;
   bestWins: number;
   stations: number;
+  captives: number; // Captives taken this cycle (Goods export counter)
 }
 
 export interface PitRun {
@@ -58,7 +59,7 @@ export interface PitPersistent {
 export type PitSave = DeptSave<PitRun, PitPersistent>;
 
 export function defaultStats(): PitStats {
-  return { runs: 0, triumphs: 0, retreats: 0, lowRetreats: 0, battlesWon: 0, bestWins: 0, stations: 0 };
+  return { runs: 0, triumphs: 0, retreats: 0, lowRetreats: 0, battlesWon: 0, bestWins: 0, stations: 0, captives: 0 };
 }
 
 /** The starter garrison (07 §3): Gutter Rat, Stirge, Tusk Piglet. */
@@ -349,6 +350,19 @@ export const pitEcon: DeptEcon = {
     const r = save.run as PitRun;
     if (!r || !r.garrison) return 0;
     return idleFromReport(r, gauntletReport(save));
+  },
+
+  // Captives (00 §4, 07 §16): 1 per Run reaching 6 wins, 3 per Triumph (active); 1 per 60
+  // Gauntlet rounds cleared (passive, held to the Good's passive rate by the core).
+  goods: {
+    id: 'captives',
+    rate: (save) => {
+      const r = save.run as PitRun;
+      if (!r || !r.garrison) return 0;
+      const rep = gauntletReport(save);
+      return (rep.meanRounds * (3600 / intervalL(lvOf(r, 'pace')))) / 60;
+    },
+    count: (save) => (save.run as PitRun)?.stats?.captives ?? 0,
   },
 
   // Infamy skill gate (07 §7, 00 §2.2): 2 Pit Crowns (Triumphs) at Stakes >= target.

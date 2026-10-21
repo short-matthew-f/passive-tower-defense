@@ -7,6 +7,7 @@ import {
   cascadeWindow,
   cooldown,
   FLASK_H,
+  essenceFor,
   flaskW,
   gravityMult,
   heldVol,
@@ -42,6 +43,8 @@ export interface CoreHooks {
   drop?(o: Orb): void;
   newTier?(tier: number): void;
   page?(n: number, why: string): void;
+  /** DeptSave.imports (Goods, 00 §4): Tempered Glass widens the flask. */
+  imports?: Record<string, number>;
 }
 
 /** Mulberry32: a seeded RNG so bug reports reproduce. */
@@ -84,7 +87,7 @@ export class SpireCore {
     this.per = per;
     this.hooks = hooks;
     this.rnd = rng(seed);
-    this.flask = new Flask(flaskW(run), FLASK_H, (t) => TIERS[Math.min(MAX_TIER, t)].r, MAX_ORBS);
+    this.flask = new Flask(flaskW(run, hooks.imports?.ingots ?? 0), FLASK_H, (t) => TIERS[Math.min(MAX_TIER, t)].r, MAX_ORBS);
     this.flask.mergeTier = (t) => (tomeOf(per, 'twinning') > 0 && t < MAX_TIER - 1 && this.rnd() < 0.05 ? t + 2 : t + 1);
     this.flask.onMerge = (e) => this.onMerge(e);
     this.refresh();
@@ -95,7 +98,7 @@ export class SpireCore {
 
   /** Re-read upgrade-driven geometry and physics. */
   refresh(): void {
-    this.flask.w = flaskW(this.run);
+    this.flask.w = flaskW(this.run, this.hooks.imports?.ingots ?? 0);
     this.flask.gravity = 520 * gravityMult(this.run.vol);
   }
 
@@ -271,6 +274,7 @@ export class SpireCore {
     const score = created + held;
     if (score > run.featBest) run.featBest = score;
     this.hooks.raiseSkill(score);
+    run.stats.essence = (run.stats.essence ?? 0) + essenceFor(created);
     if (!e.into) {
       const amount = this.hooks.earn(SINGULARITY_VALUE * mult);
       run.stats.singularities++;

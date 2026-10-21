@@ -157,14 +157,14 @@ export class UpgradeSheet extends Container {
 
   private refresh(_t?: Ticker): void {
     const notation = this.game.save.meta.settings.notation;
-    const b = this.bankText();
+    const b = this.groups[this.tab]?.bank?.() ?? this.bankText();
     this.bank.set(b.text, b.color);
     const maxChars = Math.floor((this.box.w - 8 - 54) / 4);
     for (const r of this.rows) {
       const e = r.entry;
       const lvl = e.level();
       const maxed = lvl >= e.max;
-      const lvlText = e.max === Infinity ? `LV${lvl}` : `${lvl}/${e.max}`;
+      const lvlText = e.levelText ? e.levelText() : e.max === Infinity ? `LV${lvl}` : `${lvl}/${e.max}`;
       r.name.set(`${e.name.toUpperCase()} ${lvlText}`.slice(0, maxChars + 6));
       r.desc.set(e.desc().toUpperCase().slice(0, maxChars));
       const lock = e.locked?.() ?? null;
@@ -174,7 +174,8 @@ export class UpgradeSheet extends Container {
         r.btn.setLabel('LOCKED', lock.toUpperCase().slice(0, 10)).setEnabled(false);
       } else {
         const cost = formatNum(e.cost(), notation);
-        r.btn.setLabel('BUY', e.currency ? `${cost}${e.currency[0]}` : cost).setEnabled(e.canAfford());
+        const unit = !e.currency ? '' : e.currency.startsWith('{') ? e.currency.slice(0, e.currency.indexOf('}') + 1) : e.currency[0];
+        r.btn.setLabel(e.buyLabel ?? 'BUY', `${cost}${unit}`).setEnabled(e.canAfford());
       }
     }
   }

@@ -1120,6 +1120,8 @@ export class PitScene implements DeptScene {
     rs.bonus = this.ctx.earn(runEndBonus(rs, lvOf(run, 'showman')) * pliersMult(lvOf(run, 'pliers')));
     run.stats.runs++;
     run.stats.bestWins = Math.max(run.stats.bestWins, rs.wins);
+    // Captives (Goods): the Huntmaster and two handlers on a Triumph, one prisoner at 6+ wins.
+    run.stats.captives = (run.stats.captives ?? 0) + (rs.ended === 'triumph' ? 3 : rs.wins >= 6 ? 1 : 0);
     const target = pitEcon.skillTarget(this.save.cycle.n);
     let crests = 0;
     if (rs.ended === 'triumph') {

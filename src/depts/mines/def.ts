@@ -17,7 +17,19 @@ export const minesEcon: DeptEcon = {
     const r = run(save);
     const p = per(save);
     if (r.stats === undefined || p.drumOn === undefined) M.normalize(r, p);
-    return M.idleNuggets(r, p);
+    return M.idleNuggets(r, p, save.imports?.bones ?? 0);
+  },
+
+  // Ingots (00 §4, 02 §16): 2% of Ore Veins (Motherlodes are a later content drop).
+  goods: {
+    id: 'ingots',
+    rate: (save) => {
+      const r = run(save);
+      const p = per(save);
+      if (!r || r.stats === undefined || !p) return 0;
+      return M.crewIngotsPerH(r, p, save.imports?.bones ?? 0);
+    },
+    count: (save) => (run(save).stats?.veins ?? 0) * M.INGOT_PER_VEIN,
   },
 
   // Infamy skill gate (00 §2.2, 02 §7): break 50 rocks at depth 30 + 5N, on screen.

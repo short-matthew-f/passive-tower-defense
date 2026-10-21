@@ -744,7 +744,7 @@ export class BridgeScene implements DeptScene {
     const r = this.run;
     if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
     r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
-    const base = c.t.claimFare * mult * M.fareMult(r) * M.streakMult(r.streak);
+    const base = c.t.claimFare * mult * M.fareMult(r, this.skulls) * M.streakMult(r.streak);
     const got = this.ctx.earn(base);
     r.stats.tolls++;
     this.coinBurst(c.x + this.tw / 2, this.deckY - this.th / 2, Math.min(8, 2 + Math.round(mult * 2)), got);
@@ -774,6 +774,11 @@ export class BridgeScene implements DeptScene {
     this.leave(1, 'happy');
   }
 
+  /** Skulls on Posts (Bones import level). */
+  private get skulls(): number {
+    return this.ctx.save.imports?.bones ?? 0;
+  }
+
   private unmask(): void {
     if (!this.canAct()) return;
     const c = this.cur!;
@@ -781,7 +786,7 @@ export class BridgeScene implements DeptScene {
     if (c.t.hero) {
       const ev = M.evidence(c.t);
       const mult = c.t.showdown ? 10 : M.bountyMult(ev);
-      const got = this.ctx.earn(c.t.kindFare * mult * M.fareMult(r));
+      const got = this.ctx.earn(c.t.kindFare * M.unmaskPay(mult, this.ctx.save.imports?.captives ?? 0) * M.fareMult(r, this.skulls));
       r.stats.unmasks++;
       this.per.bountiesLife++;
       if (ev >= 2) {
@@ -848,7 +853,7 @@ export class BridgeScene implements DeptScene {
     if (c.t.smuggler) {
       c.lidOpen = true;
       this.travKey = '';
-      const got = this.ctx.earn(c.t.kindFare * 4 * M.fareMult(r)); // 3x fare goods + 1x fine
+      const got = this.ctx.earn(c.t.kindFare * 4 * M.fareMult(r, this.skulls)); // 3x fare goods + 1x fine
       r.stats.confisc++;
       this.falseInRow = 0;
       this.eels(c.x + 3 * this.S, this.deckY - this.th * 0.7);
@@ -906,7 +911,7 @@ export class BridgeScene implements DeptScene {
 
   /** The goons process the traveler at the gate (nap, idle gate, or bench overflow). */
   private goonPass(t: M.Traveler, atGate: boolean): void {
-    const amount = M.goonToll(this.run, t);
+    const amount = M.goonToll(this.run, t, this.skulls);
     const i = this.goons.length ? Math.floor(Math.random() * Math.min(this.goons.length, this.run.lv.goons)) : -1;
     if (amount > 0) {
       const got = this.ctx.earn(amount);
@@ -1486,10 +1491,10 @@ export class BridgeScene implements DeptScene {
       msg = `GRUMM NAPS ${Math.ceil(this.napT)}S. TAP HIM TO WAKE`;
       col = '#6a4a1a';
     } else if (c?.phase === 'counter') {
-      msg = `OFFERS ${c.h.counter.toFixed(1)}X = ${fm(c.t.claimFare * c.h.counter * M.fareMult(r) * M.streakMult(r.streak + (c.h.counter >= M.STREAK_MIN ? 1 : 0)))}. TAP TO TAKE`;
+      msg = `OFFERS ${c.h.counter.toFixed(1)}X = ${fm(c.t.claimFare * c.h.counter * M.fareMult(r, this.skulls) * M.streakMult(r.streak + (c.h.counter >= M.STREAK_MIN ? 1 : 0)))}. TAP TO TAKE`;
       col = '#6a3a00';
     } else if (c?.phase === 'wait') {
-      msg = r.stats.tolls < 3 ? `FARE ${fm(c.t.claimFare * M.fareMult(r))}. DRAG COINS UP, LET GO` : `FARE ${fm(c.t.claimFare * M.fareMult(r))}{coin}`;
+      msg = r.stats.tolls < 3 ? `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}. DRAG COINS UP, LET GO` : `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}{coin}`;
       if (c.t.sniff) msg = 'WOOF! THE DOG SMELLS SOMETHING';
     } else if (c?.phase === 'search') msg = 'SEARCHING...';
     else if (!c) msg = 'WAITING FOR TRAVELERS...';
@@ -1503,7 +1508,7 @@ export class BridgeScene implements DeptScene {
 
     // Readout + mood face + coin stack.
     const mult = this.notch / 10;
-    const fare = c ? c.t.claimFare * M.fareMult(r) : 0;
+    const fare = c ? c.t.claimFare * M.fareMult(r, this.skulls) : 0;
     this.readout.set(`${mult.toFixed(1)}X`, act ? '#f4e8c1' : '#7a6e80');
     this.coinsText.set(c ? `= ${fm(fare * mult)}{coin}` : '');
     const band = c ? M.band(c.t, r.lv.sense, c.h.offended) : ([1, 1.3] as [number, number]);

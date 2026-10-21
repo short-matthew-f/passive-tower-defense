@@ -10,7 +10,6 @@ import { BUCKET_COL, ING_COLOR, ingTexture, PAL } from './art';
 import {
   bucketMults,
   heldMalice,
-  ladleCharges,
   ladleSecs,
   lvOf,
   MALICE_MAX,
@@ -136,6 +135,7 @@ export class CauldronScene implements DeptScene {
       batch: (p, t) => this.onBatch(p, t),
       drop: (_x, i) => (this.toadTip[i] = 0.25),
       overflow: (a) => (this.overflowAcc += a),
+      imports: ctx.save.imports,
     });
     // Hold the skill gate even after a reload.
     ctx.raiseSkill(heldMalice(this.run));
@@ -737,7 +737,7 @@ export class CauldronScene implements DeptScene {
     }
     // Spoon backdrop + Ladle charges as little ladle icons.
     g.rect(wx + 3, this.potY + 5, 11, 11).fill({ color: 0x000000, alpha: 0.35 });
-    const maxC = ladleCharges(this.run);
+    const maxC = this.core.maxCharges;
     const ly = this.potY + 21;
     for (let i = 0; i < maxC; i++) {
       const x = wx + 4 + i * 7;

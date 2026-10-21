@@ -571,7 +571,7 @@ export class StyxScene implements DeptScene {
   }
 
   private weights(band: number): M.Weights {
-    return M.rarityWeights(this.run.bait, band, this.run.lv.scent, this.W);
+    return M.rarityWeights(this.run.bait, band, this.run.lv.scent, this.W, this.ctx.save.imports?.potions ?? 0);
   }
 
   private chooseBiter(): void {
@@ -840,7 +840,7 @@ export class StyxScene implements DeptScene {
     const band = s.band;
     const r = this.run;
     const gilded = r.bait === 'gilded';
-    const value = M.soulBase(s.sp, band) * M.comboMult(r.combo) * M.wrathActive(this.W) * (gilded ? 2 : 1);
+    const value = M.soulBase(s.sp, band) * M.comboMult(r.combo) * M.wrathActive(this.W) * (gilded ? M.gildedMult(this.ctx.save.imports?.potions ?? 0) : 1);
     const first = !(this.per.codex[s.sp.id] > 0);
     s.state = 'fly';
     this.fly = { soul: s, x0: s.x, y0: this.depthY(s.d), t: 0, value, first };

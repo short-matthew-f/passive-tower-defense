@@ -1,7 +1,7 @@
 // The contract every department implements. The core owns saves, offline time, Tribute,
 // Infamy, Falls, managers and the HUD; a department owns its own play and its numbers.
 import type { Container } from 'pixi.js';
-import type { DeptId, DeptSave } from './types';
+import type { DeptId, DeptSave, GoodId } from './types';
 import type { Layout } from './layout';
 import type { Game } from './game';
 
@@ -51,6 +51,14 @@ export interface DeptEcon {
   rankRef: number;
   rankTarget: number;
   commendations: Commendation[];
+  /**
+   * The department's export (specs/00 §4; core/goods.ts applies trickle, caps, Roads, offline).
+   * `rate`: passive Goods per hour from its helpers (pure, cheap; the core clamps it to
+   * [2/h trickle, the Good's passive rate]). `count`: a counter of export events that only grows
+   * within a cycle (Batches, kills / 25, confiscations ...); while the department is on screen
+   * the core credits its increases, held to the Good's active rate.
+   */
+  goods?: { id: GoodId; rate(save: DeptSave): number; count?(save: DeptSave): number };
 }
 
 export interface DeptDef extends DeptEcon {
@@ -70,6 +78,8 @@ export interface DeptScene {
   update(dt: number): void;
   resize(layout: Layout): void;
   destroy(): void;
+  /** An import node was bought while this scene is open (re-read import-driven state). */
+  onImports?(): void;
 }
 
 export interface DeptCtx {
@@ -107,10 +117,14 @@ export interface UpgradeEntry {
   /** Short effect text for the current -> next level. */
   desc(): string;
   level(): number;
+  /** Text after the name instead of "level/max" (e.g. a Goods stock). */
+  levelText?(): string;
   max: number;
   cost(): number;
-  /** Currency label if not the bank (e.g. Gems). */
+  /** Currency label if not the bank (e.g. Gems); an icon token such as '{potion}' shows as the icon. */
   currency?: string;
+  /** Button label instead of BUY (e.g. '+10'). */
+  buyLabel?: string;
   canAfford(): boolean;
   buy(): void;
   visible?(): boolean;
@@ -120,4 +134,6 @@ export interface UpgradeEntry {
 export interface UpgradeGroup {
   name: string;
   entries: UpgradeEntry[];
+  /** Header line while this tab is open, instead of the sheet's bank line (e.g. Goods stock). */
+  bank?(): { text: string; color: string };
 }

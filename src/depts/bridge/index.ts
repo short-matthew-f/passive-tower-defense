@@ -32,6 +32,7 @@ const grumm: ManagerDef = {
     hazardFirst: ['BONK. OW. GRUMM NAP. TAP GRUMM TO WAKE.'],
     struggle: ['GRUMM WRONG. GRUMM SAD. LOOK AT POSTER?'],
     showdown: ['LETTER! BIG HERO COMING. GRUMM WATCH CLOSE.'],
+    goodsLink: ['%good%! GRUMM LIKE. GOODS!', 'PRESENT FOR GRUMM? GOODS! {up}'],
     infamy50: ['BOSS FAMOUS. GRUMM PROUD. {up}'],
     legend: ['BIG ONE COMING. TAP LEGEND. HE... WALK OVER.'],
     fall: ['BRIDGE BROKE. GRUMM FIX.'],

@@ -12,7 +12,6 @@ import {
   heldMalice,
   idleRateOf,
   inZone,
-  ladleCharges,
   lvOf,
   MALICE_MAX,
   maliceCost,
@@ -139,6 +138,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
           return env.earn(b);
         },
         raiseSkill: (l) => env.raiseSkill(l),
+        imports: save.imports,
       },
       childSeed(seed, `cauldron.core.${sessions++}`),
     );
@@ -199,7 +199,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
             best = p;
           }
         }
-        const full = core.charges >= ladleCharges(run);
+        const full = core.charges >= core.maxCharges;
         if (!best || bs < (full ? 0.9 : sk.ladleMin)) break;
         core.curse(best);
       }
@@ -242,7 +242,7 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
         const key = coarseKey(run, per);
         let row = table.get(key);
         if (!row) table.set(key, (row = { liveS: 0, base: 0, idle: 0, batches: 0 }));
-        const idle = idleRateOf(run);
+        const idle = idleRateOf(run, save.imports?.contraband ?? 0);
         if (opts.liveOnly || row.liveS < sampleS || row.idle <= 0) {
           const b0 = base;
           const n0 = run.stats.batches;

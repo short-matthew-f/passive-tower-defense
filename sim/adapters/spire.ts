@@ -129,6 +129,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
         },
         raiseSkill: (l) => env.raiseSkill(l),
         vent: () => void counters.vents++,
+        imports: save.imports,
       },
       childSeed(seed, `spire.core.${sessions++}`),
     );
@@ -228,7 +229,7 @@ export const createSpire = (opts: SpireOpts = {}): AdapterFactory => (seed) => {
       // The scene credits the apprentices once a second while you watch.
       idleT += dt;
       if (idleT >= 1) {
-        idleAcc += idleRateOf(r, p) * idleT;
+        idleAcc += idleRateOf(r, p, save.imports?.souls ?? 0) * idleT;
         idleT = 0;
         if (idleAcc > 0) env.earn(idleAcc);
         idleAcc = 0;

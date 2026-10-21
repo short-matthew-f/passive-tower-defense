@@ -2,7 +2,7 @@
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
 import type { Commendation, DeptEcon } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
-import { defaultPersistent, defaultRun, idleRateOf, type CRun } from './econ';
+import { defaultPersistent, defaultRun, dropsPerSec, idleRateOf, type CRun } from './econ';
 
 const run = (s: DeptSave) => s.run as CRun;
 const stats = (s: DeptSave) => run(s).stats ?? ({} as CRun['stats']);
@@ -27,7 +27,16 @@ export const cauldronEcon: DeptEcon = {
   idleRate(save) {
     const r = save.run as CRun;
     if (!r || !r.lv) return 0;
-    return idleRateOf(r);
+    return idleRateOf(r, save.imports?.contraband ?? 0);
+  },
+  // Potions (00 §4, 05 §16): 1 per Batch (active) and 1 per 3,000 toadling drops (passive).
+  goods: {
+    id: 'potions',
+    rate: (save) => {
+      const r = save.run as CRun;
+      return r?.lv ? (dropsPerSec(r) * 3600) / 3000 : 0;
+    },
+    count: (save) => (stats(save).batches ?? 0) + (stats(save).drops ?? 0) / 3000,
   },
   // Infamy skill gate (05 §7, 00 §2.2): 5 Batches at Malice >= min(4 + N, 10).
   skillTarget: (n) => Math.min(4 + n, 10),

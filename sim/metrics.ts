@@ -3,6 +3,7 @@
 // on ci-flagged hard metrics, so balance bands can stay visible as FAIL/WARN in the report while
 // the coordinator decides when to gate merges on them.
 import { dreadPayout, offlineFactor } from '../src/core/economy';
+import { EXPORT_OF, GOOD_ORDER, GOODS, importAdd, importLv, IMPORT_NODES } from '../src/core/goods';
 import type { DeptId } from '../src/core/types';
 import type { RatioAgg, SimResult } from './meta';
 import type { DeptAdapter } from './types';
@@ -545,10 +546,107 @@ export function evaluate(r: SimResult, adapters: DeptAdapter[]): Metric[] {
         ci: false,
       }),
     );
+  if (!r.config.noGoods) out.push(...goodsMetrics(r, ids));
   void H;
   void DAY;
   return out;
 }
+
+/** 00 §8.1 Goods graph lint (hard): 7 exporters, 14 links, exactly 2 importers per Good, 2 imports
+ * per department, and the import nodes match the graph. Pure data, so it never varies by seed. */
+export function goodsGraphProblems(): string[] {
+  const bad: string[] = [];
+  const exporters = new Set(GOOD_ORDER.map((g) => GOODS[g].exporter));
+  if (GOOD_ORDER.length !== 7 || exporters.size !== 7) bad.push('need 7 Goods from 7 different exporters');
+  for (const g of GOOD_ORDER) {
+    if (EXPORT_OF[GOODS[g].exporter] !== g) bad.push(`${g}: EXPORT_OF mismatch`);
+    const imp = new Set(GOODS[g].importers);
+    if (imp.size !== 2 || imp.has(GOODS[g].exporter)) bad.push(`${g}: needs 2 importers other than its exporter`);
+  }
+  const node1 = IMPORT_NODES.filter((nd) => nd.node === 1);
+  if (node1.length !== 14) bad.push(`expected 14 Node-1 links, found ${node1.length}`);
+  for (const nd of node1) if (!GOODS[nd.good].importers.includes(nd.dept)) bad.push(`${nd.dept} imports ${nd.good} off-graph`);
+  const perDept = new Map<string, number>();
+  for (const nd of node1) perDept.set(nd.dept, (perDept.get(nd.dept) ?? 0) + 1);
+  for (const [d, k] of perDept) if (k !== 2) bad.push(`${d} has ${k} import lines`);
+  return bad;
+}
+
+function goodsMetrics(r: SimResult, ids: DeptId[]): Metric[] {
+  const out: Metric[] = [];
+  const bad = goodsGraphProblems();
+  out.push(
+    mk({
+      id: 'goodsGraph',
+      label: 'Goods graph lint (7 exporters, 14 links, 2 importers per Good)',
+      value: bad.length,
+      display: bad.length ? bad.join('; ') : 'ok',
+      band: '0 problems',
+      hi: 0,
+      level: 'hard',
+      ci: true,
+    }),
+  );
+  const endT = r.config.days * DAY;
+  for (const g of GOOD_ORDER) {
+    const gd = GOODS[g];
+    const ex = r.tracks[gd.exporter];
+    if (!ex || ex.unlockedAt === null) continue;
+    const lines = IMPORT_NODES.filter((nd) => nd.good === g && ids.includes(nd.dept));
+    // Earned per day while the exporter was unlocked.
+    const alive = Math.max(1, (endT - ex.unlockedAt) / DAY);
+    const earned = ex.goodsPassive + ex.goodsActive;
+    out.push(
+      mk({
+        id: 'goodsIncome',
+        dept: gd.exporter,
+        label: `${gd.name} earned per day (passive + active)`,
+        value: earned / alive,
+        display: `${(earned / alive).toFixed(0)}/day (${((100 * ex.goodsActive) / Math.max(1e-9, earned)).toFixed(0)}% active)`,
+        band: '00 §4: ~130/day per Good',
+        level: 'info',
+        ci: false,
+      }),
+    );
+    if (lines.length < 2) continue; // an importer isn't built (the War Pit): the 2-line band can't be read
+    const maxed = lines.map((nd) => r.tracks[nd.dept]?.lineMaxedAt[nd.key]);
+    const levels = lines.reduce((a, nd) => a + importLv(r.final.depts[nd.dept], nd.key), 0);
+    const all = maxed.every((x) => x !== undefined);
+    const days = all ? (Math.max(...(maxed as number[])) - ex.unlockedAt) / DAY : null;
+    const open = !all && (endT - ex.unlockedAt) / DAY < 16;
+    out.push(
+      mk({
+        id: 'goodsLines',
+        dept: gd.exporter,
+        label: `${gd.name}: both import lines maxed (days after the exporter unlocks)`,
+        value: days,
+        display: days !== null ? `${days.toFixed(1)} d` : `not maxed by day ${r.config.days} (${levels}/${lines.length * 3} levels)`,
+        band: '~12 ± 4 days (00 §8.1, soft)',
+        lo: 8,
+        hi: 16,
+        level: 'soft',
+        ci: false,
+        status: open ? 'INFO' : undefined,
+      }),
+    );
+  }
+  const imp = ids.map((id) => `${id} +${(100 * importAdd(r.final.depts[id])).toFixed(1)}%`).join(', ');
+  out.push(mk({ id: 'goodsImportAdd', label: `Goods group (importAdd) at day ${r.config.days}`, value: null, display: imp, band: '<= +18% each (cap)', level: 'info', ci: false }));
+  const lifeT = r.final.meta.tributeLifetime;
+  out.push(
+    mk({
+      id: 'goodsMarket',
+      label: 'Black Market: Goods bought / share of lifetime Tribute',
+      value: r.goods.marketGoods,
+      display: `${r.goods.marketGoods} Goods for ${fmt(r.goods.marketTribute, 0)} Tribute (${((100 * r.goods.marketTribute) / Math.max(1, lifeT)).toFixed(1)}%), Roads ${r.goods.roads}`,
+      band: 'a top-up, not the main source',
+      level: 'info',
+      ci: false,
+    }),
+  );
+  return out;
+}
+
 
 /** Collapse per-seed metric lists: median value, worst status. */
 export function aggregate(runs: Metric[][]): Metric[] {

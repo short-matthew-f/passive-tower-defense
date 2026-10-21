@@ -1,6 +1,7 @@
 // Suite-wide economy math (specs/00 §2, §3.1, §5.1, §7). Pure functions over the save,
 // shared by the game and the headless balance simulation.
 import { bannerId, ruinbornId } from './meta';
+import { importAdd } from './goods';
 import type { DeptEcon } from './dept';
 import { DEPT_ORDER, type DeptId, type DeptSave, type SaveRoot } from './types';
 
@@ -40,18 +41,20 @@ function lateRecruit(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): b
   return rank(s, id, defs) < 0.6 * avg;
 }
 
-/** Core multiplier (Throne group x Dread group x temp), specs/00 §3.1. Goods arrive in v0.3. */
+/** Core multiplier (Throne group x Dread group x Goods group x temp), specs/00 §3.1. */
 export function coreMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>, now: number): number {
   const throneGroup = 1 + 0.1 * throne(s, bannerId(id));
   const dreadGroup = 1 + 0.1 * perk(s, 'empire.ironFist') + 0.25 * perk(s, ruinbornId(id));
-  return throneGroup * dreadGroup * tempMult(s, id, defs, now);
+  const goodsGroup = 1 + importAdd(s.depts[id]); // <= +18%
+  return throneGroup * dreadGroup * goodsGroup * tempMult(s, id, defs, now);
 }
 
 /**
  * Rank without temp multipliers so catch-up bonuses don't feed back into Tribute.
  * SIM-TUNED: Dark Banners (the Throne group) are left out too. Banners are bought with Tribute, so
  * counting them closed a Tribute -> Banner -> Rank -> Tribute loop (about 20 Banners per department
- * by day 7 in the balance sim). The Dread group stays: Dread isn't bought with Tribute.
+ * by day 7 in the balance sim). The Dread group stays: Dread isn't bought with Tribute. The Goods
+ * group is left out for the same reason as Banners (the Black Market sells Goods for Tribute).
  */
 export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): number {
   const d = s.depts[id];

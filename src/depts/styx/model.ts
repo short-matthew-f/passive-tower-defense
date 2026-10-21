@@ -149,11 +149,22 @@ export interface Weights {
   legendary: number;
 }
 
-export function rarityWeights(bait: BaitId, band: number, scent: number, w: number): Weights {
+/** Bait Brews (Potions import, 00 §4): every bait's effect +10% per level. */
+export const brewPotency = (brew: number) => 1 + 0.1 * Math.max(0, Math.min(3, brew));
+/** Gilded Obol payout multiplier (x2, its +100% scaled by Bait Brews). */
+export const gildedMult = (brew = 0) => 1 + brewPotency(brew);
+/** Debt Collectors (Contraband import, 00 §4): Unpaid Debt bait -15% per level. */
+export function baitCost(id: BaitId, collectors = 0): number {
+  const c = BAITS[id].cost;
+  return id === 'debt' ? Math.ceil(c * (1 - 0.15 * Math.max(0, Math.min(3, collectors)))) : c;
+}
+
+export function rarityWeights(bait: BaitId, band: number, scent: number, w: number, brew = 0): Weights {
   const k = scentMult(scent) * 1.03 ** w;
   const wt: Weights = { ...RARITY_W, rare: RARITY_W.rare * k, legendary: RARITY_W.legendary * k };
-  if (bait === 'promise') wt.uncommon *= 1.5;
-  if (bait === 'debt' && band >= 1) wt.rare *= 2;
+  const pot = brewPotency(brew);
+  if (bait === 'promise') wt.uncommon *= 1 + 0.5 * pot;
+  if (bait === 'debt' && band >= 1) wt.rare *= 1 + pot;
   return wt;
 }
 
@@ -193,6 +204,11 @@ export function netEV(bands: number, poles: number): number {
 export function netRate(r: StyxRun): number {
   return ((r.lv.netter + PILK_NETTERS) / NET_S) * netMult(r.lv.nets);
 }
+
+/** Souls (00 §4, 03 §16): a rare-or-better catch = 1, every 10th other catch = 1. Netted souls
+ * use the base rarity weights. */
+export const SOULS_PER_CATCH = (RARITY_W.rare + RARITY_W.legendary) / 100 + (1 - (RARITY_W.rare + RARITY_W.legendary) / 100) / 10;
+export const netSoulsPerH = (r: StyxRun) => netRate(r) * 3600 * SOULS_PER_CATCH;
 
 /** On-screen idle Obols/s (03 §3): R_idle x EV(netDepth) x 1.10^W x yield. Pure and cheap. */
 export function idleObols(r: StyxRun): number {

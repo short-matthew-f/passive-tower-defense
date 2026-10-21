@@ -3,7 +3,7 @@
 import type { Commendation, DeptEcon } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
 import * as M from './model';
-import { idleRateOf } from './sim';
+import { dungeonImports, idleRateOf } from './sim';
 
 const run = (s: DeptSave) => s.run as M.DungeonRun;
 const st = (s: DeptSave) => run(s).stats ?? M.defaultStats();
@@ -33,7 +33,20 @@ export const dungeonEcon: DeptEcon = {
       if (!r) return 0;
       M.normalize(r, save.persistent);
     }
-    return idleRateOf(r);
+    return idleRateOf(r, dungeonImports(save.imports));
+  },
+
+  // Bones (00 §4, 01 §16): 1 per 25 kills. Passive: the floor's idle kill rate (one party of
+  // partySize every PARTY_EVERY s once the layout earns anything).
+  goods: {
+    id: 'bones',
+    rate: (save) => {
+      const r = run(save);
+      if (!r || !r.pieces || !r.ws || !r.stats) return 0;
+      if (!(idleRateOf(r, dungeonImports(save.imports)) > 0)) return 0;
+      return (M.partySize(r.lure ?? 0) * 3600) / M.PARTY_EVERY / 25;
+    },
+    count: (save) => (run(save)?.stats?.kills ?? 0) / 25,
   },
 
   // Infamy skill gate (00 §2.2, 01 §7): slay 2 Champions at Lure >= min(15 + 4N, 40) while leaks

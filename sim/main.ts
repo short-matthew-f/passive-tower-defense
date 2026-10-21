@@ -9,6 +9,7 @@
 //   --live        run the Cauldron's live core every second (no activeRate table)
 //   --quick       reference profile only, 1 seed
 //   --floor-growth X  experiment: economy floor growth per Fall (shipped default 3)
+//   --no-goods    turn the Goods system off (the pre-Goods baseline for before/after tables)
 import { SEAL_DREAD } from '../src/core/meta';
 import { allAdapters, type AdapterOpts } from './adapters';
 import { DEFAULT_CONFIG, PROFILES, simulate, type SimResult } from './meta';
@@ -34,6 +35,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   const skill = (arg(argv, 'skill') ?? 'reference') as Skill;
   const live = argv.includes('--live');
   const floorGrowth = arg(argv, 'floor-growth') ? Number(arg(argv, 'floor-growth')) : undefined;
+  const noGoods = argv.includes('--no-goods');
   const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill }, styx: { skill }, spire: { skill, liveOnly: live } };
 
   // ----- reference profile, N seeds -----
@@ -41,7 +43,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   const perSeed: Metric[][] = [];
   for (let k = 0; k < seeds; k++) {
     const factories = allAdapters(aopts);
-    const cfg = { ...DEFAULT_CONFIG, days, fallAt, floorGrowth, seed: 1 + k, adapters: factories };
+    const cfg = { ...DEFAULT_CONFIG, noGoods, days, fallAt, floorGrowth, seed: 1 + k, adapters: factories };
     const r = simulate(cfg);
     runs.push(r);
     perSeed.push(evaluate(r, factories.map((f) => f(0))));
@@ -54,7 +56,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   let phantomEvents = '';
   if (!argv.includes('--quick')) {
     // Idle-only: two Collect-All visits a day; Infamy must never come from offline.
-    const idle = simulate({ ...DEFAULT_CONFIG, days, profile: PROFILES['idle-only'], adapters: allAdapters(aopts) });
+    const idle = simulate({ ...DEFAULT_CONFIG, noGoods, days, profile: PROFILES['idle-only'], adapters: allAdapters(aopts) });
     const falls = Object.values(idle.tracks).reduce((a, t) => a + t.falls.length, 0);
     side.push({
       id: 'idleOnlyFalls',
@@ -83,7 +85,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
     // Full-suite Tribute sink: the same run with the unbuilt departments' Seals paid as sinks.
     {
       const factories = allAdapters(aopts);
-      const r = simulate({ ...DEFAULT_CONFIG, days, fallAt, phantomSeals: true, adapters: factories });
+      const r = simulate({ ...DEFAULT_CONFIG, noGoods, days, fallAt, phantomSeals: true, adapters: factories });
       const ms = evaluate(r, factories.map((f) => f(0)));
       const pick = ['firstFallAE', 'firstFallDay', 'ratioOffline', 'dreadPacing', 'tributeDay1'];
       for (const m of ms.filter((x) => pick.includes(x.id)))
@@ -97,7 +99,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
     for (const f of allAdapters(aopts)) {
       const a = f(0);
       const fixture = SEAL_DREAD[a.id] ? runs[0].tracks[a.id]?.metaAtUnlock : undefined;
-      const solo = simulate({ ...DEFAULT_CONFIG, days, adapters: [f], initialMeta: fixture });
+      const solo = simulate({ ...DEFAULT_CONFIG, noGoods, days, adapters: [f], initialMeta: fixture });
       const ref = runs[0].tracks[a.id]?.falls[0];
       const s0 = solo.tracks[a.id]?.falls[0];
       const ok = !!s0 && !!ref && s0.cycleAEH <= 1.5 * ref.cycleAEH;
@@ -124,7 +126,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
       ['dungeon', allAdapters({ dungeon: { passive: true } })[2]],
       ['bridge', allAdapters({ bridge: { passive: true } })[3]],
     ] as const) {
-      const r = simulate({ ...DEFAULT_CONFIG, days: 1, profile: PROFILES.solo, noMeta: true, adapters: [f] });
+      const r = simulate({ ...DEFAULT_CONFIG, noGoods, days: 1, profile: PROFILES.solo, noMeta: true, adapters: [f] });
       const tr = r.tracks[id];
       let b = 0;
       let i = 0;

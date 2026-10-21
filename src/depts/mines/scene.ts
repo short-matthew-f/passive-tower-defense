@@ -501,10 +501,10 @@ export class MinesScene implements DeptScene {
   // ---------- goblins ----------
 
   private syncGoblins(initial: boolean): void {
-    const want = M.goblins(this.run);
+    const want = M.crewSize(this.run, this.ctx.save.imports?.bones ?? 0);
     while (this.gobs.length < want) {
       const i = this.gobs.length;
-      const sapper = i >= this.run.grunts;
+      const sapper = M.isSapperSlot(this.run, i);
       const g = new Graphics(goblinArt(0, sapper));
       const side = i % 2 === 0 ? -1 : 1;
       const x = side < 0 ? this.wallX - 8 : this.wallX + this.T * M.GRID + 8;
@@ -518,15 +518,21 @@ export class MinesScene implements DeptScene {
       this.gobs.push(gob);
       this.gobLayer.addChild(g);
       if (!initial) {
-        if (want === 1 && !this.ctx.seen('m.firstGoblin')) {
+        const hired = M.goblins(this.run);
+        if (hired === 1 && !this.ctx.seen('m.firstGoblin')) {
           this.ctx.markSeen('m.firstGoblin');
           this.ctx.say('firstGoblin', { milestone: true });
-        } else if (want === 4 && !this.ctx.seen('m.fourGoblins')) {
+        } else if (hired === 4 && !this.ctx.seen('m.fourGoblins')) {
           this.ctx.markSeen('m.fourGoblins');
           this.ctx.say('fourGoblins', { milestone: true });
         }
       }
     }
+    // Crew order can shift (a Sapper hired after Bone Miners arrived): re-label every slot.
+    this.gobs.forEach((g, k) => {
+      g.sapper = M.isSapperSlot(this.run, k);
+      g.g.tint = M.isBoneSlot(this.run, k) ? 0xd8d0b8 : 0xffffff;
+    });
   }
 
   private standPos(t: Tile, gi: number): { x: number; y: number; face: number } {
@@ -688,7 +694,7 @@ export class MinesScene implements DeptScene {
     }
 
     let dmg = M.fistDamage(this.run) * soft;
-    const crit = rand() < M.critChance(this.run.critC);
+    const crit = rand() < M.critChance(this.run.critC) || M.stewCrit(this.ctx.save.imports?.potions ?? 0, this.run.stats.taps);
     if (crit) dmg *= M.critMult(this.run.critP);
     if (beatHit) {
       this.streak++;
@@ -993,9 +999,14 @@ export class MinesScene implements DeptScene {
     }
   }
 
+  /** Goblins on the wall, Bone Miners included (they take crew slots). */
+  private crewNow(): number {
+    return M.crewSize(this.run, this.ctx.save.imports?.bones ?? 0);
+  }
+
   private quickHire(): void {
     const crew = this.groups[1].entries;
-    const e = M.goblins(this.run) < M.MAX_GOBLINS ? crew[0] : crew[2];
+    const e = this.crewNow() < M.MAX_GOBLINS ? crew[0] : crew[2];
     if (e.canAfford() && e.level() < e.max) {
       e.buy();
       this.ctx.saveSoon();
@@ -1058,7 +1069,7 @@ export class MinesScene implements DeptScene {
         this.ctx.say('stratum', { milestone: true, vars: { name: M.STRATA[st] } });
       }
     }
-    if (M.goblins(this.run) !== this.gobs.length) this.syncGoblins(false);
+    if (M.crewSize(this.run, this.ctx.save.imports?.bones ?? 0) !== this.gobs.length) this.syncGoblins(false);
 
     const frozen = this.hitStop > 0;
     if (frozen) this.hitStop -= dt;
@@ -1286,7 +1297,7 @@ export class MinesScene implements DeptScene {
       }
     } else {
       const zap = this.per.chain > 0 ? `  ZAP ${Math.round(M.chainChance(this.per.chain) * 100)}%` : '';
-      this.status.set(`CRIT ${Math.round(M.critChance(r.critC) * 100)}% X${M.critMult(r.critP)}${zap}  CREW ${M.goblins(r)}/${M.MAX_GOBLINS}`, C.inkDim);
+      this.status.set(`CRIT ${Math.round(M.critChance(r.critC) * 100)}% X${M.critMult(r.critP)}${zap}  CREW ${this.crewNow()}/${M.MAX_GOBLINS}`, C.inkDim);
     }
 
     // Depth row.
@@ -1317,7 +1328,7 @@ export class MinesScene implements DeptScene {
     }
 
     // Buttons.
-    if (M.goblins(r) < M.MAX_GOBLINS) {
+    if (this.crewNow() < M.MAX_GOBLINS) {
       const cost = M.hireCost(r);
       this.hireBtn.setLabel('HIRE GOBLIN', fm(cost)).setEnabled(r.bank >= cost);
     } else if (r.picks < M.PICKS_MAX) {
