@@ -23,7 +23,8 @@ import {
 } from './units';
 
 /** Bumped when battle or shop rules change; a paused Run keeps the version it started with. */
-export const PARAMS_VERSION = 2; // 2: the Huntmaster 8/14 -> 14/30, gentler Stakes growth (sim pass 5)
+export const PARAMS_VERSION = 3; // 2: the Huntmaster 8/14 -> 14/30, gentler Stakes growth (sim pass 5);
+// 3: tactics cards 12/15/18, rival stats grow x1.04 per level above Stakes 10, Huntmaster scars.
 
 export const UNIT_COST = 3;
 export const ROLL_COST = 1;
@@ -42,6 +43,7 @@ export interface Pet {
   xp: number;
   it: ItemId | null;
   br?: 1; // Royal Brand
+  fb?: 1; // the Run's first-bought unit (Marked Prey, tactics card 15)
 }
 
 export interface ShopUnit {
@@ -99,6 +101,8 @@ export interface RunState {
   bonus?: number;
   crestsWon?: number;
   crown?: boolean;
+  /** This Run left the Huntmaster a scar (summary line). */
+  scarred?: boolean;
 }
 
 /** Everything the Run needs from upgrades and persistent buys (snapshotted at Run start). */
@@ -115,6 +119,8 @@ export interface RunOpts {
   sigils: number;
   shade: number;
   carry?: ShopUnit | null; // Pedigree: a frozen unit carried over
+  /** Huntmaster scars this cycle (each one -SCAR_STEP to his whole party), snapshotted at Run start. */
+  scars?: number;
 }
 
 export function lvlOf(xp: number): number {
@@ -292,6 +298,7 @@ export function buy(rs: RunState, i: number, slot: number): BuyResult {
     res = { ok: true, merged: true, levelUp: lv, slot };
   } else {
     rs.line[slot] = { k: s.k, a: s.a, h: s.h, xp: 0, it: null };
+    if (!rs.line.some((q, j) => q && j !== slot && q.fb) && rs.buys === 1) rs.line[slot]!.fb = 1;
     res = { ok: true, slot };
   }
   // Buy trigger: Dung Beetle, 2 random friends +L attack.
@@ -429,6 +436,7 @@ export function prepareLine(line: (Pet | null)[], hardy: number, drill = 0): Fig
       hp: r5(r5((p.h + drill) * hm) * bm),
       item: p.it,
       brand: !!p.br,
+      marked: !!p.fb,
       ref: i,
     });
   });
@@ -548,7 +556,18 @@ export const rivalSize = (r: number) => Math.min(5, 1 + Math.ceil(r / 2));
  * greedy bot fell to ~5% Triumphs at Stakes 10 even with Hardy Stock maxed, so the MVP cap (10) was
  * out of reach for anyone but experts. */
 export const STAKES_STAT = 1.1;
-export const stakesStat = (S: number) => STAKES_STAT ** S;
+/** Above Stakes 10 rivals grow gently (x STAKES_STAT_HI per level) and the tactics cards 12/15/18
+ * carry the difficulty instead (07 §7: "Like Menace, Stakes adds rules"). SIM-TUNED: at the full
+ * x1.1 the reference bot with Hardy Stock maxed won ~4% of Runs at Stakes 14 and none at 18, so
+ * the Infamy target could not follow the cards past 10 (W-21). Params version 3; a paused Run of
+ * an older version keeps x1.1 throughout. */
+export const STAKES_STAT_HI = 1.02;
+export function stakesStat(S: number, pv = PARAMS_VERSION): number {
+  if (pv < 3 || S <= 10) return STAKES_STAT ** S;
+  return STAKES_STAT ** 10 * STAKES_STAT_HI ** (S - 10);
+}
+/** The tactics level a Run of params version pv plays at (cards 12+ arrived in version 3). */
+export const tacticsFor = (S: number, pv = PARAMS_VERSION) => (pv < 3 ? Math.min(S, 11) : S);
 
 /** Archetype for round r of a seeded series. */
 export function pickArch(r: number, seed: number): ArchId {
@@ -579,14 +598,14 @@ export function rivalBase(r: number, seed: number): { arch: ArchId; line: Draft[
   return out;
 }
 
-function toFighters(line: Draft[], S: number): Fighter[] {
-  const m = stakesStat(S);
+function toFighters(line: Draft[], S: number, pv = PARAMS_VERSION, scale = 1): Fighter[] {
+  const m = stakesStat(S, pv) * scale;
   return line.map((t) => ({ kind: t.k, lvl: lvlOf(t.xp), atk: r5(t.a * m), hp: r5(t.h * m), item: t.it }));
 }
 
-export function rival(r: number, S: number, seed: number): RivalInfo {
+export function rival(r: number, S: number, seed: number, pv = PARAMS_VERSION): RivalInfo {
   const b = rivalBase(r, seed);
-  return { arch: b.arch, line: toFighters(b.line, S) };
+  return { arch: b.arch, line: toFighters(b.line, S, pv) };
 }
 
 /** The Huntmaster's own stats at Stakes 0 (07 §5.2 seed 8/14, Armor 2).
@@ -604,8 +623,19 @@ export const HUNT_HP = 30;
  * "Pass 5"). */
 export const HUNT_STAKES_EXP = 0.5;
 
+/**
+ * Huntmaster scars (sim pass 6, the late-cycle stall): every Run at Stakes >= the Infamy target
+ * that reaches the Huntmaster and still Retreats leaves him a scar for the rest of the cycle, each
+ * one -SCAR_STEP to his whole party's attack and HP (max SCAR_MAX). A Crown at the target or a
+ * Fall clears them. One Triumph at the target holds the skill gate, so a run of bad luck at the
+ * last targets now bends instead of stalling a cycle for a week ("He's limping, Chief").
+ */
+export const SCAR_STEP = 0.05;
+export const SCAR_MAX = 3;
+export const scarMult = (scars = 0) => 1 - SCAR_STEP * Math.max(0, Math.min(SCAR_MAX, scars | 0));
+
 /** The Huntmaster bout: 4 beasts drafted at budget rB plus the Huntmaster (HUNT_ATK/HUNT_HP, Armor 2) at the back. */
-export function huntmaster(rB: number, S: number, seed: number): RivalInfo {
+export function huntmaster(rB: number, S: number, seed: number, pv = PARAMS_VERSION, scars = 0): RivalInfo {
   const arch = pickArch(rB, hashStr('hunt', seed));
   let team = ghostDraft(arch, rB, hashStr('huntdraft', seed, rB));
   team = [...team].sort((x, y) => unitValue(y.k, y.a, y.h, lvlOf(y.xp)) - unitValue(x.k, x.a, x.h, lvlOf(x.xp))).slice(0, 4);
@@ -615,17 +645,18 @@ export function huntmaster(rB: number, S: number, seed: number): RivalInfo {
     t.a++;
     t.h++;
   }
-  const m = stakesStat(S);
-  const line = toFighters(orderLine(team), S);
-  const mh = m ** HUNT_STAKES_EXP;
+  const m = stakesStat(S, pv);
+  const sm = pv < 3 ? 1 : scarMult(scars);
+  const line = toFighters(orderLine(team), S, pv, sm);
+  const mh = m ** HUNT_STAKES_EXP * sm;
   line.push({ kind: 'hunt', lvl: 1, atk: r5(HUNT_ATK * mh), hp: r5(HUNT_HP * mh), armor: 2 });
   return { arch: 'hunt', line };
 }
 
 /** The rival you face next in this Run (the scout shows it). */
 export function nextRival(rs: RunState): RivalInfo {
-  if (rs.wins >= WINS_TO_TRIUMPH - 1) return huntmaster(rs.huntB || Math.max(rs.round, 8), rs.stakes, rs.seed);
-  return rival(rs.round, rs.stakes, hashStr('run', rs.seed));
+  if (rs.wins >= WINS_TO_TRIUMPH - 1) return huntmaster(rs.huntB || Math.max(rs.round, 8), rs.stakes, rs.seed, rs.pv, rs.opts.scars ?? 0);
+  return rival(rs.round, rs.stakes, hashStr('run', rs.seed), rs.pv);
 }
 
 // ---------- Teeth (07 §8) ----------
@@ -674,7 +705,7 @@ export function fight(rs: RunState, log = true): FightOutcome {
   const riv = nextRival(rs);
   const team = prepareLine(rs.line, rs.opts.hardy);
   const seed = battleSeed(team, riv.line, rs.round, rs.pv);
-  const result = battle(team, riv.line, { seed, tactics: rs.stakes, sigils: rs.opts.sigils, shade: rs.opts.shade, log });
+  const result = battle(team, riv.line, { seed, tactics: tacticsFor(rs.stakes, rs.pv), sigils: rs.opts.sigils, shade: rs.opts.shade, log });
   for (const g of result.koGains) {
     const p = rs.line[g.ref];
     if (p) {

@@ -132,6 +132,10 @@ export const sfx = {
     tone(2200, 0.08, 0.07 * v, 'sine', delay);
     tone(2600, 0.18, 0.07 * v, 'sine', delay + 0.09, 200);
   },
+  /** Snarl's hyena cackle (wins, Triumphs). */
+  cackle(v: number): void {
+    for (let i = 0; i < 5; i++) tone(520 + i * 40 + Math.random() * 60, 0.05, 0.06 * v, 'square', i * 0.07, 180);
+  },
   /** Snarl: gravel barks. */
   snarl(v: number, words = 3): void {
     for (let i = 0; i < words; i++) tone(140 + Math.random() * 60, 0.07, 0.08 * v, 'sawtooth', i * 0.11, -40);

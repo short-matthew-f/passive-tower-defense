@@ -51,6 +51,7 @@ import {
   nextRival,
   prepareLine,
   runEndBonus,
+  SCAR_MAX,
   SHOWMAN_STEP,
   UNIT_COST,
   type Pet,
@@ -266,12 +267,15 @@ export const createPit = (opts: PitOpts = {}): AdapterFactory => (seed) => {
         const held = heldCrownLevel(r.crowns);
         if (held >= 0) env.raiseSkill(held);
         if (rs.stakes >= target - 2) crests = 2;
+        if (rs.stakes >= target) r.scars = 0;
         // Buying a Stakes level sets the dial to it (scene buyStakes); a Triumph steps back up.
         drop = Math.max(0, drop - 1);
       } else {
         r.stats.retreats++;
         r.stats.lowRetreats = rs.wins < 3 ? r.stats.lowRetreats + 1 : 0;
         if (rs.wins >= 6 && rs.stakes >= 3) crests = 1;
+        // Huntmaster scars (scene finalizeRun): a lost bout at the target scars him for the cycle.
+        if (rs.stakes >= target && rs.huntB > 0) r.scars = Math.min(SCAR_MAX, (r.scars ?? 0) + 1);
         // A Retreat steps one down (Snarl's "Drop Stakes by 2?" after three bad Runs is the same
         // idea; a player adjusts sooner).
         drop = Math.min(r.stakesBought, drop + 1);
@@ -452,7 +456,11 @@ export const createPit = (opts: PitOpts = {}): AdapterFactory => (seed) => {
             const L = e.level();
             const touchesIdle = ['hardy', 'pliers', 'renown', 'pace', 'drill'].includes(id);
             if (opts.passive && !touchesIdle) continue;
-            const i1 = touchesIdle ? idleWith((q) => (q.lv[id] = L + 1)) : i0;
+            // Hardy Stock and Drill Yard make every warband stronger; a player buys them for the
+            // Runs even when a reseeded Gauntlet happens to read a hair lower (07 §3 item 4: the
+            // Gauntlet is only monotone on average, its battle seeds hash the stats).
+            const i1raw = touchesIdle ? idleWith((q) => (q.lv[id] = L + 1)) : i0;
+            const i1 = id === 'hardy' || id === 'drill' ? Math.max(i0, i1raw) : i1raw;
             const q = { ...r, lv: { ...r.lv, [id]: L + 1 } };
             const a1 = opts.passive ? 0 : activeEst(q);
             const gain = value(i1, a1) - v0;

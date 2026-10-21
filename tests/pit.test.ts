@@ -90,7 +90,9 @@ describe('war pit shop and economy', () => {
     expect(heldCrownLevel({ 6: 2, 2: 5 })).toBe(6);
     expect(heldCrownLevel({ 4: 0 })).toBe(-1);
     expect(pitEcon.skillTarget(0)).toBe(4);
-    expect(pitEcon.skillTarget(5)).toBe(10);
+    expect(pitEcon.skillTarget(3)).toBe(10);
+    expect(pitEcon.skillTarget(5)).toBe(14); // cap 20 with the cards 12/15/18 (07 §7)
+    expect(pitEcon.skillTarget(12)).toBe(20);
   });
 
   it('idleRate is positive for the starter garrison, memoized, and grows with a stronger warband', () => {
@@ -113,3 +115,112 @@ function prepareStrong() {
   ];
 }
 void prepareLine;
+
+// ---------- revision: tactics cards 12/15/18, scars, advancement hooks ----------
+import { huntmaster, newPet, stakesStat, tacticsFor, PARAMS_VERSION, scarMult } from '../src/depts/pit/run';
+import { applyHeadStart, buySkin, oldGuard, readyBuys, skinOf, stewardCandidates, TACTICS, normalize } from '../src/depts/pit/def';
+
+const mkSave = (run = defaultRun(), per = defaultPersistent(), n = 0) => ({ cycle: { n }, imports: {}, run, persistent: per, seen: {} }) as unknown as DeptSave;
+
+describe('war pit later cards and params pinning', () => {
+  it('ships six tactics cards and pins old paused Runs to their rules', () => {
+    expect(TACTICS.map((t) => t.at)).toEqual([3, 6, 9, 12, 15, 18]);
+    expect(PARAMS_VERSION).toBeGreaterThanOrEqual(3);
+    // A version-2 Run keeps x1.1 per level and never sees cards above 11.
+    expect(stakesStat(14, 2)).toBeCloseTo(1.1 ** 14, 9);
+    expect(stakesStat(14)).toBeLessThan(1.1 ** 14);
+    expect(stakesStat(8)).toBeCloseTo(1.1 ** 8, 9);
+    expect(tacticsFor(18, 2)).toBe(11);
+    expect(tacticsFor(18)).toBe(18);
+    expect(JSON.stringify(rival(6, 14, 7, 2).line)).not.toBe(JSON.stringify(rival(6, 14, 7).line));
+  });
+
+  it('War Drums, Marked Prey and the Oath change battles at their levels', () => {
+    const riv = rival(6, 0, 3).line;
+    const seed = 5;
+    const drums = battle(teamA, riv, { seed, tactics: 12, log: true });
+    const start = drums.frames.find((f) => f.e === 'start')!;
+    const base = battle(teamA, riv, { seed, tactics: 11, log: true }).frames.find((f) => f.e === 'start')!;
+    expect(start.lines[1].reduce((a, u) => a + u.a, 0)).toBe(base.lines[1].reduce((a, u) => a + u.a, 0) + riv.length);
+    // Marked Prey: the marked (first-bought) unit takes 3 before anything else.
+    const marked = teamA.map((f, i) => ({ ...f, marked: i === 2 }));
+    const mp = battle(marked, riv, { seed, tactics: 15, log: true });
+    const trig = mp.frames.find((f) => f.e === 'trig')!;
+    expect(trig.lines[0][2].h).toBe(teamA[2].hp - 3);
+    // Huntmaster's Oath: he gets up once.
+    const hm = huntmaster(8, 18, 11);
+    const weak: Fighter[] = [{ kind: 'gargoyle', lvl: 3, atk: 60, hp: 400 }];
+    const a = battle(weak, hm.line, { seed: 1, tactics: 18 });
+    const b = battle(weak, hm.line, { seed: 1, tactics: 17 });
+    expect(a.exchanges).toBeGreaterThan(b.exchanges);
+  });
+
+  it('scars weaken the Huntmaster party, capped', () => {
+    const a = huntmaster(8, 10, 4, PARAMS_VERSION, 0).line;
+    const b = huntmaster(8, 10, 4, PARAMS_VERSION, 3).line;
+    const sum = (l: Fighter[]) => l.reduce((x, f) => x + f.atk + f.hp, 0);
+    expect(sum(b)).toBeLessThan(sum(a));
+    expect(scarMult(9)).toBe(scarMult(3));
+    // Version 2 ignores scars.
+    expect(JSON.stringify(huntmaster(8, 10, 4, 2, 3).line)).toBe(JSON.stringify(huntmaster(8, 10, 4, 2, 0).line));
+  });
+});
+
+describe('war pit advancement hooks', () => {
+  it('Head Start is idempotent and only touches the run', () => {
+    const save = mkSave();
+    applyHeadStart(save, 2);
+    const once = JSON.stringify(save);
+    applyHeadStart(save, 2);
+    expect(JSON.stringify(save)).toBe(once);
+    const r = save.run as ReturnType<typeof defaultRun>;
+    expect(r.stakesBought).toBe(4);
+    expect(r.lv.drill).toBe(3);
+    expect(r.stakes).toBe(0);
+    expect(JSON.stringify(save.persistent)).toBe(JSON.stringify(defaultPersistent()));
+  });
+
+  it('Old Guard brings the last stationed warband back after a Fall, once per cycle start', () => {
+    const per = defaultPersistent();
+    per.guard = prepareStrong();
+    const save = mkSave(defaultRun(), per);
+    oldGuard.apply(save);
+    const r = save.run as ReturnType<typeof defaultRun>;
+    expect(r.garrison.map((p) => p.k)).toEqual(prepareStrong().map((p) => p.k));
+    oldGuard.apply(save);
+    expect(r.garrison.length).toBe(5);
+    // Mid-cycle (already stationed): no change.
+    r.stats.stations = 1;
+    r.garrison = [newPet('rat')];
+    oldGuard.apply(save);
+    expect(r.garrison.length).toBe(1);
+  });
+
+  it('Steward candidates exclude the dial and buy() only raises a level', () => {
+    const run = defaultRun();
+    run.bank = 1e9;
+    const save = mkSave(run);
+    const cands = stewardCandidates(save);
+    expect(cands.some((c) => c.id === 'stakes' || c.id === 'showman' || c.id === 'grit')).toBe(false);
+    const pace = cands.find((c) => c.id === 'pace')!;
+    expect(pace.deltaIdle).toBeGreaterThan(0);
+    pace.buy();
+    expect(run.lv.pace).toBe(1);
+    expect(run.bank).toBe(1e9);
+    expect(readyBuys(save).length).toBeGreaterThan(0);
+    expect(readyBuys(save).some((b) => b.label.startsWith('Stakes'))).toBe(true);
+  });
+
+  it('skins cost Crests and old saves normalize', () => {
+    const per = defaultPersistent();
+    const run = defaultRun();
+    delete (per as Partial<typeof per>).skins;
+    delete (per as Partial<typeof per>).log;
+    normalize(run, per);
+    per.crests = 4;
+    expect(buySkin(per, 'wolf', 2)).toBe(true);
+    expect(skinOf(per, 'wolf')).toBe(2);
+    expect(buySkin(per, 'wolf', 3)).toBe(false); // 1 Crest left
+    expect(per.crests).toBe(1);
+  });
+});

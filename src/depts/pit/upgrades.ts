@@ -1,7 +1,7 @@
 // The War Pit upgrade tree (07 §6) as shared-sheet groups: Pens, Spoils, Kennels (Teeth) and the
 // Bestiary (Crests, persistent: the 6 ★ beasts and the Pedigrees). Stakes live on the home panel.
 import type { DeptCtx, UpgradeEntry, UpgradeGroup } from '../../core/dept';
-import { PEDIGREES, UPGRADES, lvOf, upCost, upLocked, type PitPersistent, type PitRun, type UpDef } from './def';
+import { PEDIGREES, SKINS, UPGRADES, lvOf, skinsOwned, upCost, upLocked, type PitPersistent, type PitRun, type UpDef } from './def';
 import { BESTIARY, UNITS } from './units';
 
 export interface Hooks {
@@ -71,11 +71,29 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
     ),
   );
 
+  const header = (id: string, name: string): UpgradeEntry => ({ id, name, header: true, desc: () => '', level: () => 0, max: 1, cost: () => 0, canAfford: () => false, buy: () => {} });
+  // Beast coats (07 §6D repeatable sink): bought per beast from the Standing Warband (tap a beast
+  // twice at home); this row only counts them.
+  const coats: UpgradeEntry = {
+    id: 'crests.coats',
+    name: 'Beast Coats',
+    desc: () => 'Tap a Standing beast twice to dress it',
+    level: () => skinsOwned(p()),
+    levelText: () => `${skinsOwned(p())} owned`,
+    max: Infinity,
+    cost: () => 3,
+    currency: 'Crests',
+    costText: () => '3 EACH',
+    buyLabel: 'HOME',
+    canAfford: () => false,
+    buy: () => {},
+  };
+  void SKINS;
   return [
     { name: 'Pens', entries: branch('pens') },
     { name: 'Spoils', entries: branch('spoils') },
     { name: 'Kennels', entries: branch('kennels') },
-    { name: 'Crests', entries: [...beasts, ...peds] },
+    { name: 'Crests', entries: [header('crests.beasts', 'BESTIARY'), ...beasts, header('crests.peds', 'PEDIGREES'), ...peds, coats] },
   ];
 }
 

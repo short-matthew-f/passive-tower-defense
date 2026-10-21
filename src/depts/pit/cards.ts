@@ -1,7 +1,7 @@
 // The 34x40 unit card (07 §13 card grid): sprite, level pips and merge XP, held item, trigger
 // glyph, status slot and the attack | HP stat bar. One CardView per slot, created once; it only
 // redraws its Graphics when its state key changes, and every PixelText is reused with .set().
-import { Container, Graphics, Rectangle, Sprite, Texture } from 'pixi.js';
+import { Container, Graphics, Rectangle, Sprite, Texture, type FederatedPointerEvent } from 'pixi.js';
 import { PixelText, measure } from '../../ui/font';
 import { PAL, TIER_COL, beastTex, foodTex, itemTex, statusTex, trigTex } from './art';
 import { xpPips } from './run';
@@ -32,11 +32,13 @@ export interface CardState {
   empty?: boolean;
   dim?: boolean;
   cost?: number;
+  /** Beast skin (SKINS index) for your own beasts. */
+  skin?: number;
 }
 
 function keyOf(s: CardState | null): string {
   if (!s) return '-';
-  return [s.k, s.food, s.a, s.h, s.lvl, s.xp, s.it, s.brand ? 1 : 0, s.armor, s.thorns, s.skip, s.rival, s.hide ? 1 : 0, s.sel ? 1 : 0, s.target ? 1 : 0, s.empty ? 1 : 0, s.dim ? 1 : 0, s.cost].join('|');
+  return [s.k, s.food, s.a, s.h, s.lvl, s.xp, s.it, s.brand ? 1 : 0, s.armor, s.thorns, s.skip, s.rival, s.hide ? 1 : 0, s.sel ? 1 : 0, s.target ? 1 : 0, s.empty ? 1 : 0, s.dim ? 1 : 0, s.cost, s.skin ?? 0].join('|');
 }
 
 export class CardView extends Container {
@@ -62,7 +64,7 @@ export class CardView extends Container {
   private statusT = 0;
   private bob = 0;
 
-  constructor(onTap: () => void, bobPhase = 0) {
+  constructor(onTap: () => void, bobPhase = 0, onDown?: (e: FederatedPointerEvent) => void) {
     super();
     this.spr.scale.set(2);
     this.spr.position.set(5, 4);
@@ -82,6 +84,8 @@ export class CardView extends Container {
       e.stopPropagation();
       onTap();
     });
+    // Drag and hold start here; the scene follows the pointer (tap-tap still works).
+    if (onDown) this.on('pointerdown', (e) => onDown(e));
     this.bob = bobPhase;
   }
 
@@ -136,7 +140,7 @@ export class CardView extends Container {
       return;
     }
     const k = s.k!;
-    this.spr.texture = beastTex(k);
+    this.spr.texture = beastTex(k, s.rival === undefined ? (s.skin ?? 0) : 0);
     this.spr.position.set(5, 4);
     this.spr.visible = true;
     // Level pips (top-left) and merge XP dots under them.

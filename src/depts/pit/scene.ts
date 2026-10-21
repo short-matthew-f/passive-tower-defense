@@ -4,15 +4,21 @@
 // Rendering: every CardView, PixelText and Button is created once and updated in place; one fx
 // Graphics is redrawn per frame for a bounded particle pool; modal panels are built on open and
 // destroyed on close.
-import { Container, Graphics, Rectangle, Sprite } from 'pixi.js';
-import type { DeptCtx, DeptScene, UpgradeGroup } from '../../core/dept';
+import { Container, Graphics, Rectangle, Sprite, type FederatedPointerEvent } from 'pixi.js';
+import type { DeptCtx, DeptScene, Rect, SayOpts, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
 import { PixelText, measure, wrap } from '../../ui/font';
 import { Button, C, drawPanel } from '../../ui/widgets';
 import { PAL, beastTex, foodTex, statusTex } from './art';
-import { CardView, STEP, type CardState } from './cards';
+import { CardView, CH, CW, STEP, type CardState } from './cards';
 import {
+  PLAYTEST_LOG_MAX,
+  SKINS,
+  SKIN_COST,
+  buySkin,
+  ownsSkin,
+  skinOf,
   STAKES_MAX,
   TACTICS,
   crownsAtOrAbove,
@@ -26,7 +32,10 @@ import {
   pitEcon,
   teethMult,
   runOpts,
+  runGauntlet,
   runGauntletLog,
+  importShade,
+  importSigils,
   stakesCost,
   type PitPersistent,
   type PitRun,
@@ -34,6 +43,8 @@ import {
 } from './def';
 import type { Fighter, Frame, Snap } from './engine';
 import {
+  SCAR_MAX,
+  SCAR_STEP,
   WINS_TO_TRIUMPH,
   autoSlot,
   brand,
@@ -85,6 +96,20 @@ interface Play {
 }
 
 const MAX_PARTICLES = 140;
+/** Logical px a press must travel before it becomes a drag, and seconds before it is a hold. */
+const DRAG_PX = 5;
+const HOLD_S = 0.45;
+
+interface Drag {
+  g: Group;
+  i: number;
+  sx: number;
+  sy: number;
+  x: number;
+  y: number;
+  t: number; // press time (performance.now ms)
+  moving: boolean;
+}
 const W178 = 5 * STEP - 2;
 
 export class PitScene implements DeptScene {
@@ -161,6 +186,14 @@ export class PitScene implements DeptScene {
   private flavorT = 30;
   private groups: UpgradeGroup[];
   private upPulse = 0;
+  // Drag and hold (07 §11), the sell bin's 2 s undo, the return ritual.
+  private ghost = new Sprite();
+  private drag: Drag | null = null;
+  private eatTap = false;
+  private undo: { snap: string; t: number } | null = null;
+  private homeSel = -1;
+  private summaryRects: Record<string, Rect> = {};
+  private ritual: { t: number; end: number; tapped: number; resolve: (v: number) => void; btn: Button; label: PixelText; done: boolean; start?: () => void; finish?: () => void } | null = null;
 
   // Layout (stage px).
   private x0 = 0;
@@ -194,21 +227,21 @@ export class PitScene implements DeptScene {
     this.arena.addChild(this.bg);
 
     for (let i = 0; i < 5; i++) {
-      const r = new CardView(() => this.tap('rival', i), i * 0.37);
-      const l = new CardView(() => this.tap('line', i), i * 0.53 + 0.2);
+      const r = new CardView(() => this.tap('rival', i), i * 0.37, (e) => this.press('rival', i, e));
+      const l = new CardView(() => this.tap('line', i), i * 0.53 + 0.2, (e) => this.press('line', i, e));
       this.rivalCards.push(r);
       this.lineCards.push(l);
       this.arena.addChild(r, l);
     }
     this.arena.addChild(this.fx);
     for (let i = 0; i < 6; i++) {
-      const c = new CardView(() => this.tap('shop', i), i * 0.41);
+      const c = new CardView(() => this.tap('shop', i), i * 0.41, (e) => this.press('shop', i, e));
       this.shopCards.push(c);
       this.shopLayer.addChild(c);
       this.makeStrip('unit', i);
     }
     for (let i = 0; i < 2; i++) {
-      const c = new CardView(() => this.tap('food', i));
+      const c = new CardView(() => this.tap('food', i), 0, (e) => this.press('food', i, e));
       this.foodCards.push(c);
       this.shopLayer.addChild(c);
       this.makeStrip('food', i);
@@ -253,6 +286,29 @@ export class PitScene implements DeptScene {
       this.finishResult();
     });
     this.arena.addChild(this.banner);
+
+    // Drag (07 §11 "drag works too") and hold-to-inspect follow the pointer at the root.
+    this.ghost.visible = false;
+    this.ghost.scale.set(2);
+    this.ghost.alpha = 0.85;
+    this.ghost.eventMode = 'none';
+    this.root.addChild(this.ghost);
+    this.root.eventMode = 'static';
+    this.root.on('globalpointermove', (e) => this.dragMove(e));
+    this.root.on('pointerup', () => this.release());
+    this.root.on('pointerupoutside', () => this.release());
+    this.tacticBox.eventMode = 'static';
+    this.tacticBox.cursor = 'pointer';
+    this.tacticBox.hitArea = new Rectangle(-2, -2, TACTICS.length * 18 + 2, 16);
+    this.tacticBox.on('pointertap', (e) => {
+      e.stopPropagation();
+      this.explainCards();
+    });
+    this.crownText.eventMode = 'static';
+    this.crownText.on('pointertap', (e) => {
+      e.stopPropagation();
+      this.explainCrowns();
+    });
 
     this.layout();
     this.restore();
@@ -421,9 +477,11 @@ export class PitScene implements DeptScene {
     for (const c of this.foodCards) c.visible = run;
     for (const s of this.strips) s.c.visible = shopUi;
     this.gritFull.visible = this.gritEmpty.visible = run;
+    this.homeSel = -1;
     if (home) {
       this.skirmish.wait = 0.4;
       this.skirmishArch = undefined;
+      if (this.per.crests >= SKIN_COST && this.run.garrison.length) this.ctx.lesson('skins');
     }
     if (m === 'shop') {
       this.scout = null;
@@ -486,8 +544,17 @@ export class PitScene implements DeptScene {
       return;
     }
     this.run.stakes = v;
+    this.ctx.markSeen('pit.stakesSet');
     sfx.tap(this.vol());
     this.explainStakes();
+    this.ctx.saveSoon();
+  }
+
+  /** Snarl's struggle offer (07 §4): "Drop Stakes by 2?" in one tap. Lowering is free. */
+  private dropStakes(): void {
+    if (this.run.cur && !this.run.cur.ended) return;
+    this.setStakes(this.run.stakes - 2);
+    this.run.stats.lowRetreats = 0;
   }
 
   private buyStakes(): void {
@@ -501,17 +568,39 @@ export class PitScene implements DeptScene {
     this.run.stakes = b + 1;
     sfx.levelUp(this.vol());
     this.ctx.haptic(15);
-    if (b === 0) this.ctx.say('stakesLesson', { milestone: true });
-    else if ((b + 1) % 3 === 0) this.ctx.say('dialRaised', { milestone: true });
+    const L = b + 1;
+    // dial_raised (00 §5.4.3, 07 §18): level 1 runs the Stakes lesson, then every 3rd level (each
+    // brings a tactics card) and every new all-time high; re-buying after a Fall stays silent.
+    const best = this.ctx.game.save.depts.pit?.seen['pit.stakesMax'] ?? 0;
+    if (L === 1) this.ctx.lesson('stakes');
+    else if (L % 3 === 0) {
+      this.say('dialRaised', { type: 'dial_raised', key: `stakes${L}` });
+      if (L > 3) this.ctx.lesson('cards');
+    } else if (L > best) this.say('stakesMax', { type: 'dial_raised', key: `max${L}` });
+    if (L > best) this.save.seen['pit.stakesMax'] = L;
     this.explainStakes();
     this.ctx.saveSoon();
+  }
+
+  private explainCards(): void {
+    const S = this.run.stakes;
+    this.ctx.markSeen('pit.tactics');
+    if (S >= 6 || this.run.stakesBought >= 6) this.ctx.markSeen('pit.tactics2');
+    const lines = TACTICS.map((t) => `${S >= t.at ? '+' : '-'} ${t.at} ${t.name}: ${t.text}`);
+    this.openPanel(`TACTICS CARDS (STAKES ${S})`, [...lines, 'ACTIVE AT OR ABOVE THEIR LEVEL.'], [{ label: 'GOT IT', onTap: () => this.closePanel() }]);
+  }
+
+  private explainCrowns(): void {
+    const target = pitEcon.skillTarget(this.save.cycle.n);
+    const sc = this.run.scars ?? 0;
+    this.setInfo(`PIT CROWN: BEAT THE HUNTMASTER AT STAKES ${target}+.${sc ? ` HE CARRIES ${sc} SCAR${sc > 1 ? 'S' : ''}: -${Math.round(sc * SCAR_STEP * 100)}% HIS PARTY.` : ' EACH LOST BOUT THERE SCARS HIM.'}`, 6);
   }
 
   private explainStakes(): void {
     const S = this.run.stakes;
     const next = TACTICS.find((t) => t.at > S);
     const act = TACTICS.filter((t) => t.at <= S).map((t) => t.name).join(', ');
-    this.setInfo(`STAKES ${S}: PAY X${(1.22 ** S).toFixed(2)}${act ? `. CARDS: ${act}` : ''}${next ? `. AT ${next.at}: ${next.name}` : ''}`, 5);
+    this.setInfo(`STAKES ${S}: PAY X${(1.22 ** S).toFixed(2)}${act ? `. CARDS: ${act}` : ''}${next ? `. AT ${next.at}: ${next.name}` : ''}. TAP THE CARDS TO READ.`, 5);
   }
 
   private explainRival(): void {
@@ -521,8 +610,11 @@ export class PitScene implements DeptScene {
     }
     const riv = this.scoutInfo();
     if (!riv) return;
+    this.ctx.markSeen('pit.scout');
     if (riv.arch === 'hunt') {
-      this.setInfo('THE HUNTMASTER: NETS YOUR TOP ATTACKER, HIS BEASTS +1 ATK. ARMOR 2.', 6);
+      const sc = this.run.cur?.opts.scars ?? 0;
+      const oath = (this.run.cur?.stakes ?? 0) >= 18 && (this.run.cur?.pv ?? 0) >= 3;
+      this.setInfo(`THE HUNTMASTER: NETS YOUR TOP ATTACKER, HIS BEASTS +1 ATK. ARMOR 2.${oath ? ' OATH: REVIVES ONCE.' : ''}${sc ? ` SCARRED X${sc}: -${Math.round(sc * SCAR_STEP * 100)}%.` : ''}`, 6);
       return;
     }
     const a = ARCHES[riv.arch];
@@ -555,9 +647,9 @@ export class PitScene implements DeptScene {
 
   private station(band: Pet[]): void {
     this.run.garrison = band.map((p) => ({ ...p }));
+    this.per.guard = band.map((p) => ({ ...p })); // Old Guard (00 §2.5) keeps the last one
     this.run.stats.stations++;
     sfx.whistle(this.vol());
-    this.ctx.say('station', { milestone: true });
     this.skirmish = { g: 0, r: 1, wait: 0.5 };
     this.play = null;
     this.ctx.saveSoon();
@@ -574,9 +666,23 @@ export class PitScene implements DeptScene {
   }
 
   private tap(g: Group, i: number): void {
-    if (this.overlay) return;
+    if (this.eatTap) {
+      this.eatTap = false;
+      return;
+    }
+    if (this.overlay || this.ritual) return;
     if (this.mode === 'result') {
       this.finishResult();
+      return;
+    }
+    if (this.mode === 'home' && g === 'line' && !this.play && this.run.garrison[i]) {
+      // Standing Warband: tap to read, tap again for its skins (07 §6D Crest sink).
+      if (this.homeSel === i) this.openSkins(this.run.garrison[i].k);
+      else {
+        this.homeSel = i;
+        this.inspect(g, i);
+        this.setInfo(`${this.infoText} TAP AGAIN: SKINS.`, 6);
+      }
       return;
     }
     if (this.mode === 'home' || this.mode === 'battle') {
@@ -642,6 +748,7 @@ export class PitScene implements DeptScene {
         const lv = mergeLine(rs, sel.i, i);
         this.onMerged(i, lv > 0 ? lv : undefined);
       } else {
+        this.undo = null;
         move(rs, sel.i, i);
         this.ctx.markSeen('pit.move');
         sfx.tap(v);
@@ -662,6 +769,7 @@ export class PitScene implements DeptScene {
   }
 
   private doBuy(shopI: number, slot: number): void {
+    this.undo = null;
     const rs = this.run.cur!;
     const s = rs.shop[shopI];
     if (!s) return;
@@ -684,8 +792,9 @@ export class PitScene implements DeptScene {
       sfx.deny(this.vol());
       return;
     }
+    // A placement after the first buy counts as lining up (onboarding beat "line").
+    if (this.ctx.seen('pit.buy') && (!target || target.k !== s.k)) this.ctx.markSeen('pit.move');
     this.ctx.markSeen('pit.buy');
-    if (!target || target.k !== s.k) this.ctx.markSeen('pit.move');
     this.sel = null;
     const card = this.lineCards[slot];
     card.pop = 1;
@@ -730,7 +839,7 @@ export class PitScene implements DeptScene {
       this.ctx.float(`LEVEL ${levelUp}!`, card.bx + 17, this.yLine - 14, '#e8c04a');
       if (levelUp >= 3) {
         this.per.life.l3++;
-        if (this.per.life.l3 === 1) this.ctx.say('tierL3', { milestone: true });
+        this.say('tierL3', { type: 'tier_reached', key: 'l3' });
       }
       this.setInfo('LEVEL UP! A BONUS BEAST JOINED THE SHOP.', 3);
     } else {
@@ -739,12 +848,13 @@ export class PitScene implements DeptScene {
     }
     if (!this.ctx.seen('pit.mergeSaid')) {
       this.ctx.markSeen('pit.mergeSaid');
-      this.ctx.say('merge');
+      this.say('merge');
     }
     void rs;
   }
 
   private doFood(foodI: number, slot: number): void {
+    this.undo = null;
     const rs = this.run.cur!;
     const f = rs.food[foodI];
     if (!f) return;
@@ -772,14 +882,24 @@ export class PitScene implements DeptScene {
   }
 
   private doSell(): void {
+    if (this.undo) {
+      this.undoSell();
+      return;
+    }
     const rs = this.run.cur;
     if (!rs || this.sel?.g !== 'line') {
       this.setInfo('TAP ONE OF YOUR BEASTS, THEN SELL.', 2.5);
       return;
     }
-    const i = this.sel.i;
-    const p = rs.line[i];
-    if (!p) return;
+    this.sellAt(this.sel.i);
+  }
+
+  /** Sells line slot i (button or sell-bin drag) with a 2 s undo (07 §11). */
+  private sellAt(i: number): void {
+    const rs = this.run.cur;
+    const p = rs?.line[i];
+    if (!rs || !p) return;
+    this.undo = { snap: JSON.stringify(rs), t: 2 };
     const gain = sell(rs, i);
     sfx.sell(this.vol());
     this.ctx.float(`+${gain} CHOW`, this.lineCards[i].bx + 17, this.yLine + 8, '#e8c04a');
@@ -789,7 +909,20 @@ export class PitScene implements DeptScene {
     this.ctx.saveSoon();
   }
 
+  private undoSell(): void {
+    const rs = this.run.cur;
+    const u = this.undo;
+    this.undo = null;
+    if (!rs || !u || this.mode !== 'shop') return;
+    Object.assign(rs, JSON.parse(u.snap));
+    sfx.tap(this.vol());
+    this.setInfo('SALE UNDONE.', 1.5);
+    this.updateShop();
+    this.ctx.saveSoon();
+  }
+
   private doRoll(): void {
+    this.undo = null;
     const rs = this.run.cur;
     if (!rs) return;
     if (!roll(rs)) {
@@ -798,6 +931,7 @@ export class PitScene implements DeptScene {
       return;
     }
     sfx.roll(this.vol());
+    if (!this.ctx.seen('pit.frozen')) this.ctx.lesson('freeze');
     this.sel = null;
     for (const c of this.shopCards) c.pop = 1;
     this.updateShop();
@@ -808,6 +942,7 @@ export class PitScene implements DeptScene {
     const rs = this.run.cur;
     if (!rs || this.mode !== 'shop') return;
     toggleFreeze(rs, kind, i);
+    this.ctx.markSeen('pit.frozen');
     sfx.freeze(this.vol());
     const s = kind === 'unit' ? rs.shop[i] : rs.food[i];
     if (s) this.setInfo(s.fz ? 'FROZEN: STAYS THROUGH ROLLS AND ROUNDS.' : 'UNFROZEN.', 2);
@@ -815,6 +950,7 @@ export class PitScene implements DeptScene {
   }
 
   private doBrand(): void {
+    this.undo = null;
     const rs = this.run.cur;
     if (!rs) return;
     if (rs.brandUsed) {
@@ -827,6 +963,7 @@ export class PitScene implements DeptScene {
     }
     const i = this.sel.i;
     brand(rs, i);
+    this.ctx.markSeen('pit.branded');
     sfx.levelUp(this.vol());
     this.ctx.haptic(20);
     this.burst(this.lineCards[i].bx + 17, this.yLine + 16, PAL.gold, 18);
@@ -880,6 +1017,7 @@ export class PitScene implements DeptScene {
   // ---------- fighting ----------
 
   private doFight(): void {
+    this.undo = null;
     const rs = this.run.cur;
     if (!rs || this.mode !== 'shop') return;
     if (!lineCount(rs)) {
@@ -1004,6 +1142,7 @@ export class PitScene implements DeptScene {
         if (!p.home) sfx.trig(v);
       }
     }
+    if (this.ritual && this.ritual.end < 0 && f.lines[1].length === 0) this.ritual.end = this.ritual.t;
     if (f.ex >= 50 && !this.sdTint) {
       this.sdTint = true;
       this.bgKey = '';
@@ -1014,7 +1153,7 @@ export class PitScene implements DeptScene {
   private snapState(s: Snap, side: 0 | 1): CardState {
     const arch = this.play?.home ? this.skirmishArch : this.lastOut?.rival.arch;
     const rival = side === 1 ? (arch && arch !== 'hunt' ? ARCHES[arch].color : 0xe04040) : undefined;
-    return { k: s.k, a: s.a, h: Math.max(0, s.h), lvl: s.l, it: s.it, brand: s.b, armor: s.ar, thorns: s.th, skip: s.sk, rival };
+    return { k: s.k, a: s.a, h: Math.max(0, s.h), lvl: s.l, it: s.it, brand: s.b, armor: s.ar, thorns: s.th, skip: s.sk, rival, skin: side === 0 ? skinOf(this.per, s.k) : 0 };
   }
 
   private endBattle(): void {
@@ -1070,11 +1209,11 @@ export class PitScene implements DeptScene {
       const p = rs.line.find((x) => x && x.xp < 5);
       if (p && rs.shop.length) rs.shop[0] = { k: p.k, a: UNITS[p.k].atk, h: UNITS[p.k].hp };
     }
-    if (rs.round === 3 && !this.ctx.seen('pit.brandLesson')) {
-      this.ctx.markSeen('pit.brandLesson');
-      this.ctx.say('brandLesson', { milestone: true });
+    if (rs.round === 3 && !rs.brandUsed) this.ctx.lesson('brand');
+    if (rs.wins === WINS_TO_TRIUMPH - 1) {
+      this.say('hunt', { milestone: true });
+      if ((rs.opts.scars ?? 0) > 0) this.ctx.lesson('scars');
     }
-    if (rs.wins === WINS_TO_TRIUMPH - 1) this.ctx.say('hunt', { milestone: true });
   }
 
   private creditBattle(rs: RunState): number {
@@ -1136,11 +1275,20 @@ export class PitScene implements DeptScene {
       const held = heldCrownLevel(run.crowns);
       if (held >= 0) this.ctx.raiseSkill(held);
       if (rs.stakes >= target - 2) crests = 2;
+      if (rs.stakes >= target) run.scars = 0;
     } else {
       run.stats.retreats++;
       run.stats.lowRetreats = rs.wins < 3 ? run.stats.lowRetreats + 1 : 0;
       if (rs.wins >= 6 && rs.stakes >= 3) crests = 1;
+      // Huntmaster scars (run.ts SCAR_STEP): a lost bout at the target scars him for the cycle.
+      if (rs.stakes >= target && rs.huntB > 0 && (run.scars ?? 0) < SCAR_MAX) {
+        run.scars = (run.scars ?? 0) + 1;
+        rs.scarred = true;
+      }
     }
+    // Export playtest log (07 §14.1): a per-Run summary, kept locally with the save.
+    per.log.push({ at: Date.now(), s: rs.stakes, w: rs.wins, l: rs.losses, tri: rs.ended === 'triumph' ? 1 : 0, buys: rs.buys, min: Math.round(rs.playMs / 6000) / 10, pv: rs.pv });
+    if (per.log.length > PLAYTEST_LOG_MAX) per.log.splice(0, per.log.length - PLAYTEST_LOG_MAX);
     rs.crestsWon = crests;
     per.crests += crests;
     per.crestsEver += crests;
@@ -1180,11 +1328,10 @@ export class PitScene implements DeptScene {
     ];
     if (rs.crestsWon) lines.push(`CRESTS +${rs.crestsWon}  (NOW ${this.per.crests})`);
     if (rs.crown) lines.push(`PIT CROWN! ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+`);
-    else if (tri) lines.push('');
+    else if (rs.scarred) lines.push(`HUNTMASTER SCARRED (${this.run.scars}/${SCAR_MAX}): -${Math.round((this.run.scars ?? 0) * SCAR_STEP * 100)}% NEXT TIME`);
     const band = rs.line.filter((p): p is Pet => !!p);
     const now = this.idlePerMin();
     const next = band.length ? idleRateWith(this.save, band) * this.ctx.mult() * 60 : 0;
-    lines.push(`SKIRMISH ${formatNum(now)}/MIN -> ${formatNum(next)}/MIN`);
     const shopOnly = band.some((p) => UNITS[p.k].shopOnly);
     if (shopOnly) lines.push('(SHOP TRIGGERS DO NOTHING IN SKIRMISHES)');
     const done = (stationIt: boolean) => {
@@ -1196,25 +1343,47 @@ export class PitScene implements DeptScene {
       this.ctx.saveSoon();
     };
     const better = next > now * 1.001;
-    this.openPanel(tri ? 'TRIUMPH!' : 'RETREAT', lines, [
+    const rects = this.openPanel(tri ? 'TRIUMPH!' : 'RETREAT', lines, [
+      {
+        label: `SKIRMISH ${formatNum(now)} > ${formatNum(next)}/MIN`,
+        color: 0x2a1a3a,
+        text: '#e8c04a',
+        onTap: () => {
+          this.ctx.markSeen('pit.cmp');
+          this.ctx.game.toast(`SKIRMISH PAY NOW ${formatNum(now)}/MIN, WITH THIS WARBAND ${formatNum(next)}/MIN.`);
+        },
+      },
       { label: better ? 'STATION' : 'STATION ANYWAY', color: better ? C.green : C.edge, onTap: () => done(true) },
       { label: 'KEEP OLD', onTap: () => done(false) },
     ], tri ? '#e8c04a' : '#e05050');
-    if (!this.ctx.seen('pit.stationLesson')) {
-      this.ctx.markSeen('pit.stationLesson');
-      this.ctx.say('stationLesson', { milestone: true });
-    }
+    this.summaryRects = { 'summary.rate': rects[0], station: rects[1] };
+    // Stationing micro-lesson (07 §18) on the first finished Run: mechanic_unlocked.
+    this.ctx.lesson('station');
   }
 
   private afterRunLines(rs: RunState): void {
+    const target = pitEcon.skillTarget(this.save.cycle.n);
     if (rs.ended === 'triumph') {
-      if (rs.crown && heldCrownLevel(this.run.crowns) >= pitEcon.skillTarget(this.save.cycle.n)) this.ctx.say('crown', { milestone: true });
-      else this.ctx.say('triumph', { milestone: true });
+      // tier_reached (07 §18): the first Triumph, then a Crown at each new Infamy target.
+      if (rs.crown && rs.stakes >= target) this.say('crown', { type: 'tier_reached', key: `crown${target}` });
+      if (this.per.life.triumphs <= 1) this.say('triumph', { type: 'tier_reached', key: 'triumph' });
+      else if (Math.random() < 0.5) this.say('win');
     } else if (this.run.stats.lowRetreats >= 3 && this.run.stakes > 0) {
-      this.ctx.say('struggle', { milestone: true });
-    } else if (!this.ctx.seen('pit.retreatSaid')) {
-      this.ctx.markSeen('pit.retreatSaid');
-      this.ctx.say('hazardFirst', { milestone: true });
+      // struggle (00 §5.4.3): Snarl's one-tap "Drop Stakes by 2?" on the bubble's check chip.
+      this.say('struggle', { type: 'struggle', offer: () => this.dropStakes() });
+    } else {
+      this.say('hazardFirst', { type: 'hazard_first', key: 'retreat' });
+      if (rs.scarred) this.say('scar');
+    }
+  }
+
+  /** Fires a manager line with Snarl's gravel-bark voice blips (07 §18) when chatter is on. */
+  private say(key: string, opts?: SayOpts): void {
+    this.ctx.say(key, opts);
+    if (this.ctx.game.save.meta.settings.chatter !== 'off' && opts?.type !== 'first_upgrade') {
+      if (key === 'triumph' || key === 'crown' || key === 'win') sfx.cackle(this.vol());
+      else if (key === 'dialRaised' || key === 'stakesMax') sfx.whistle(this.vol(), 0.1);
+      else sfx.snarl(this.vol(), 2 + Math.floor(Math.random() * 2));
     }
   }
 
@@ -1223,9 +1392,10 @@ export class PitScene implements DeptScene {
   private openPanel(
     title: string,
     lines: string[],
-    buttons: { label: string; color?: number; icons?: UnitId[]; onTap: () => void }[],
+    buttons: { label: string; color?: number; icons?: UnitId[]; skin?: number; text?: string; onTap: () => void }[],
     titleColor = '#e8c04a',
-  ): void {
+  ): Rect[] {
+    const rects: Rect[] = [];
     this.closePanel();
     const L = this.ctx.layout;
     const o = new Container();
@@ -1249,12 +1419,13 @@ export class PitScene implements DeptScene {
     body.position.set(x + 6, y + 18);
     o.addChild(t, body);
     buttons.forEach((b, i) => {
-      const btn = new Button({ w: w - 12, h: 16, label: b.label, color: b.color ?? C.edge, shade: 0x2a1a3a, textColor: b.color && b.color !== C.edge ? '#140c1c' : C.ink, onTap: b.onTap });
+      const btn = new Button({ w: w - 12, h: 16, label: b.label, color: b.color ?? C.edge, shade: 0x2a1a3a, textColor: b.text ?? (b.color && b.color !== C.edge ? '#140c1c' : C.ink), onTap: b.onTap });
       btn.position.set(x + 6, y + 22 + th + 6 + i * 20);
+      rects.push({ x: x + 6, y: y + 22 + th + 6 + i * 20, w: w - 12, h: 16 });
       o.addChild(btn);
       if (b.icons) {
         b.icons.slice(0, 5).forEach((k, j) => {
-          const s = new Sprite(beastTex(k));
+          const s = new Sprite(beastTex(k, b.skin ?? skinOf(this.per, k)));
           s.position.set(x + 9 + j * 13, y + 22 + th + 9 + i * 20);
           s.eventMode = 'none';
           o.addChild(s);
@@ -1264,9 +1435,11 @@ export class PitScene implements DeptScene {
     });
     this.overlay = o;
     this.root.addChild(o);
+    return rects;
   }
 
   private closePanel(): void {
+    this.summaryRects = {};
     if (this.overlay) {
       this.overlay.destroy({ children: true });
       this.overlay = null;
@@ -1278,7 +1451,9 @@ export class PitScene implements DeptScene {
   private onBuy(id: string): void {
     sfx.buy(this.vol());
     this.ctx.haptic(10);
-    if (id === 'drill' && lvOf(this.run, 'drill') === 1) this.ctx.say('firstHelper', { milestone: true });
+    if (id === 'drill' && lvOf(this.run, 'drill') === 1) this.say('firstHelper', { type: 'first_helper' });
+    if (id === 'pliers' && lvOf(this.run, 'pliers') === 1) this.say('firstPliers', { type: 'first_upgrade', key: 'pliers' });
+    if (id.startsWith('skin')) this.ctx.markSeen('pit.skins');
     this.skirmish.wait = Math.min(this.skirmish.wait, 0.3);
   }
 
@@ -1318,15 +1493,38 @@ export class PitScene implements DeptScene {
         if (this.idleAcc > 0) this.ctx.earn(this.idleAcc);
         this.idleAcc = 0;
       }
-      if (!this.play && !this.overlay) {
+      if (!this.play && !this.overlay && !this.ritual) {
         this.skirmish.wait -= dt;
         if (this.skirmish.wait <= 0) this.nextSkirmish();
       }
     }
     // Battle playback.
+    if (this.ritual) {
+      this.ritual.t += dt;
+      if (this.ritual.t > 15) this.ritual.finish?.();
+      else if (this.ritual.start && this.ritual.t >= 1.2) {
+        const go = this.ritual.start;
+        this.ritual.start = undefined;
+        go();
+      }
+    }
+    if (this.undo) {
+      this.undo.t -= dt;
+      if (this.undo.t <= 0) this.undo = null;
+    }
+    // Hold to inspect (a press that neither moved nor lifted).
+    const d = this.drag;
+    if (d && !d.moving) {
+      // Wall clock, not frame dt: a hold is a hold even on a slow frame rate.
+      if (performance.now() - d.t >= HOLD_S * 1000) {
+        this.drag = null;
+        this.eatTap = true;
+        this.showFullCard(d.g, d.i);
+      }
+    }
     const p = this.play;
     if (p) {
-      const sp = p.home ? 2 : this.speed();
+      const sp = this.ritual ? 1 : p.home ? 2 : this.speed();
       p.t += dt * sp;
       if (p.t >= p.dur) this.advance();
     }
@@ -1373,7 +1571,7 @@ export class PitScene implements DeptScene {
         if (!rs) return '';
         if (!lineCount(rs)) return 'TAP A SHOP BEAST, THEN A SLOT. FRONT = LEFT.';
         if (rs.wins === WINS_TO_TRIUMPH - 1) return 'NEXT: THE HUNTMASTER. BEAT HIM FOR THE TRIUMPH.';
-        return `TAP TO INSPECT. 3 COPIES = LEVEL 2. TAP THE TOP ROW TO SCOUT.`;
+        return 'TAP OR DRAG BEASTS. HOLD ONE TO READ IT. 3 COPIES = LEVEL 2. TOP ROW: SCOUT.';
       }
       case 'battle':
       case 'result':
@@ -1446,11 +1644,11 @@ export class PitScene implements DeptScene {
     const hm = 1 + 0.04 * lvOf(this.run, 'hardy');
     const bm = p.br ? 1.5 : 1;
     const r5 = (x: number) => Math.floor(x + 0.5);
-    return { k: p.k, a: r5(r5(p.a * hm) * bm), h: r5(r5(p.h * hm) * bm), lvl: lvlOf(p.xp), xp: p.xp, it: p.it, brand: !!p.br };
+    return { k: p.k, a: r5(r5(p.a * hm) * bm), h: r5(r5(p.h * hm) * bm), lvl: lvlOf(p.xp), xp: p.xp, it: p.it, brand: !!p.br, skin: skinOf(this.per, p.k) };
   }
 
   private fighterState(f: Fighter, hide: boolean, rival: number | undefined, full = true): CardState {
-    return { k: f.kind, a: f.atk, h: f.hp, lvl: full || !rival ? f.lvl : 1, it: full || !rival ? (f.item ?? null) : null, brand: f.brand, armor: f.armor, hide, rival };
+    return { k: f.kind, a: f.atk, h: f.hp, lvl: full || !rival ? f.lvl : 1, it: full || !rival ? (f.item ?? null) : null, brand: f.brand, armor: f.armor, hide, rival, skin: rival === undefined ? skinOf(this.per, f.kind) : 0 };
   }
 
   private setModeVisuals(): void {
@@ -1476,13 +1674,15 @@ export class PitScene implements DeptScene {
       if (m === 'shop') {
         const riv = this.scoutInfo();
         if (riv) {
-          const name = riv.arch === 'hunt' ? 'THE HUNTMASTER!' : `${ARCHES[riv.arch].name.toUpperCase()} TAMER`;
+          const sc = rs.opts.scars ?? 0;
+          const name = riv.arch === 'hunt' ? `THE HUNTMASTER!${sc ? ` SCARS ${sc}` : ''}` : `${ARCHES[riv.arch].name.toUpperCase()} TAMER`;
           this.rivalTag.set(`VS ${name}  (TAP TO SCOUT)`, riv.arch === 'hunt' ? '#ff6a5a' : '#f4e8c1');
         }
         const rc = rollCost(rs);
         this.rollBtn.setLabel(rc ? 'ROLL 1' : 'ROLL FREE').setEnabled(rs.chow >= rc);
         const selP = this.sel?.g === 'line' ? rs.line[this.sel.i] : null;
-        this.sellBtn.setLabel(selP ? `SELL +${sellValue(selP) + (selP.k === 'piglet' ? lvlOf(selP.xp) : 0)}` : 'SELL').setEnabled(!!selP);
+        if (this.undo) this.sellBtn.setLabel('UNDO').setEnabled(true);
+        else this.sellBtn.setLabel(selP ? `SELL +${sellValue(selP) + (selP.k === 'piglet' ? lvlOf(selP.xp) : 0)}` : this.drag?.g === 'line' && this.drag.moving ? 'BIN' : 'SELL').setEnabled(!!selP || (this.drag?.g === 'line' && this.drag.moving));
         this.brandBtn.setEnabled(!rs.brandUsed);
         this.brandBtn.setLabel(rs.brandUsed ? 'BRANDED' : 'BRAND');
         this.fightBtn.setLabel(rs.wins === WINS_TO_TRIUMPH - 1 ? 'HUNT!' : 'FIGHT!').setEnabled(lineCount(rs) > 0);
@@ -1492,6 +1692,13 @@ export class PitScene implements DeptScene {
       }
     } else if (m === 'home') {
       this.runInfo.position.set(this.xL, this.y0 + this.T - 10);
+      if (this.ritual) {
+        for (const b of [this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn]) b.visible = false;
+        this.stakesText.visible = this.crownText.visible = this.tacticBox.visible = false;
+        return;
+      }
+      for (const b of [this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy]) b.visible = true;
+      this.stakesText.visible = this.crownText.visible = this.tacticBox.visible = true;
       this.runInfo.set(`CRESTS ${this.per.crests}   TRIUMPHS ${this.run.stats.triumphs}   RUNS ${this.run.stats.runs}`);
       const S = this.run.stakes;
       const B = this.run.stakesBought;
@@ -1506,19 +1713,21 @@ export class PitScene implements DeptScene {
       const g = this.tacticG.clear();
       TACTICS.forEach((tc, i) => {
         const on = S >= tc.at;
-        g.rect(i * 18, 0, 16, 12).fill(on ? 0x7a2a2a : 0x2a1a2a);
+        const owned = this.run.stakesBought >= tc.at;
+        g.rect(i * 18, 0, 16, 12).fill(on ? 0x7a2a2a : owned ? 0x3a2a3a : 0x2a1a2a);
         g.rect(i * 18, 0, 16, 1).fill(on ? 0xe05050 : 0x4a3450);
       });
       if (!this.tacticLabels) {
         this.tacticLabels = TACTICS.map((tc) => new PixelText(`${tc.at}`, '#f4e8c1'));
         this.tacticLabels.forEach((t, i) => {
-          t.position.set(i * 18 + 5, 4);
+          t.position.set(i * 18 + Math.floor((16 - measure(`${TACTICS[i].at}`).w) / 2), 4);
           this.tacticBox.addChild(t);
         });
       }
       this.tacticLabels.forEach((t, i) => t.set(`${TACTICS[i].at}`, S >= TACTICS[i].at ? '#ffd0c0' : '#6a5a78'));
       const target = pitEcon.skillTarget(this.save.cycle.n);
-      this.crownText.set(`PIT CROWNS ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+`);
+      const sc = this.run.scars ?? 0;
+      this.crownText.set(`PIT CROWNS ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+${sc ? `  SCARS ${sc}` : ''}`);
       const cur = this.run.cur;
       this.startBtn.setLabel(cur ? `RESUME RUN (RD ${cur.round}, ${cur.wins}W)` : 'START RUN');
       this.startBtn.visible = true;
@@ -1552,10 +1761,335 @@ export class PitScene implements DeptScene {
     const team = garrisonFighters(this.run);
     for (let i = 0; i < 5; i++) {
       const f = team[i];
-      this.lineCards[i].setState(f ? this.fighterState(f, false, undefined) : { empty: true });
+      this.lineCards[i].setState(f ? { ...this.fighterState(f, false, undefined), sel: this.homeSel === i } : { empty: true });
       if (!this.skirmishArch) this.rivalCards[i].setState(null);
     }
     if (!team.length) this.rivalTag.set('NO STANDING WARBAND', '#9c8aa8');
+  }
+
+
+  // ---------- drag, hold and the sell bin (07 §11) ----------
+
+  private press(g: Group, i: number, e: FederatedPointerEvent): void {
+    this.eatTap = false;
+    if (this.overlay || this.ritual) return;
+    const p = this.root.toLocal(e.global);
+    this.drag = { g, i, sx: p.x, sy: p.y, x: p.x, y: p.y, t: performance.now(), moving: false };
+  }
+
+  private canDrag(g: Group, i: number): boolean {
+    const rs = this.run.cur;
+    if (this.mode !== 'shop' || !rs) return false;
+    return (g === 'shop' && !!rs.shop[i]) || (g === 'food' && !!rs.food[i]) || (g === 'line' && !!rs.line[i]);
+  }
+
+  private viewOf(g: Group, i: number): CardView {
+    return g === 'shop' ? this.shopCards[i] : g === 'food' ? this.foodCards[i] : g === 'line' ? this.lineCards[i] : this.rivalCards[i];
+  }
+
+  private dragMove(e: FederatedPointerEvent): void {
+    const d = this.drag;
+    if (!d) return;
+    const p = this.root.toLocal(e.global);
+    d.x = p.x;
+    d.y = p.y;
+    if (!d.moving) {
+      if (Math.hypot(p.x - d.sx, p.y - d.sy) < DRAG_PX) return;
+      if (!this.canDrag(d.g, d.i)) {
+        this.drag = null; // a scroll-ish swipe over a card: neither a tap-hold nor a drag
+        return;
+      }
+      d.moving = true;
+      const rs = this.run.cur!;
+      this.sel = { g: d.g, i: d.i };
+      if (d.g === 'food') this.ghost.texture = foodTex(rs.food[d.i]!.f);
+      else {
+        const k = d.g === 'shop' ? rs.shop[d.i]!.k : rs.line[d.i]!.k;
+        this.ghost.texture = beastTex(k, skinOf(this.per, k));
+      }
+      this.ghost.visible = true;
+      this.viewOf(d.g, d.i).alpha = 0.35;
+      sfx.tap(this.vol());
+      this.updateShop();
+    }
+    this.ghost.position.set(Math.round(p.x - 12), Math.round(p.y - 14));
+  }
+
+  /** The line slot under (x, y), with a little slack, or -1. */
+  private slotAt(x: number, y: number): number {
+    if (y < this.yLine - 6 || y > this.yLine + CH + 6) return -1;
+    const j = Math.floor((x - this.xL + 1) / STEP);
+    return j >= 0 && j < 5 ? j : -1;
+  }
+
+  private overSell(x: number, y: number): boolean {
+    const b = this.sellBtn;
+    return b.visible && x >= b.x - 4 && x < b.x + 50 && y >= b.y - 6 && y < b.y + 26;
+  }
+
+  private release(): void {
+    const d = this.drag;
+    this.drag = null;
+    if (!d || !d.moving) return;
+    this.eatTap = true;
+    this.ghost.visible = false;
+    const view = this.viewOf(d.g, d.i);
+    view.alpha = view.state?.dim ? 0.45 : 1;
+    const rs = this.run.cur;
+    if (!rs || this.mode !== 'shop') return;
+    const slot = this.slotAt(d.x, d.y);
+    this.sel = null;
+    if (d.g === 'shop' && slot >= 0) this.doBuy(d.i, slot);
+    else if (d.g === 'food' && rs.food[d.i] && (slot >= 0 || FOODS[rs.food[d.i]!.f].all && d.y < this.yInfo)) this.doFood(d.i, Math.max(0, slot));
+    else if (d.g === 'line' && this.overSell(d.x, d.y)) this.sellAt(d.i);
+    else if (d.g === 'line' && slot >= 0 && slot !== d.i) this.lineDrop(d.i, slot);
+    this.updateShop();
+  }
+
+  /** Line unit `from` dropped on slot `to`: merge onto a twin, else move/swap. */
+  private lineDrop(from: number, to: number): void {
+    const rs = this.run.cur!;
+    const a = rs.line[from];
+    const b = rs.line[to];
+    this.undo = null;
+    if (a && b && a.k === b.k && b.xp < 5) {
+      const lv = mergeLine(rs, from, to);
+      this.onMerged(to, lv > 0 ? lv : undefined);
+    } else {
+      move(rs, from, to);
+      this.ctx.markSeen('pit.move');
+      sfx.tap(this.vol());
+      this.lineCards[to].pop = 1;
+      this.lineCards[from].pop = 1;
+    }
+    this.ctx.saveSoon();
+  }
+
+  /** Hold any unit for its full card: numbers and ability at each level (07 §11). */
+  private showFullCard(g: Group, i: number): void {
+    const rs = this.run.cur;
+    let k: UnitId | undefined;
+    let stats = '';
+    if (g === 'food') {
+      const f = rs?.food[i];
+      if (!f) return;
+      const d = FOODS[f.f];
+      this.openPanel(d.name.toUpperCase(), [`TIER ${d.tier}   COST ${d.cost} CHOW`, d.text, d.held ? 'ONE HELD ITEM PER BEAST; A NEW ONE REPLACES IT.' : ''], [{ label: 'CLOSE', onTap: () => this.closePanel() }]);
+      return;
+    }
+    const st = this.viewOf(g, i).state;
+    if (g === 'shop' && rs?.shop[i]) k = rs.shop[i]!.k;
+    else if (st?.k) k = st.k;
+    if (!k) return;
+    if (st?.a !== undefined && !st.hide) stats = `NOW ${st.a}/${st.h}  L${st.lvl ?? 1}`;
+    const d = UNITS[k];
+    const lines = [`TIER ${d.tier}   BASE ${d.atk}/${d.hp}${stats ? `   ${stats}` : ''}`];
+    if (d.token) lines.push(d.text(1));
+    else for (let L = 1; L <= 3; L++) lines.push(`L${L}: ${d.text(L)}`);
+    if (d.shopOnly) lines.push('SHOP TRIGGER: NO EFFECT IN SKIRMISHES.');
+    if (d.crests) lines.push(`BESTIARY BEAST (${d.crests} CRESTS).`);
+    this.openPanel(d.name.toUpperCase(), lines, [{ label: 'CLOSE', onTap: () => this.closePanel() }]);
+    sfx.tap(this.vol());
+  }
+
+  // ---------- beast skins (07 §6D Crest sink) ----------
+
+  private openSkins(k: UnitId): void {
+    this.ctx.markSeen('pit.skins');
+    const per = this.per;
+    const worn = skinOf(per, k);
+    const buttons = SKINS.map((name, i) => {
+      const owned = ownsSkin(per, k, i);
+      return {
+        label: `${name}  ${i === worn ? 'WORN' : owned ? 'WEAR' : `${SKIN_COST} CRESTS`}`,
+        icons: [k],
+        skin: i,
+        color: i === worn ? C.gold : owned ? C.edge : per.crests >= SKIN_COST ? C.green : 0x3a2a40,
+        text: !owned && i !== worn && per.crests < SKIN_COST ? '#9c8aa8' : undefined,
+        onTap: () => {
+          if (owned) per.wear[k] = i;
+          else if (!buySkin(per, k, i)) {
+            sfx.deny(this.vol());
+            this.ctx.game.toast(`A COAT COSTS ${SKIN_COST} CRESTS. TRIUMPH NEAR THE TARGET STAKES FOR MORE.`);
+            return;
+          } else {
+            sfx.levelUp(this.vol());
+            this.ctx.haptic(15);
+          }
+          this.ctx.saveSoon();
+          this.openSkins(k);
+        },
+      };
+    });
+    this.openPanel(`${UNITS[k].name.toUpperCase()} COATS`, [`CRESTS ${per.crests}. COSMETIC ONLY.`], [...buttons, { label: 'CLOSE', onTap: () => this.closePanel() }]);
+  }
+
+  // ---------- core hooks: targets, calm, the return ritual ----------
+
+  private btnRect(b: Button, w: number, h: number): Rect | null {
+    return b.visible && !b.destroyed ? { x: b.x, y: b.y, w, h } : null;
+  }
+
+  private cardRect(c: CardView): Rect | null {
+    return c.visible && c.state ? { x: c.bx, y: c.by, w: CW, h: CH } : null;
+  }
+
+  /** Onboarding targets (00 §5.4.2); null while hidden. */
+  targetRect(id: string): Rect | null {
+    if (this.overlay && this.summaryRects[id]) return this.summaryRects[id];
+    if (this.overlay) return null;
+    const rs = this.run.cur;
+    const home = this.mode === 'home';
+    const shop = this.mode === 'shop' && !!rs;
+    const [kind, arg] = id.split('.');
+    const n = Number(arg);
+    switch (id) {
+      case 'upgrades':
+        return home ? this.btnRect(this.upBtn, 88, 18) : null;
+      case 'warbands':
+        return home ? this.btnRect(this.bandsBtn, 88, 18) : null;
+      case 'start':
+        return home ? this.btnRect(this.startBtn, this.startW, 22) : null;
+      case 'stakes':
+        return home ? { x: this.xL, y: this.yShop - 1, w: 96, h: 16 } : null;
+      case 'stakes.buy':
+        return home ? this.btnRect(this.stakesBuy, 62, 14) : null;
+      case 'tactics':
+        return home ? { x: this.tacticBox.x - 1, y: this.tacticBox.y - 1, w: TACTICS.length * 18, h: 14 } : null;
+      case 'fight':
+        return shop ? this.btnRect(this.fightBtn, 74, 20) : null;
+      case 'roll':
+        return shop ? this.btnRect(this.rollBtn, 52, 20) : null;
+      case 'sell':
+        return shop ? this.btnRect(this.sellBtn, 46, 20) : null;
+      case 'brand':
+        return shop ? this.btnRect(this.brandBtn, 50, 14) : null;
+      case 'rival':
+        return shop ? { x: this.xL, y: this.yRival - 9, w: W178, h: 49 } : null;
+      case 'shop.twin':
+      case 'line.twin': {
+        if (!shop) return null;
+        for (let j = 0; j < rs!.shop.length; j++) {
+          const u = rs!.shop[j];
+          const slot = u ? rs!.line.findIndex((p) => p && p.k === u.k && p.xp < 5) : -1;
+          if (slot >= 0) return this.cardRect(kind === 'shop' ? this.shopCards[j] : this.lineCards[slot]);
+        }
+        return null;
+      }
+      case 'line.last': {
+        if (!shop) return null;
+        let last = 0;
+        rs!.line.forEach((p, j) => p && (last = j));
+        return this.cardRect(this.lineCards[last]);
+      }
+      case 'line.best': {
+        if (!shop) return null;
+        let best = -1;
+        let bv = -1;
+        rs!.line.forEach((p, j) => {
+          if (p && p.a + p.h > bv) {
+            bv = p.a + p.h;
+            best = j;
+          }
+        });
+        return best >= 0 ? this.cardRect(this.lineCards[best]) : null;
+      }
+    }
+    if (!(n >= 0)) return null;
+    if (kind === 'shop' && shop) return this.cardRect(this.shopCards[n]);
+    if (kind === 'food' && shop) return this.cardRect(this.foodCards[n]);
+    if (kind === 'line' && (shop || home)) {
+      const c = this.lineCards[n];
+      return c.visible ? { x: c.bx, y: c.by, w: CW, h: CH } : null;
+    }
+    if (kind === 'freeze' && shop) {
+      const st = this.strips.find((x) => x.kind === 'unit' && x.i === n);
+      return st?.c.visible ? { x: st.c.x, y: st.c.y - 1, w: 34, h: 12 } : null;
+    }
+    return null;
+  }
+
+  /** 07 §18: a battle animating, a drag in progress, or the return ritual. */
+  isIntense(): boolean {
+    return !!(this.play && !this.play.home) || !!this.drag?.moving || !!this.ritual;
+  }
+
+  /**
+   * Return ritual (07 §13, 00 §5.3): Snarl replays the best Gauntlet's last won bout; tap
+   * THUMBS DOWN as the last rival falls. Score 1 within 0.25 s, fading to 0 at 1.25 s off.
+   */
+  returnRitual(_haul: number): Promise<number> {
+    return new Promise<number>((resolve) => {
+      try {
+        const team = garrisonFighters(this.run);
+        if (!team.length || this.mode === 'summary' || this.mode === 'battle' || this.mode === 'result') return resolve(0);
+        const rep = gauntletReport(this.save);
+        const S = rep.stakes;
+        const opts = { sigils: importSigils(this.save), shade: importShade(this.save) };
+        let bestG = -1;
+        let bestR = 0;
+        for (let g = 0; g < 8; g++) {
+          const r = runGauntlet(team, this.save.cycle.n, g, S, opts).rounds;
+          if (r > bestR) {
+            bestR = r;
+            bestG = g;
+          }
+        }
+        if (bestG < 0) return resolve(0);
+        const log = runGauntletLog(this.save, team, bestG, bestR, S);
+        const resume = !!this.run.cur && !this.run.cur.ended;
+        if (this.mode !== 'home') this.setMode('home');
+        const btn = new Button({ w: W178, h: 22, label: 'THUMBS DOWN!', color: C.red, shade: 0x7a2020, textColor: C.ink, onTap: () => {
+          const rt = this.ritual;
+          if (!rt || rt.tapped >= 0) return;
+          rt.tapped = rt.t;
+          sfx.whistle(this.vol());
+          this.ctx.haptic(15);
+          btn.setEnabled(false);
+        } });
+        btn.position.set(this.xL, this.yShop + 46);
+        const label = new PixelText(wrap("SNARL'S REPLAY: TAP AS THE LAST RIVAL FALLS.", W178), '#e8c04a');
+        label.position.set(this.xL, this.yShop + 30);
+        this.ui.addChild(btn, label);
+        const finish = () => {
+          const rt = this.ritual;
+          if (!rt || rt.done) return;
+          rt.done = true;
+          if (this.root.destroyed) return rt.resolve(0);
+          let score = 0;
+          if (rt.tapped >= 0 && rt.end >= 0) {
+            const off = Math.abs(rt.tapped - rt.end);
+            score = off <= 0.25 ? 1 : Math.max(0, 1 - (off - 0.25));
+          }
+          this.ctx.float(score >= 1 ? 'PERFECT! *TWEET*' : score > 0 ? 'CLOSE ENOUGH' : 'MISSED', this.xL + W178 / 2, this.yRival + 20, score > 0 ? '#e8c04a' : '#9c8aa8');
+          if (score > 0) sfx.cackle(this.vol());
+          btn.destroy({ children: true });
+          label.destroy();
+          this.ritual = null;
+          this.play = null;
+          this.skirmish = { g: 0, r: 1, wait: 1 };
+          if (resume && this.run.cur && !this.run.cur.ended) this.setMode('shop');
+          else this.setMode('home');
+          rt.resolve(score);
+        };
+        this.ritual = { t: 0, end: -1, tapped: -1, resolve, btn, label, done: false };
+        this.skirmishArch = log.arch;
+        this.rivalTag.set(`REPLAY: GAUNTLET ${bestG + 1}, ROUND ${bestR}`, '#e8c04a');
+        const frames = log.frames.slice(Math.max(0, log.frames.length - 12));
+        // A 1.2 s lead-in (the bout's cards settle, the prompt reads), then ~4 s of the finish.
+        this.ritual.start = () =>
+          this.startPlay(frames, true, () => {
+            const rt = this.ritual;
+            if (rt && rt.end < 0) rt.end = rt.t;
+            window.setTimeout(finish, 900);
+          });
+        this.applyFrame(frames[0], { frames, i: 0, t: 0, dur: 0, home: true, prev: new Map(), onDone: () => {} }, true);
+        this.ritual.finish = finish; // safety in update(): never hang (game time, not wall time)
+      } catch (err) {
+        console.error(err);
+        resolve(0);
+      }
+    });
   }
 
   // ---------- fx ----------

@@ -3,7 +3,8 @@
 // Skirmish Gauntlets with the Standing Warband while you're away. Manager: Snarl (07 §18).
 import type { DeptDef } from '../../core/dept';
 import { pitEcon } from './def';
-import { onboarding, snarl } from './snarl';
+import { lessons, onboarding, snarl } from './snarl';
+import { pitLastStand } from './laststand';
 import { PitScene } from './scene';
 
 export const pit: DeptDef = {
@@ -14,6 +15,8 @@ export const pit: DeptDef = {
   doorColor: 0x6a2a1a,
   manager: snarl,
   onboarding,
+  lessons,
+  lastStand: pitLastStand,
   legend: {
     name: 'Brakka Bare-Knuckle',
     line: 'BEASTS? I BRUSH MY TEETH WITH BEASTS. OPEN THE CAGES, DOGGY.',

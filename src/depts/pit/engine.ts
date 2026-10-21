@@ -56,13 +56,16 @@ export interface Fighter {
   item?: ItemId | null;
   brand?: boolean;
   armor?: number;
+  /** Marked Prey (tactics card 15): the Run's first-bought unit. */
+  marked?: boolean;
   /** Index of this unit in the owner's Run line (side 0), for permanent Knockout gains. */
   ref?: number;
 }
 
 export interface BattleOpts {
   seed: number;
-  /** Stakes level for the rival tactics cards (3 Muzzled Front, 6 Ambush, 9 Pack Healer). */
+  /** Stakes level for the rival tactics cards (3 Muzzled Front, 6 Ambush, 9 Pack Healer,
+   * 12 War Drums, 15 Marked Prey, 18 Huntmaster's Oath). */
   tactics?: number;
   /** Essence import: your front 1/2/3 units start with Armor 1. */
   sigils?: number;
@@ -128,6 +131,7 @@ interface BU {
   item: ItemId | null;
   brand: boolean;
   ref: number;
+  marked: boolean;
   toyUsed: boolean;
   collarUsed: boolean;
   wyvernLeft: number;
@@ -145,6 +149,7 @@ class Battle {
   uid = 1;
   shadeLvl: number;
   shadeUsed = false;
+  oathUsed = false;
   koGains = new Map<number, { atk: number; hp: number }>();
   pendingWyvern: BU[] = [];
   byUid = new Map<number, BU>();
@@ -172,6 +177,7 @@ class Battle {
       item: f.item ?? null,
       brand: !!f.brand,
       ref: f.ref ?? -1,
+      marked: !!f.marked,
       toyUsed: false,
       collarUsed: false,
       wyvernLeft: f.kind === 'wyvern' ? Math.max(1, f.lvl | 0) : 0,
@@ -262,6 +268,13 @@ class Battle {
     const line = this.lines[u.side];
     const idx = line.indexOf(u);
     if (idx < 0) return;
+    // Huntmaster's Oath (tactics 18): the Huntmaster revives once at 50% HP.
+    if (u.kind === 'hunt' && !this.oathUsed && (this.o.tactics ?? 0) >= 18) {
+      this.oathUsed = true;
+      u.hp = Math.max(1, Math.ceil(u.maxHp / 2));
+      this.frame('trig', { src: u.uid, icon: 'faint' });
+      return;
+    }
     // Bone Charm: return once at 1 HP.
     if (u.item === 'charm') {
       u.item = null;
@@ -360,9 +373,18 @@ class Battle {
       B.unshift(back);
     }
     if (S >= 3 && B.length) B[0].armor += 1;
+    // War Drums (12): every rival beast +1 attack.
+    if (S >= 12) for (const u of B) u.atk += 1;
     // Warding Sigils (Essence import).
     for (let i = 0; i < Math.min(this.o.sigils ?? 0, A.length); i++) A[i].armor += 1;
     this.frame('start');
+    // Marked Prey (15): your first-bought unit (the front one if it's gone) takes 3 at the start.
+    if (S >= 15 && A.length) {
+      const prey = A.find((u) => u.marked) ?? A[0];
+      this.damage(prey, 3, null);
+      this.frame('trig', { src: prey.uid, icon: 'start' });
+      this.settle();
+    }
     // Start-of-battle triggers, in total order.
     const starters = this.order([...A, ...B].filter((u) => UNITS[u.kind].trig === 'start'));
     for (const u of starters) {

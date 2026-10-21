@@ -147,10 +147,20 @@ function beastColor(p: { a: string; b: string; c: string; e?: string }) {
   };
 }
 
-/** 12x10 beast sprite (scale 2 on cards). */
-export function beastTex(k: UnitId): Texture {
+/** Beast skin coats (07 §6D Crest sink), by SKINS index 1-4: BONE, EMBER, SHADOW, GILDED. */
+const SKIN_COATS: { a: string; b: string; c: string }[] = [
+  { a: '#d8d0c0', b: '#a09888', c: '#f4ecd8' },
+  { a: '#d0502a', b: '#7a2010', c: '#f8b048' },
+  { a: '#3a2a4a', b: '#1a1028', c: '#8a6aaa' },
+  { a: '#d8a83a', b: '#8a6a1a', c: '#fff2a0' },
+];
+
+/** 12x10 beast sprite (scale 2 on cards); `skin` 1-4 swaps the coat (cached per beast and skin). */
+export function beastTex(k: UnitId, skin = 0): Texture {
   const p = B[k];
-  return build(`b.${k}`, 12, 10, p.rows, beastColor(p));
+  const coat = skin > 0 ? SKIN_COATS[skin - 1] : undefined;
+  if (!coat) return build(`b.${k}`, 12, 10, p.rows, beastColor(p));
+  return build(`b.${k}.${skin}`, 12, 10, p.rows, beastColor({ ...p, ...coat }));
 }
 
 export function foodTex(f: FoodId): Texture {
