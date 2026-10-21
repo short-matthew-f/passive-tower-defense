@@ -6,6 +6,9 @@
 //  - Tap Damage cost growth 1.10 -> 1.16 and Dig Deeper base 100 -> 150: with the raw seeds a
 //    greedy tapping bot reached depth 30 (the first Infamy target) in ~20 minutes, far ahead of the
 //    3-6 h first-Fall band. See the TUNING note at the bottom of this file.
+//  - SIM-TUNED by the balance harness (sim/README.md "Tuning log"): Pick Tier also multiplies tap
+//    damage (FIST_TIER), and idleRate models the goblins' hop between rocks (GOBLIN_HOP_S) instead
+//    of a flat 0.85 overkill factor.
 
 export interface MinesStats {
   taps: number;
@@ -63,7 +66,6 @@ export const MAX_GOBLINS = 8;
 export const GRID = 5;
 export const TILES = GRID * GRID;
 export const GATE_ROCKS = 50;
-export const OVERKILL_IDLE = 0.85;
 export const DRUM_GEMS = 8;
 export const DRUM_DEPTH = 6;
 
@@ -141,8 +143,19 @@ export const CRIT_P_MAX = 4;
 export const keenCost = (L: number) => 400 * 1.8 ** L;
 export const KEEN_MAX = 5;
 
+/**
+ * SIM-TUNED: the gauntlet is forged at the crew's Pick Tier, so each tier multiplies tap damage
+ * too (x1.9 per tier, against the crew's x2.5). Before, tiers multiplied only the crew (x98 at
+ * tier 5), taps fell to ~5% of income and the drum-on on-screen ratio was 1.05x (02 §3: 2.4-3.0x).
+ * The ratio is steep in this number (tier^5): x1.6 gives ~1.8x, x2.0 ~3.4x, x2.5 lets taps carry
+ * the whole department (~10x the crew); x1.9 lands the drum-on reference bot at ~2.8x.
+ */
+export const FIST_TIER = 1.9;
+export const fistTierMult = (T: number) => FIST_TIER ** T;
+/** Damage of one plain tap (no crit, beat or Frenzy) at the run's Tap Damage level and Pick Tier. */
+export const fistDamage = (r: MinesRun) => tapDamage(r.tap) * fistTierMult(r.tier);
 /** Expected tap damage including crits (for hints and the sim). */
-export const tapExpected = (r: MinesRun) => tapDamage(r.tap) * (1 + critChance(r.critC) * (critMult(r.critP) - 1));
+export const tapExpected = (r: MinesRun) => fistDamage(r) * (1 + critChance(r.critC) * (critMult(r.critP) - 1));
 
 // ---------- crew ----------
 
@@ -223,15 +236,41 @@ export const LUCKY_MAX = 20;
 // ---------- idle ----------
 
 /**
+ * Seconds a goblin loses per rock between breaking one and swinging at the next: the hop
+ * (scene.ts: 0.18 s + distance / 400 px/s, at most 0.5 s), crowding and waiting for regrowth.
+ * SIM-TUNED: fitted to the live wall (sim/adapters/mines.ts, no taps) across 1-8 goblins and
+ * 0.07-6 s of swinging per rock; it replaces the flat overkillEff 0.85, which overpaid a strong
+ * crew by up to 2.5x (one-hit rocks spend most of their time hopping), so offline out-earned the
+ * live wall late in a cycle.
+ */
+export const GOBLIN_HOP_S = 0.4;
+
+/** Rocks per second the crew breaks at depth d: each goblin swings for avgHP / DPS, then hops,
+ * softly bounded by the regrowth ceiling (25 tiles / regrow time). */
+export function crewRocksPerSec(r: MinesRun, p: MinesPersistent, d = r.depth): number {
+  const hp = H(d) * AVG_HP_F;
+  const rr = d === r.depth ? r : { ...r, depth: d };
+  let rocks = 0;
+  for (const [n, base] of [
+    [r.grunts, GRUNT_DPS],
+    [r.sappers, SAPPER_DPS],
+  ]) {
+    if (n <= 0) continue;
+    const dps = goblinDps(base, rr, p);
+    if (dps > 0) rocks += n / (hp / dps + GOBLIN_HOP_S);
+  }
+  // The regrowth ceiling acts as a soft limit: near it, goblins wait for tiles to regrow (sim fit).
+  const ceil = TILES / regrowTime(r.regrow);
+  return rocks > 0 ? 1 / Math.sqrt(1 / (rocks * rocks) + 1 / (ceil * ceil)) : 0;
+}
+
+/**
  * On-screen idle rate (Nuggets/s before core multipliers), 02 §3. Pure and cheap.
- * goblinDPS -> rocks/s, bounded by the regrowth ceiling (25 tiles / regrow time), x overkill.
+ * Crew rocks/s (swing time plus hop per rock), bounded by the regrowth ceiling (25 tiles /
+ * regrow time), x the average reward of the spawn mix.
  */
 export function idleNuggets(r: MinesRun, p: MinesPersistent): number {
-  const dps = crewDps(r, p);
-  if (dps <= 0) return 0;
-  const d = r.depth;
-  const rocksPerSec = Math.min(dps / (H(d) * AVG_HP_F), TILES / regrowTime(r.regrow)) * OVERKILL_IDLE;
-  return rocksPerSec * R(d) * AVG_REWARD_F;
+  return crewRocksPerSec(r, p) * R(r.depth) * AVG_REWARD_F;
 }
 
 /** Expected taps to break a common rock at depth d (lever hint). */
@@ -261,4 +300,7 @@ export function normalize(run: any, per: any): void {
  *  - Result: first Tap Damage at ~6 s, first goblin ~25 s, depth 6 at 2 min, 10 at 5 min, 20 at
  *    25 min, 30 at ~3.3 h active. Active:on-screen idle ~2.7x at 30 min, 1.8-2.6x from 1-3 h
  *    (pre-drum band 1.8-2.5x). Taps/rock at the pushed depth stays ~4-10.
+ *  - Superseded in part by the balance sim (sim/README.md "Tuning log"): in the meta sim the crew
+ *    outgrew taps once Pick Tier 4-5 landed (drum-on ratio 1.05x), and the flat overkill factor
+ *    overpaid a one-hitting crew. FIST_TIER and the hop model above fix both.
  */

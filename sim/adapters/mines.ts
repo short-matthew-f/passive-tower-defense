@@ -114,7 +114,11 @@ function estimateAt(r: M.MinesRun, p: M.MinesPersistent, depth: number, taps: nu
     const beats = 1 / M.beatPeriod(depth);
     tap *= 1 + ((0.85 * beats) / taps) * (M.beatMult(rr.drumhead) * 1.2 - 1);
   }
-  const rocks = Math.min((M.crewDps(rr, p) * M.OVERKILL_IDLE + tap * 0.95) / hp, M.TILES / M.regrowTime(rr.regrow));
+  // The crew as the game's idleRate counts it, plus taps (at most one rock per tap), under the
+  // regrowth ceiling.
+  const crew = M.crewRocksPerSec(rr, p);
+  const tapRocks = Math.min(taps, (tap * 0.95) / hp);
+  const rocks = Math.min(crew + tapRocks, M.TILES / M.regrowTime(rr.regrow));
   return rocks * M.R(depth) * M.AVG_REWARD_F;
 }
 
@@ -249,7 +253,7 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
       t.regrow = M.regrowTime(r.regrow);
       t.fuse = -1;
       r.stats.kegs++;
-      const dmg = M.tapDamage(r.tap) * M.blastMult(p.powder) * (auto ? 0.5 : 1);
+      const dmg = M.fistDamage(r) * M.blastMult(p.powder) * (auto ? 0.5 : 1);
       for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++) {
           const c = t.col + dx;
@@ -333,7 +337,7 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
         breakRock(t, 'tap');
         return;
       }
-      let dmg = M.tapDamage(r.tap);
+      let dmg = M.fistDamage(r);
       if (rnd() < M.critChance(r.critC)) {
         dmg *= M.critMult(r.critP);
         r.stats.crits++;

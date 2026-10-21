@@ -687,7 +687,7 @@ export class MinesScene implements DeptScene {
       return;
     }
 
-    let dmg = M.tapDamage(this.run.tap) * soft;
+    let dmg = M.fistDamage(this.run) * soft;
     const crit = rand() < M.critChance(this.run.critC);
     if (crit) dmg *= M.critMult(this.run.critP);
     if (beatHit) {
@@ -728,7 +728,7 @@ export class MinesScene implements DeptScene {
     }
     this.chips(t.x + this.T / 2, t.y + this.T / 2, 2);
     t.squashT = 0.04;
-    this.damage(t, M.tapDamage(this.run.tap) * 0.25, 'tap');
+    this.damage(t, M.fistDamage(this.run) * 0.25, 'tap');
   }
 
   private onBeatHit(): void {
@@ -845,7 +845,7 @@ export class MinesScene implements DeptScene {
     t.regrow = M.regrowTime(this.run.regrow);
     t.fuse = -1;
     this.run.stats.kegs++;
-    const dmg = M.tapDamage(this.run.tap) * M.blastMult(this.per.powder) * (auto ? 0.5 : 1);
+    const dmg = M.fistDamage(this.run) * M.blastMult(this.per.powder) * (auto ? 0.5 : 1);
     for (let dy = -1; dy <= 1; dy++)
       for (let dx = -1; dx <= 1; dx++) {
         const c = t.col + dx;

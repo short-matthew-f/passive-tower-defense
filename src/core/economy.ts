@@ -47,14 +47,18 @@ export function coreMult(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>
   return throneGroup * dreadGroup * tempMult(s, id, defs, now);
 }
 
-/** Rank without temp multipliers so catch-up bonuses don't feed back into Tribute. */
+/**
+ * Rank without temp multipliers so catch-up bonuses don't feed back into Tribute.
+ * SIM-TUNED: Dark Banners (the Throne group) are left out too. Banners are bought with Tribute, so
+ * counting them closed a Tribute -> Banner -> Rank -> Tribute loop (about 20 Banners per department
+ * by day 7 in the balance sim). The Dread group stays: Dread isn't bought with Tribute.
+ */
 export function rank(s: SaveRoot, id: DeptId, defs: Record<string, DeptEcon>): number {
   const d = s.depts[id];
   const def = defs[id];
   if (!d || !def) return 0;
-  const throneGroup = 1 + 0.1 * throne(s, bannerId(id));
   const dreadGroup = 1 + 0.1 * perk(s, 'empire.ironFist') + 0.25 * perk(s, ruinbornId(id));
-  const idle = def.idleRate(d) * throneGroup * dreadGroup;
+  const idle = def.idleRate(d) * dreadGroup;
   if (idle <= def.rankRef) return 0;
   return Math.max(0, Math.floor((40 * Math.log10(idle / def.rankRef)) / Math.log10(def.rankTarget / def.rankRef)));
 }

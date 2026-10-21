@@ -32,13 +32,15 @@ export const cauldronEcon: DeptEcon = {
   // Infamy skill gate (05 §7, 00 §2.2): 5 Batches at Malice >= min(4 + N, 10).
   skillTarget: (n) => Math.min(4 + n, 10),
   skillLabel: (t) => `5 BATCHES AT MALICE ${t}`,
-  // Seeds from the pacing model (greedy buyer, active play earning ~2-3x idleRate; see the
-  // balance notes in econ.ts). Idle rate runs ~1.5/s at start, ~300-1.4K/s at 5 min, and
-  // levels off around 100-180K/s after ~2 h once the capped nodes are bought. Cycle earnings
-  // reach ~2e9 at ~2 h for a perfect player (A=3) and ~3.5 h at A=2, so the first Fall lands
-  // around 3-4 h active-equivalent alongside Malice IV (~340M Bile). The sim owns the final values.
-  econBase: 2e9,
-  rankRef: 300,
-  rankTarget: 150_000,
+  // SIM-TUNED (sim/README.md "Tuning log"). Idle rate runs ~1.5/s at start, ~8K/s after 10 min on
+  // screen and ~3.5e5/s at the first 100% Infamy (gold pegs now counted, econ.ts expectedMult).
+  //  - econBase: the reference player fills the economy gate during the day-1 evening session at
+  //    ~3-3.5 h active-equivalent (00 §8 hard band 3-4 h +- 1 h). A later Fall (00 §6 "early day 2")
+  //    costs ~7 h AE in this profile, because the night adds ~2.3 h AE of offline income at the
+  //    ~3.5-4x active:offline ratio.
+  //  - rankRef: idleRate after ~10 min on screen; rankTarget: idleRate at the first 100% Infamy.
+  econBase: 6e9,
+  rankRef: 8000,
+  rankTarget: 350_000,
   commendations,
 };

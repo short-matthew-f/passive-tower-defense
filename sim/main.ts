@@ -111,7 +111,9 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
     // Calibration probes: the live core with no player input vs idleRate (00 §7: idleRate is the
     // on-screen idle rate), over an 8 h solo stretch with the greedy buyer.
     for (const [id, f] of [
-      ['cauldron', allAdapters({ cauldron: { passive: true } })[0]],
+      // 900 s live samples per board state: the payout is skewed (rare gold-triple jackpots), so
+      // short samples mostly undershoot the mean and the default 180 s read ~0.85x.
+      ['cauldron', allAdapters({ cauldron: { passive: true, sampleS: 900 } })[0]],
       ['mines', allAdapters({ mines: { passive: true } })[1]],
     ] as const) {
       const r = simulate({ ...DEFAULT_CONFIG, days: 1, profile: PROFILES.solo, noMeta: true, adapters: [f] });
@@ -136,7 +138,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
         status: b / i >= 0.9 && b / i <= 1.15 ? 'PASS' : 'WARN',
         note:
           id === 'cauldron'
-            ? 'idleRate excludes gold pegs by spec (05 §3), so the live rain beats it with no input.'
+            ? 'idleRate counts the gold pegs (sim-tuned, econ.ts expectedMult), so the live rain matches it.'
             : 'Crew alone on the live wall (hops, overkill, regrowth) vs the closed form; the probe taps only until the first hire.',
       });
     }

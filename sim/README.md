@@ -97,10 +97,14 @@ Each row shows a status, the spec level and a CI marker.
 - **WARN**: a soft or derived band is violated.
 - **INFO**: context only.
 - **Seeds**: values are seed medians (spread in brackets), and the status is the worst seed.
-- **CI gate**: only rows marked `+CI` fail `npm test`. These are integrity (NaN, Infinity,
+- **CI gate**: rows marked `+CI` fail `npm test`. These are integrity (NaN, Infinity,
   negative balances), offline factor at most 0.9, first upgrade under 60 s, Fall #0-#5 targets
-  inside the dial range, and every department reaching its first Fall. All other balance bands
-  are reported, not gated. To gate one, set `ci: true` on it in `metrics.ts`.
+  inside the dial range, and every department reaching its first Fall. `tests/balance.test.ts`
+  also gates the bands the tuning pass brought into range (`TUNED_GATES`: Cauldron first Fall AE,
+  both departments' active:offline and local ratio bands, cycle bounds, "something affordable",
+  and, while exactly Cauldron + Mines are built, the shares and the day-7 Dread band). Those are
+  keyed per department, so a newly added department isn't gated until its own tuning pass. To
+  gate a band for every department, set `ci: true` on it in `metrics.ts`.
 
 Bands derived for a partial suite (see `metrics.ts`):
 
@@ -115,30 +119,107 @@ Bands derived for a partial suite (see `metrics.ts`):
 
 ## Current results (reference, 7 days, 3 seeds; `sim/out/report.md` has the full table)
 
-**Pass**:
-- First upgrade: Cauldron 8 s, Mines 4 s.
-- Mines unlock at 5 active minutes.
-- Something affordable on every return over 15 min (26/26 for each department).
-- Idle-only never Falls, and its income never drops.
-- Offline factor 0.70.
-- No NaN or negative balances.
-- Single-department mains are within 1.5x of the reference.
-- Cauldron first Fall at 2.3 h AE; Mines at 3.8 h AE.
+36 pass, 11 warn, 0 fail after the tuning pass below. All hard bands pass, including both
+departments' active:offline ratio. The remaining warnings are soft:
 
-**Fail / warn**:
-- **Active : offline at baseline.** Cauldron 6.6x (on-screen 4.5x, band 2-3x). Mines 1.6x
-  (on-screen 1.05x with the drum, band 2.4-3.0x). Both are outside 3-5x, and skill barely moves
-  them.
-- **Calibration.** The Cauldron's live board with no input earns 1.8x `idleRate`, because
-  `idleRate` leaves out gold pegs (05 §3). Mines matches at 1.12x.
-- **Pacing is too fast on the wall clock.** The Cauldron's first Fall comes on day 1 at 19:00
-  (arc: early day 2). The Mines' first Fall comes on day 2 at 08:00 (arc: day 3). Mines cycles
-  average 0.74 d (band 1.5-3). Lifetime Dread on day 7 is 274 (derived band 70-235). The Mines
-  earn 77% of all Dread.
-- **Dial step cost.** Cauldron median 3.9 min, Mines 14.5 min of income per level (band 25-60).
-- **Later-cycle stalls (30-day run).** After Fall #7 the Mines need depth 65, but the dial caps
-  at 60, so the department stalls at 92% for good. The Cauldron's Malice 8 costs 1.7e13 Bile
-  (100,000 x 15^M) against ~2e11/day, so after its 4th Fall (day 8) it stalls at 88%. Both break the 5-day cycle
-  cap.
-- **Tribute is high.** About 56K lifetime by the end of day 1 (arc: about 4K by 1:45 and 25K by
-  day 2). With 2 departments, all of it goes into Banners (about 20 levels each by day 7).
+- **First Fall wall clock vs AE hours.** In the reference profile every night and day gap adds
+  ~4 h active-equivalent at a 3.5-4x active:offline ratio. So the hard "3-4 h AE ± 1 h" band puts
+  the Cauldron's first Fall in the day-1 evening session (day 1 19:00, 3.1 h AE), not "early day
+  2" (which would be ~7 h AE). The Mines fall on day 2 18:00 at ~8.6 h AE (arc: day 3).
+- **Economy gate ≈ 2.5 h AE**: 3.1 h (Cauldron) and 8.6 h (Mines), for the same reason.
+- **Cauldron week-1 cycles** average 1.1 days (the 1.5-3 day band is for weeks 2-4).
+- **Dial step cost**: Cauldron median 6.8 min, Mines 1.6 min. After a Fall the low dial levels
+  are bought during the rebuild ramp, where income doubles every few minutes, so they always
+  read cheap. The top levels of a cycle land at ~15-110 min (Cauldron) and 20-35 min (Mines).
+
+30-day runs (`--days 30`) still show the structural late-cycle problem described in the tuning
+log: cycles stretch to 5-11 days in weeks 2-4.
+
+## Tuning log
+
+Each change is a sim-tuned seed, commented as such where it lives. "Before" is the harness
+author's report (reference, 7 days, 3 seed medians) and "after" is the current one.
+
+### Changes
+
+1. **Cauldron: gold pegs count in `idleRate`** (`econ.ts` `expectedMult`, `sim.ts`
+   `landingStats`). The EV cache now runs the board with its moving gold pegs and records the
+   mean gold hits per bucket. It drops the value-weighted ingredient mix rather than Newts only,
+   because ingredients bounce differently. `idleRate` therefore equals "the board with no input"
+   (00 §7). This departs from 05 §3's "gold pegs excluded" text, which left the live board
+   earning 1.8x `idleRate` with no input. Gold Peg and Gold Polish now raise idle income and Rank.
+   The adapter's buyer stopped proxying them as active-only.
+2. **Cauldron: Batch payout** `25 x EV + 10 s of idleRate` -> `+ 8 s` (`BATCH_IDLE_S`). Batches
+   are most of the active edge, and Bigger Batches (+200% at L10) grows them across cycles.
+3. **Cauldron: Malice price** `100,000 x 15^M` -> `2.7e6 x 5^min(M,5) x 2^max(0,M-5)`. That is x5
+   per level through the income ramp, then x2 at the top of the dial, where income has plateaued.
+4. **Cauldron: econBase** 2e9 -> 6e9, **rankRef** 300 -> 8,000 (idleRate after ~10 min on screen),
+   **rankTarget** 150K -> 350K (idleRate at the first 100% Infamy, now with gold counted).
+5. **Mines: Pick Tier multiplies tap damage** x1.9 per tier (`FIST_TIER`, `fistDamage`; the scene,
+   the upgrade text and the adapter all use it). Tiers used to multiply only the crew (x98 at tier
+   5), so taps fell to ~5% of income. The ratio is steep in this number: x1.6 gives ~1.8x on
+   screen, x2.0 ~3.4x, x2.5 ~10x.
+6. **Mines: `idleRate` models the goblins' hop** (`GOBLIN_HOP_S` 0.4 s per rock and a soft
+   regrowth ceiling, `crewRocksPerSec`). This replaces the flat 0.85 overkill factor. It was
+   fitted to the live wall across 1-8 goblins and 0.07-6 s of swinging per rock (live/idle
+   0.94-1.12). The old closed form overpaid a one-hitting crew by up to 2.5x, so late in a cycle
+   offline beat the live wall. The bot's income estimate uses the same crew term and lets each
+   tap break at most one rock.
+7. **Mines: skill target capped at the dial** `min(30 + 5N, 60)`. Fall #7 used to ask for depth 65
+   on a 60-deep shaft.
+8. **Mines: econBase** 1e7 -> 2.5e10, **rankTarget** 1,500 -> 2e5 (idleRate at the first 100%
+   Infamy). Dig Deeper stays `100 x 1.36^d`. Steeper digs (1.45-1.5) moved the first Fall to day 3,
+   but they made depth the binding limit. Taps then one-shot rocks at max depth and the ratio
+   collapsed to ~1.3x within a cycle. 02 §6D wants the wall to come from HP, not dig prices.
+9. **Core: Dark Banners out of Rank** (`economy.ts` `rank`). Banners are bought with Tribute, so
+   counting them in Rank closed a Tribute -> Banner -> Rank -> Tribute loop. Dread perks stay in.
+10. **Harness:** the Cauldron calibration probe samples 900 s per board state instead of 180 s
+    (`main.ts`). The payout is skewed, so short samples undershot and read 0.85x on an `idleRate`
+    that matches the live board within ±5% over long runs. The CI test now runs 7 days and gates
+    the tuned bands (see "CI gate" above).
+
+### Before -> after
+
+| Metric (band) | Before | After |
+|---|---|---|
+| Cauldron active : offline (3-5x) | 6.64x FAIL | 4.06x |
+| Cauldron active : on-screen idle (2-3x) | 4.54x | 2.72x |
+| Mines active : offline (3-5x) | 1.60x FAIL | 4.37x |
+| Mines active : on-screen idle, drum (2.4-3.0x) | 1.06x | 2.84x |
+| Cauldron live board / idleRate (≈1.0) | 1.78x | 0.97x |
+| Mines live wall / idleRate (≈1.0) | 1.12x | 0.99x |
+| Cauldron first Fall (3-4 h AE ± 1; arc 1-1.5 d) | 2.34 h, day 1 19:00 | 3.14 h, day 1 19:00 |
+| Mines first Fall (soft 3-4 h AE; arc 2-3 d) | 3.79 h, day 2 08:00 | 8.61 h, day 2 18:00 |
+| Mines shortest cycle (>= 2 h) | 10.0 h | 32.9 h |
+| Mines average cycle (1.5-3 d) | 0.74 d | 2.00 d |
+| Cauldron average cycle (1.5-3 d) | 1.27 d | 1.14 d |
+| Lifetime Dread day 7 (70-235 derived) | 274 | 208 |
+| Mines Dread share (<= 70.7%) | 77% | 40% |
+| Cauldron / Mines dial step median (25-60 min) | 3.9 / 14.5 min | 6.8 / 1.6 min |
+| Lifetime Tribute, end of day 1 (arc ~4K-25K) | 56K | 61K |
+| Lifetime Tribute, day 7 | 5.1M | 2.9M |
+| First upgrade, Cauldron / Mines (< 60 s) | 8 s / 4 s | 8 s / 4 s |
+| Something affordable on returns > 15 min | 26/26 | 26/26 |
+| 30 days: Falls, Cauldron / Mines | 4 / 7, then stuck for good (88% / 92%) | 8 / 5, no permanent stall |
+| 30 days: longest cycle (<= 5 d) | 22 / 23 d | 9 / 11 d |
+
+Bot skill now matters in both departments (`--skill`, seed 1). Mines drum-on on-screen ratio:
+novice 2.2x, reference 2.8x, expert 3.4x (it was ~1.05x for all three). Cauldron: 2.4x / 2.7x /
+3.4x. The expert bot lands just over the reference band (~5.1-5.2x active:offline). That's
+expected, since the band is set for the reference player.
+
+### Still open (structural, outside department seeds)
+
+- **Weeks 2-4 cycles stretch to 5-11 days.** Every Fall multiplies the economy floor by x3. Each
+  department's income meanwhile plateaus once its capped nodes are bought (Mines: 8 goblins,
+  Picks 40, Tier 5 put idle at ~3e5/s; Cauldron: rows, gold and jackpot cap, and Fresher Stock
+  grows only ~cost^0.2). In a 2-department build, Dread perks add too little to keep pace.
+  During those long cycles the Mines' uncapped Tap Damage keeps growing, so the 30-day Mines
+  ratio drifts to ~5x on screen. Fixing this needs a meta-level decision: gentler floor growth,
+  long multiplicative nodes, or the full suite's Dread and Goods.
+- **Tribute is ~10x the arc on day 1.** Rank 40 means "ready for the first Fall", and the
+  Cauldron's idle rate reaches its first-Fall level within an hour. Tribute at
+  `0.5 x (1 + Rank)^1.5` per minute then pays ~60K on day 1. Under 00 §6 the Seal prices
+  (4K / 25K / 150K / 600K) are sim-owned, so they should scale up rather than Tribute down.
+  That's a Throne-level change.
+- **AE vs wall clock** (above): pick which of the two the reference profile should honour.

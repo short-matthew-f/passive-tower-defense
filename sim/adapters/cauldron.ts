@@ -84,9 +84,10 @@ function chuteDist(r: number, malice: number): number[][] {
 
 // ---------- greedy buyer ----------
 
-/** Active-only nodes don't move idleRate; the buyer values them with these proxies (share of income). */
+/** Active-only nodes don't move idleRate; the buyer values them with these proxies (share of income).
+ * Gold Peg and Gold Polish are in idleRate (econ.ts expectedMult), so they need no proxy. */
 function activeProxy(run: CRun): number {
-  return 1 + 0.08 * lvOf(run, 'gold') + 0.015 * lvOf(run, 'polish') + 0.05 * lvOf(run, 'charges') + 0.03 * lvOf(run, 'longLadle');
+  return 1 + 0.05 * lvOf(run, 'charges') + 0.03 * lvOf(run, 'longLadle');
 }
 const value = (run: CRun) => idleRateOf(run) * activeProxy(run);
 

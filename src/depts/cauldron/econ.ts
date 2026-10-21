@@ -1,7 +1,7 @@
 // Cauldron numbers (05 §5, §6, §7): save shapes, upgrade formulas, bucket table and idleRate.
 // Everything here is pure so the HUD, the core and the balance scripts can call it freely.
 import type { DeptSave } from '../../core/types';
-import { BUCKETS, INGREDIENTS, ING_ORDER, landingDistribution, type IngId } from './sim';
+import { BUCKETS, INGREDIENTS, ING_ORDER, landingStats, type IngId } from './sim';
 
 export interface TicketItem {
   ing: IngId;
@@ -108,10 +108,16 @@ export function upCost(u: UpDef, level: number): number {
 }
 
 export const MALICE_MAX = 10;
-/** Price of the next Malice level (one-time per cycle). Spec seed is 2,000 x 5^M (05 §7); rescaled
- * to this build's faster income curve so Malice IV lands around 2 h of active play. */
+/**
+ * Price of the next Malice level (one-time per cycle). Spec seed is 2,000 x 5^M (05 §7).
+ * SIM-TUNED: x5 per level up to Malice V while the capped nodes fill (the income ramp), then x2 per
+ * level, which tracks the plateau income at the top of the dial (00 §8.1 step-cost band). The old
+ * 100,000 x 15^M priced Malice VIII at 1.7e13 Bile against ~2e11/day, so the Cauldron stalled at
+ * 88% Infamy for good after its 4th Fall.
+ */
+export const MALICE_KNEE = 5;
 export function maliceCost(bought: number): number {
-  return 100000 * 15 ** bought;
+  return 2.7e6 * 5 ** Math.min(bought, MALICE_KNEE) * 2 ** Math.max(0, bought - MALICE_KNEE);
 }
 
 // ---------- derived stats ----------
@@ -179,25 +185,34 @@ export function inZone(bucket: number, zone: number): boolean {
   return Math.abs(bucket - (BUCKETS - 1) / 2) <= zone;
 }
 
-// ---------- EV cache (05 §3): landing distribution per (rows, malice), computed once ----------
+// ---------- EV cache (05 §3): landing stats per (rows, malice, gold pegs), computed once ----------
 
-const distCache = new Map<string, number[]>();
-export function distribution(r: number, malice: number): number[] {
-  const key = `${r}|${malice}`;
-  let d = distCache.get(key);
+const statCache = new Map<string, { dist: number[]; goldHits: number[] }>();
+function stats(r: number, malice: number, gold: number): { dist: number[]; goldHits: number[] } {
+  const key = `${r}|${malice}|${gold}`;
+  let d = statCache.get(key);
   if (!d) {
-    d = landingDistribution(r, malice, 1200);
-    distCache.set(key, d);
+    d = landingStats(r, malice, gold, 1200);
+    statCache.set(key, d);
   }
   return d;
 }
 
-/** Expected bucket multiplier for a uniformly random drop (no gold pegs, no Ladles). */
+export function distribution(r: number, malice: number): number[] {
+  return stats(r, malice, 0).dist;
+}
+
+/** Expected bucket multiplier for a uniformly random drop (no Ladles, no Tosses).
+ * SIM-TUNED: the moving gold pegs are included (05 §3 originally left them out). They hit the
+ * toadling rain with no input at all, so leaving them out made the live board earn ~1.8x idleRate
+ * and pushed active:offline to ~6.6x. Counting them keeps idleRate = "the board with no input"
+ * (00 §7), and Gold Peg / Gold Polish now raise idle income and Rank like any other node. */
 export function expectedMult(run: CRun, malice = run.malice): number {
-  const d = distribution(rows(run), malice);
+  const st = stats(rows(run), malice, goldCount(run));
   const m = bucketMults(run, malice);
+  const g = goldMult(run) - 1;
   let s = 0;
-  for (let i = 0; i < BUCKETS; i++) s += d[i] * m[i];
+  for (let i = 0; i < BUCKETS; i++) s += st.dist[i] * m[i] * (1 + g * st.goldHits[i]);
   return s;
 }
 
@@ -210,10 +225,13 @@ export function idleRateOf(run: CRun): number {
   return dropsPerSec(run) * evPerDrop(run);
 }
 
+export const BATCH_IDLE_S = 8;
 export function batchPayout(run: CRun, p: CPersistent): number {
-  // Seed: 25x the average drop (spec) plus 10 s of idle income so Batches stay worth
-  // chasing once the toadling rain dwarfs a single drop. The balance sim owns the final form.
-  return (25 * evPerDrop(run) + 10 * idleRateOf(run)) * (1 + 0.2 * rlvOf(p, 'bigger'));
+  // Seed: 25x the average drop (spec) plus some seconds of idle income so Batches stay worth
+  // chasing once the toadling rain dwarfs a single drop.
+  // SIM-TUNED: 10 s -> 8 s, which holds active at ~2.5-3x on-screen idle (05 §3) once Bigger
+  // Batches is levelled in later cycles. Batches are most of the Cauldron's active edge.
+  return (25 * evPerDrop(run) + BATCH_IDLE_S * idleRateOf(run)) * (1 + 0.2 * rlvOf(p, 'bigger'));
 }
 
 /** Highest Malice L with at least 5 Batches completed at Malice >= L this cycle (skill gate). */

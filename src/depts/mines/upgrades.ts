@@ -55,7 +55,8 @@ export function buildGroups(ctx: DeptCtx, hooks: { onDig(): void; onDrum(): void
       desc: () => {
         const L = r().tap;
         const next = (L + 1) % 25 === 0 ? ' X2!' : '';
-        return `${f(M.tapDamage(L))} -> ${f(M.tapDamage(L + 1))} DMG/TAP${next}`;
+        const t = M.fistTierMult(r().tier);
+        return `${f(M.tapDamage(L) * t)} -> ${f(M.tapDamage(L + 1) * t)} DMG/TAP${next}`;
       },
       apply: () => r().tap++,
     }),
@@ -129,7 +130,7 @@ export function buildGroups(ctx: DeptCtx, hooks: { onDig(): void; onDrum(): void
       max: M.TIER_MAX,
       level: () => r().tier,
       cost: () => M.tierCost(r().tier),
-      desc: () => `CREW X2.5, FULL SPEED TO D${M.tierDepth(r().tier + 1)}`,
+      desc: () => `CREW X2.5 FIST X${M.FIST_TIER}, TO D${M.tierDepth(r().tier + 1)}`,
       apply: () => r().tier++,
     }),
   ];

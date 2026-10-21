@@ -309,23 +309,45 @@ export class Board {
 }
 
 /**
- * Landing distribution of uniformly random drops (no gold, no Ladles), using common random
- * numbers: the same seeds every call so only the board changes between upgrade states.
+ * Landing distribution of uniformly random drops (no Ladles), using common random numbers: the
+ * same seeds every call so only the board changes between upgrade states. With `gold` > 0 the
+ * moving gold pegs ride along and `goldHits[k]` is the mean gold-peg hits of drops landing in
+ * bucket k (sim-tuned: idleRate counts what the board earns with no input, gold included).
  */
-export function landingDistribution(rows: number, malice: number, n = 1500): number[] {
+export function landingStats(rows: number, malice: number, gold = 0, n = 1500): { dist: number[]; goldHits: number[] } {
   const counts = new Array(BUCKETS).fill(0);
+  const hits = new Array(BUCKETS).fill(0);
   const xs = mulberry32(0xc0ffee);
-  const board = new Board({ rows, malice, gold: 0 }, 12345);
-  const ev: SimEvents = { land: (_b, k) => counts[k]++ };
+  const board = new Board({ rows, malice, gold }, 12345);
+  const ev: SimEvents = {
+    land: (b, k) => {
+      counts[k]++;
+      hits[k] += b.goldHits;
+    },
+  };
+  // Ingredients fall differently (bounce, gravity), so drop the value-weighted mix (weight x value)
+  // the payout actually sees, not Newts only.
+  const mix = ING_ORDER.map((i) => INGREDIENTS[i].weight * INGREDIENTS[i].value);
+  const mixW = mix.reduce((a, b) => a + b, 0);
+  const pick = (r: number): IngId => {
+    let x = r * mixW;
+    for (let i = 0; i < ING_ORDER.length; i++) if ((x -= mix[i]) <= 0) return ING_ORDER[i];
+    return ING_ORDER[0];
+  };
   let dropped = 0;
   // Keep ~20 balls in flight so the run is cheap but still uses the real step.
   while (dropped < n || board.balls.length) {
     if (dropped < n && board.balls.length < 20) {
-      board.drop('newt', BALL_R + xs() * (BOARD_W - 2 * BALL_R));
+      const x = BALL_R + xs() * (BOARD_W - 2 * BALL_R);
+      board.drop(pick(xs()), x);
       dropped++;
     }
     board.step(ev);
   }
   const total = counts.reduce((a, b) => a + b, 0) || 1;
-  return counts.map((c) => c / total);
+  return { dist: counts.map((c) => c / total), goldHits: hits.map((h, k) => (counts[k] ? h / counts[k] : 0)) };
+}
+
+export function landingDistribution(rows: number, malice: number, n = 1500): number[] {
+  return landingStats(rows, malice, 0, n).dist;
 }
