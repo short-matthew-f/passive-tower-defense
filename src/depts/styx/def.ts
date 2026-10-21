@@ -25,18 +25,19 @@ export const styxEcon: DeptEcon = {
   skillTarget: (n) => Math.min(5 + 2 * n, M.WRATH_MAX),
   skillLabel: (t) => `LAND ${M.GATE_LANDS} AT WRATH ${t}, 1 RARE`,
 
-  // Seeds from a greedy reference bot on model.ts (scripts/styx-bot.ts: casts at the best band,
-  // ~85-90% hook rate, buys the best income per Obol, Wrath as soon as it pays):
-  //  - Murk opens ~2 min in, Drowned Halls ~20-25 min, Wrath 5 (the first skill target, 363K
-  //    Obols in all) ~2 h. Cycle earnings: ~0.2M at 1 h, ~0.66M at 2 h, ~1.27M at 3 h on screen.
-  //    The Styx unlocks on day 2 (00 §6) and plays ~15-20 min a day beside six other departments,
-  //    so offline income (idle ~35-70/s at 0.65) carries most of it: E0 = 1e6 (~2.7 h on-screen
-  //    equivalent) puts the first Styx Fall about 2-3 days after its unlock.
-  //  - rankRef: on-screen idle ~10 min into a cycle (6-8 netters, Murk open) is ~6-9/s.
-  //  - rankTarget: idle at the first 100% Infamy (20 netters, Bigger Nets ~30, Wrath 5) is ~60/s.
-  econBase: 1e6,
-  rankRef: 6,
-  rankTarget: 60,
+  // SIM-TUNED (sim/README.md "Pass 3"), against the balance sim's Styx adapter (sim/adapters/
+  // styx.ts: the scene's catch loop ported headless, ~3.5 catches/min for the reference bot) in
+  // the reference profile, where the Styx opens on day 2 and gets ~8 on-screen minutes a day
+  // beside five other departments, so offline netters carry most of each cycle:
+  //  - econBase 1e6 -> 1.2e8: at 1e6 the first Fall came 0.6-0.8 days after the unlock (day 3
+  //    08:00, before the Mines); now it lands on day 5 (4.5-4.75 d), ~3 days after the unlock like
+  //    the Dungeon and the Bridge. The skill gate (Wrath 5) fills on day 2-3; economy binds.
+  //  - rankRef 6 -> 12: idle on the first visit (~14 netters, Bigger Nets ~10) is ~13/s.
+  //  - rankTarget 60 -> 250: idle at the first 100% Infamy (20 netters, Bigger Nets 40, Longer
+  //    Poles 4, Wrath 5-9) is ~250-280/s. At 6/60 the Styx sat at Rank 70-78 (28% of Tribute).
+  econBase: 1.2e8,
+  rankRef: 12,
+  rankTarget: 250,
 
   commendations: [
     { id: 'first', label: 'FIRST SOUL LANDED', test: (s) => stats(s).lands >= 1 },

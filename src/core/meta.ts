@@ -32,14 +32,19 @@ export const RUINBORN = { max: 20, cost: (l: number) => 4 * 1.5 ** l, desc: '+25
  * runs ~10x the 00 §6 arc on day 1 (Rank 40 arrives within the first hour), so the provisional
  * prices opened the Dungeon at 10 active min and the Bridge at 45. Now the Dungeon opens at the
  * start of the second session (45 min; arc 40 +- 30) and the Bridge during the day-1 evening
- * session or at the next morning's (80-90 min; arc 105 +- 30, 00 §8 "Department 4 open <= 2 h"). */
+ * session or at the next morning's (80-90 min; arc 105 +- 30, 00 §8 "Department 4 open <= 2 h").
+ * Pass 3 (Styx and Spire built): Styx 25,000 -> 120,000 and Spire 150,000 -> 900,000. Lifetime Dread
+ * (10 / 60) is met by day 2 / day 3, so Tribute binds: the Styx now opens on day 2 (12:30-18:00,
+ * 1.5-1.75 d; it opened at the Bridge's moment, day 2 08:00, at 25K) and the Spire on day 4
+ * (12:30-21:00, 3.5-3.9 d; it opened on day 3 at 150K). War Pit 600,000 -> 3,000,000 is provisional,
+ * only to keep the ladder rising (the phantom-Seal sim variant pays it); the Pit's own pass sets it. */
 export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,
   dungeon: 2500,
   bridge: 44000,
-  styx: 25000,
-  spire: 150000,
-  pit: 600000,
+  styx: 120000,
+  spire: 900000,
+  pit: 3000000,
 };
 export const SEAL_DREAD: Partial<Record<DeptId, number>> = { styx: 10, spire: 60, pit: 150 };

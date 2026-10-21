@@ -249,13 +249,17 @@ export function distillCeiling(run: SpireRun, per: SpirePersistent): number {
 }
 
 /**
- * SEED-TUNED against the greedy 30-drops/min bot on logic.ts (scratch script). The spec formula
- * assumes every apprentice orb merges all the way to the Distill Ceiling; the live flask realizes
- * much less once it clogs with Abyssal Eyes and Void Stars. At 1.0, live play (merges + the
- * apprentices) fell to ~1.5-1.8x on-screen idle after the first hour; at 0.5 it runs ~3-4x in the
- * first hour and ~2.2-2.5x on the late plateau (04 §4 target ~2.8x). The balance sim has the last word.
+ * SIM-TUNED (sim/README.md "Pass 3"): 0.5 -> 8. The spec formula prices an apprentice orb at
+ * EV_drop to the Distill Ceiling (capped at T9), but the balance sim's reference bot (sim/adapters/
+ * spire.ts: greedy merge-adjacency aim on logic.ts, ~30 drops/min with a short settle) keeps
+ * merging past T9 into Abyssal Eyes, Void Stars and a Singularity every ~25-30 min (250K x Potent
+ * x Volatility x Resonance, worth ~2,000 s of idle each), so a live drop realizes several times
+ * EV_drop(T9). At 0.5 active play ran 18-30x on-screen idle (25-42x offline). At 8 the reference
+ * profile reads ~2.8x on screen and ~4.1x offline pooled over 6 seeds (04 §4 targets 2.8x / 4.0x),
+ * and a long solo stretch drifts to ~2.1-2.6x late. Single 7-day seeds scatter (3.2-5.6x offline)
+ * because the Spire only gets ~25 baseline minutes of a lumpy payout.
  */
-export const IDLE_TUNE = 0.5;
+export const IDLE_TUNE = 8;
 
 /** On-screen idle Arcana/s before core multipliers (04 §4). Pure and cheap. */
 export function idleRateOf(run: SpireRun, per: SpirePersistent): number {
@@ -307,15 +311,15 @@ export const spireEcon: DeptEcon = {
   // (since the last vent, or for the last 60 drops). Score = t + v, a Singularity counts as 12.
   skillTarget: (n) => Math.min(12 + n, 22),
   skillLabel: (t) => `FEAT ${t}: ORB TIER + HELD VOLATILITY`,
-  // SEEDS (the Spire unlocks ~day 4-5, 00 §6), from the scratch bot on logic.ts at 30 drops/min
-  // (greedy merge-adjacency aim, 00 §8.1), which banks ~1e6 Arcana by 20 min, ~5e7 by 45 min and
-  // then plateaus at ~2-5e3/s once the flask holds Void Stars (Volatility 6, Potent Mana ~85):
-  //  - econBase: ~3 h of active play plus the apprentices between sessions (~1.5e8 cycle Arcana),
-  //    the 00 §8 first-Fall band. The skill gate (Feat 12) falls by ~25 min, so economy binds.
-  //  - rankRef: on-screen idle ~10 min in (1-2 apprentices, ceiling T9-T10, Potent ~25): ~100/s.
-  //  - rankTarget: idle at the first 100% Infamy (2-3 apprentices, ceiling T9, V6): ~2e3/s.
-  econBase: 1.5e8,
-  rankRef: 100,
-  rankTarget: 2000,
+  // SIM-TUNED (sim/README.md "Pass 3"), with IDLE_TUNE 8 and the reference profile (the Spire
+  // opens on day 4, ~8 on-screen minutes a day; the Feat 12 fills on the first or second visit):
+  //  - econBase 1.5e8 -> 1.8e10: at 1.5e8 the first Fall came ~1 h AE after the unlock. Now it
+  //    lands on day 7 (6.3-6.8 d), ~3 days after the unlock, or just after week 1 when the Seal
+  //    opens in the day-4 evening session.
+  //  - rankRef 100 -> 1,500 and rankTarget 2,000 -> 1e4: idle on the first visit is ~1.5-6e3/s and
+  //    ~1e4/s at the first 100% Infamy, so the Spire sits at Rank ~40-55 like the others.
+  econBase: 1.8e10,
+  rankRef: 1500,
+  rankTarget: 1e4,
   commendations,
 };

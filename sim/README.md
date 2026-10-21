@@ -5,13 +5,14 @@ days on **the game's own pure modules**, so "the sim matches the game" holds bec
 same code. Nothing here imports Pixi or the DOM.
 
 ```
-npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json} (~45-50 s)
+npm run sim                     # 7 days x 3 seeds + side profiles -> table, sim/out/report.{md,json} (~50 s)
 npm run sim -- --days 30        # weeks 2-4 cycle metrics
-npm run sim -- --quick          # reference profile only, 1 seed (~5 s)
+npm run sim -- --quick          # reference profile only, 1 seed (~9 s)
 npm run sim -- --fall-at 150    # Fall policy: push to 150% Infamy before letting the Legend in
 npm run sim -- --skill expert   # bot skill: novice | reference | expert
-npm run sim -- --live           # Cauldron: live physics every second (no activeRate table)
-npm test                        # includes tests/balance.test.ts, the fast CI tier (~10-14 s)
+npm run sim -- --live           # Cauldron and Spire: live physics every second (no activeRate table)
+npm run sim -- --floor-growth 2.5   # experiment: economy floor growth per Fall (shipped x3)
+npm test                        # includes tests/balance.test.ts, the fast CI tier (~13 s)
 ```
 
 `npm run sim` uses Vite's module runner (`sim/cli.mjs`), so it needs no extra dependency.
@@ -66,6 +67,34 @@ Two layers, as in 00 §8.1:
      the Wallet Sense band (lower for brawny or suspect Claims), taking or pushing a counter.
      The buyer ranks the real `buildGroups()` by Δ(idleRate + 0.25 x expected active income)/cost,
      the active part a 160-traveler Monte Carlo of the same policy on the real generator.
+   - **Styx**: the catch loop lives in `scene.ts`, so the adapter ports it headless at the
+     scene's 30 Hz on the pure rules in `model.ts`: cast and sink (40 px/s), the exponential bite
+     wait (x1.25 while twitching), the biter's swim to the hook (the Bog Poet circles 1.6 s), the
+     nibble with Wrath fake-out dips, the hook window, the reel (hold raises tension at
+     `REEL_RISE / lineCap`, release drains at `drainRate`, telegraphed thrashes at the scene's
+     progress points, slip after 0.4 s at >= 100%, drift loose after 2.5 s at 0%, heavy / sinker /
+     teleport / twin souls), the land (combo, Wrath, Gilded Obol, the Codex first-catch bonus,
+     bait use, the 20-soul Wrath gate), wisps, fog surges, line snaps and the netters, which the
+     scene credits on screen too. The bot casts to the band with the best expected Obols/s, sets
+     the hook with a normal reaction time (0.40 / 0.29 / 0.22 s, sd 0.12 / 0.07 / 0.04), taps a
+     fake-out dip 12 / 4 / 1% of the time, eases off the reel on a thrash telegraph after its
+     reaction time (lapses add 0.35 s, 15 / 6 / 2% of thrashes), works the skill gate at the
+     target Wrath with Unpaid Debt bait and otherwise fishes at the top Wrath with Gilded Obols.
+     The shop is the real `buildGroups()`; the buyer values Δ(idleObols + 0.25 x an analytic
+     estimate of the same loop)/cost, judging a node on up to 3 levels when the next one alone
+     changes nothing (Longer Poles inside the Shallows).
+   - **Spire** runs the shipped `SpireCore` (`src/depts/spire/logic.ts`) on its Pixi-free circle
+     physics (`physics.ts`) and credits `idleRateOf` on screen like the scene. The bot scores 24
+     aim positions by dropping a straight line onto the pile: an immediate same-tier contact, a
+     same-tier neighbour at the resting spot and a low landing score up; landings near the Brim
+     Line and burying a smaller orb score down (the expert also looks one merge ahead). It drops
+     at 22 / 30 / 34 per minute, the reference and expert only once a cascade has been quiet for
+     1.2 s and the pile is still (the novice drops on the beat and vents ~2x as often), with aim
+     noise 5 / 1.5 / 0.5 px. Like the Cauldron it builds an activeRate table lazily: the first
+     900 live seconds in each coarse flask state (spawn, geometry and cascade nodes, Volatility)
+     measure merge income per unit of Potent x arcanaMult(V), the Feat tier and the Distill
+     Ceiling; later seconds reuse them and advance the drop count and the Feat's 60-drop log.
+     Live physics costs ~0.8 ms per simulated second, so 7-day runs are almost all live.
    - **Greedy buyer** (Cauldron, Mines): it buys the best Δincome/cost. When the skill gate needs the next
      dial level (Malice, Dig Deeper, Menace), it saves for it, and only buys items that pay for
      themselves before the dial would be affordable anyway. Gems and Batch Tokens buy the drum,
@@ -85,7 +114,11 @@ Two layers, as in 00 §8.1:
      perks, by value per cost.
    - **Fall policy**: Fall at 100% Infamy (`--fall-at` pushes further).
    - **Profiles**: `reference` (day 1: 45 + 15 + 30 min; then 10 + 10 + 10 + 20 min),
-     `idle-only`, `grinder`, `solo`.
+     `idle-only`, `grinder`, `solo`. Inside a session the player plays 5-min slices: a freshly
+     unlocked department first, then one with a Legend waiting, then the department visited
+     longest ago (a round robin across sessions and days).
+   - **Single-department main** for departments 5-7 starts from the reference player's meta state
+     at that department's unlock (00 §8.1, W-23), since they need lifetime Dread from elsewhere.
 
 Everything is seeded (`sim/rng.ts`) and deterministic for a given seed. The CI test asserts it.
 
@@ -118,8 +151,10 @@ The pure economy lives in `src/depts/<dept>/def.ts`, a `DeptEcon` with no Pixi i
      `goals.dialGoal` is the dial level the Fall policy wants.
    - `anyAffordable`, `dialLevel`, `dialMax`, `dialId`, `dialCost`, plus optional `ratioState`
      and `localRatioBands` (the spec's own active:idle bands).
-3. Add one line to `sim/adapters/index.ts`. Add its arc first-Fall day and unlock minute in
-   `sim/metrics.ts` if 00 §6 gives one. Its Seal starts being bought automatically.
+3. Add one line to `sim/adapters/index.ts`. Add its arc first-Fall day and unlock minute
+   (departments 2-4) or unlock day (5-7, `ARC_UNLOCK_DAY`) in `sim/metrics.ts`. Its Seal starts
+   being bought automatically. A department whose skill gate isn't counted in dial levels (the
+   Spire's Feat is tier + Volatility) sets `dialMax` to the gate's range for the reachability check.
 
 ## Reading the report
 
@@ -143,33 +178,44 @@ Each row shows a status, the spec level and a CI marker.
 Bands derived for a partial suite (see `metrics.ts`):
 
 - **Tribute / Dread share**: at most the equal share plus 20.7 pp. The spec's 35% at 7
-  departments is 1/7 + 20.7 pp, so 2 departments allow 70.7% and 4 allow 45.7%.
+  departments is 1/7 + 20.7 pp, so 2 departments allow 70.7%, 4 allow 45.7% and 6 allow 37.4%.
 - **Dread by day 7**: the 00 §6 arc for only the departments that exist. Each department's first
   Fall falls on its arc day (Cauldron early day 2, Mines day 3, Dungeon day 4, Bridge day 4-5),
   then cycles of 3 days (low, Crush 0) to 1.5 days (high, Crush 25%) at 100% Infamy. For
-  Cauldron + Mines that gives 70-235; for all four departments, 125-371 (the full suite's 120-200
-  is lower because 00 §6 has the Pit and the Spire contributing almost nothing by day 7).
-- **Phantom Seals** variant: pays the unbuilt departments' Seals (Styx, Spire, Pit) as pure
+  Cauldron + Mines that gives 70-235; for four departments, 125-371; for six, 145-439 (the full
+  suite's 120-200 is lower because 00 §6 has the Pit and the Spire contributing almost nothing by
+  day 7). 00 §6 gives no first-Fall day for the Styx and the Spire; `metrics.ts` holds them to
+  2.75-3.75 days after their unlock (the Dungeon and the Bridge take ~2.8 and ~3.0 days): Styx
+  day 4.25-5.25, Spire day 6.25-7.25.
+- **Unlock day** (departments 5-7): 00 §6's reference day ± 1 day (00 §8.1): Styx "day 2"
+  (1-2 d), Spire "day 4-5" (3-5 d).
+- **Phantom Seals** variant: pays the unbuilt departments' Seals (now only the Pit's) as pure
   Tribute sinks, to approximate the full suite's Tribute economy.
 
 ## Current results (reference, 7 days, 3 seeds; `sim/out/report.md` has the full table)
 
-71 pass, 17 warn, 0 fail after the second tuning pass below (Cauldron, Mines, Dungeon, Bridge).
-All hard bands pass. The remaining warnings are soft:
+96 pass, 29 warn, 0 fail after the third tuning pass below (all six built departments: Cauldron,
+Mines, Dungeon, Bridge, Styx, Spire). All hard bands pass in every seed. The remaining warnings
+are soft:
 
 - **First Fall wall clock vs AE hours.** In the reference profile every night and day gap adds
   ~2-4 h active-equivalent. The Cauldron's hard "3-4 h AE ± 1 h" band puts its first Fall in the
-  day-1 evening session (19:10, 3.1 h AE) instead of "early day 2". The later departments are
-  held to their arc day instead: Mines day 3 08:00 (~11 h AE), Dungeon day 4 08:05 (~20 h AE),
-  Bridge day 5 08:00 (~18 h AE).
+  day-1 evening session (19:15, 3.1 h AE) instead of "early day 2". The later departments are
+  held to their arc day instead: Mines day 3 08:00 (~11 h AE), Dungeon day 4 08:00 (~19 h AE),
+  Bridge day 5 08:05 (~19 h AE), Styx day 5 12:30 (~17 h AE), Spire day 7 08:00 (~16 h AE).
 - **Economy gate ≈ 2.5 h AE**: the same conflict.
-- **Cauldron week-1 cycles** average 1.1 days (the 1.5-3 day band is for weeks 2-4), so it Falls 6
-  times by day 7 and takes ~50% of the Dread (cap 45.7% for 4 departments). See "Still open".
-- **Dial step cost**: Cauldron median 14 min, Mines 2 min, Dungeon 6 min (Bridge 30 min passes).
-  Low dial levels are bought during the rebuild ramp, where income doubles every few minutes.
+- **Cauldron week-1 cycles** average 1.2 days (the 1.5-3 day band is for weeks 2-4), so it Falls 5
+  times by day 7 and takes ~41% of the Dread (cap 37.4% for 6 departments; the 00 §6 arc itself
+  implies 24-31% for the starter). See "Still open".
+- **Spire on-screen ratio** 2.51x median, one seed 2.26x (band 2.4-3.2x): ~25 baseline minutes
+  of a lumpy payout; the hard active:offline band passes in every seed (3.3-3.7x).
+- **Spire first Fall** day 7 08:00 (6.33 d; one seed 5.88 d) against the derived 6.25-7.25 d.
+- **Dial step cost**: Cauldron median 14 min, Mines 2 min, Dungeon 8 min, Styx 11 min, Spire
+  1 min (Bridge 27 min passes). Low dial levels are bought during the rebuild ramp.
 
 30-day runs (`--days 30`) still show the structural late-cycle problem from the tuning log, now in
-all four departments: longest cycles 9-11 days.
+all six departments: weeks 2-4 average 5.2-6.1 days, longest 7-10 days (see Pass 3, "Floor
+growth experiment").
 
 ## Tuning log
 
@@ -334,4 +380,115 @@ Still open after pass 2:
   Bridge caps Signage, Goon Pricing and Goons by ~day 4, after which only Menace grows income
   (x1.2 per level, +2 levels per Fall). Same meta-level decision as above.
 - **Bridge Seal (44K) above the Styx's (25K).** Fine for unlock order (the Styx is Dread-gated),
-  but the Styx/Spire/Pit prices should be re-derived with their adapters.
+  but the Styx/Spire/Pit prices should be re-derived with their adapters. (Done in pass 3.)
+
+### Pass 3: River Styx and Sorcerer's Spire (6 departments)
+
+New adapters `sim/adapters/styx.ts` and `sim/adapters/spire.ts` (see "How it works"), registered
+after the Bridge; both unlock by Seal plus lifetime Dread (10 / 60) in `DEPT_ORDER`. "Before" is
+the first full run with both adapters and the harness fixes below but the departments' own seed
+numbers (3-seed medians, worst status); "after" is the current report.
+
+Harness changes:
+
+1. **Slice rotation** (`meta.ts`). The slice picker used "least time today" but reset it every
+   session, so the 10-min sessions only ever reached the first two departments in order: the
+   Cauldron and the Mines got ~25 min a day, the Dungeon and the Bridge ~5, and departments 5-6
+   none at all outside Legend days. Slices now go to the department visited longest ago (fresh
+   unlocks and waiting Legends first). Each of six departments gets ~8 on-screen minutes a day.
+   This moved the four tuned departments a little (table below); no Cauldron, Mines, Dungeon or
+   Bridge number was changed.
+2. **Single-department fixture** for departments 5-7 (00 §8.1, W-23): the reference player's
+   meta (Throne, Dread perks, lifetime Dread) at the unlock. Without it the solo Styx had no
+   Banners or perks and read 1.7x the reference time.
+3. **Unlock day and first-Fall arc** for departments 5-6 (`metrics.ts`, see "Bands derived").
+4. **Floor-growth experiment switch**: `DeptEcon.floorGrowth` (optional, never set by the game;
+   `economy.ts` `econFloor` and the 100-200% Infamy band use it, default `FLOOR_GROWTH = 3`),
+   `SimConfig.floorGrowth` and `npm run sim -- --floor-growth X`.
+
+Changes (sim-tuned seeds, commented where they live):
+
+1. **Seals** (`src/core/meta.ts`): Styx 25,000 -> 120,000, Spire 150,000 -> 900,000 (War Pit
+   600,000 -> 3,000,000, provisional, to keep the ladder rising for the phantom-Seal variant).
+   Lifetime Dread (10 / 60) is met by day 2 / day 3, so Tribute binds.
+2. **Styx** (`styx/def.ts`): econBase 1e6 -> 1.2e8, rankRef 6 -> 12, rankTarget 60 -> 250.
+   `NET_YIELD` 0.65 kept: the live loop already sits at ~2.6x on screen.
+3. **Spire** (`spire/def.ts`): `IDLE_TUNE` 0.5 -> 8, econBase 1.5e8 -> 1.8e10, rankRef 100 ->
+   1,500, rankTarget 2,000 -> 1e4. The reference bot realizes several times EV_drop(T9) per drop
+   (Void Stars and a Singularity every ~25-30 min), so the apprentices' formula needed a much
+   larger realization factor to keep active play at ~2.8x idle.
+
+| Metric (band) | Before | After |
+|---|---|---|
+| Styx unlock (day 2 ± 1) | 1.33 d (day 2 08:00, with the Bridge) | 1.52 d (day 2 12:30) [1.52-1.75] |
+| Spire unlock (day 4-5 ± 1) | 2.52 d (day 3 12:30) | 3.52 d (day 4 12:30) [3.52-3.88] |
+| Styx first Fall (derived 4.25-5.25 d) | 2.34 d, 6.3 h AE | 4.52 d, 16.7 h AE [4.52-4.75] |
+| Spire first Fall (derived 6.25-7.25 d) | 3.75 d, 1.1 h AE | 6.33 d, 16.2 h AE [5.88-6.33] |
+| Styx active : offline (3-5x) | 3.12x FAIL (one seed 2.98x) | 4.01x [3.94-4.11] |
+| Styx active : on-screen idle (03 §3: ~2.8x, 2.4-3.2) | 2.16x | 2.66x [2.61-2.70] |
+| Spire active : offline (3-5x) | 34.6x FAIL | 3.63x [3.27-3.65]; 4.1x pooled over 6 seeds |
+| Spire active : on-screen idle (04 §4: ~2.8x, 2.4-3.2) | 25.1x | 2.51x [2.26-2.52]; 2.83x pooled |
+| Styx / Spire first upgrade (< 60 s) | 0-12 s / 10-20 s | 12 s / 10-20 s |
+| Styx / Spire something affordable on returns | 100% / 100% | 100% / 100% |
+| Styx / Spire cycles (2 h - 5 d) | 24-53 h / 24-30 h | 72 h / 48-68 h |
+| Tribute share Styx / Spire (<= 37.4%) | 28% / 8% | 16% / 20% |
+| Dread share Styx / Spire (<= 37.4%) | 16% / 12% | 9% / 10% |
+| Lifetime Dread, day 7 (145-439 derived for 6) | 406 | 304 [269-309] |
+| Single-department main, Styx / Spire (<= 1.5x) | 2.19 h / 0.62 h vs 3.27 / 1.01 | 22.5 h / 15.2 h vs 16.7 / 13.3 |
+| `npm run sim` runtime | n/a | ~49 s full, ~9 s `--quick`; CI test ~13 s |
+
+The four tuned departments, pass 2 (4 departments, old slice picker) -> pass 3 (6 departments,
+rotation): active : offline Cauldron 4.25x -> 4.26x, Mines 3.96x -> 3.92x, Dungeon 3.30x ->
+3.36x, Bridge 3.64x -> 3.56x; first Falls unchanged (day 1 19:14, day 3 08:00, day 4 08:00, day 5
+08:05); Cauldron average cycle 1.14 -> 1.24 d; Dread share Cauldron 50% -> 41% (cap 45.7% -> 37.4%),
+Mines 25 -> 16%, Dungeon 15 -> 18%, Bridge 9 -> 8%; Tribute shares 15-17% each. One Cauldron seed
+now reads 3.10x on screen against its 2-3x band (median 2.72x; seed 1, which CI gates, passes).
+
+Bot skill (`--skill`): Styx on-screen ratio novice / reference / expert 2.28x / 2.66x / 2.63x
+(seed 1). The Styx loop is mostly waiting (sink, bite wait, swim-in, fly), and with a few Braided
+Line levels a reel only fails if the player holds ~0.9 s into a thrash, so skill shows up as
+spooked fake-outs, missed windows at high Wrath and recast time, not escapes. Spire, 6 seeds x 2 h
+solo: novice / reference / expert earn 4.8e8 / 5.0e8 / 6.1e8 Arcana; the novice's slower beat
+offsets its worse aim because fast drops clog the flask (vents), and without the 1.2 s settle the
+30-drops/min reference bot earned less than the novice.
+
+What changes how they feel:
+
+- **Spire apprentices pay 16x more per orb** (`IDLE_TUNE` 0.5 -> 8). Idle and offline Arcana and
+  the Spire's Rank rise accordingly; active play is unchanged. The Spire report and Rank now read
+  ~1e4/s at the first 100% Infamy instead of ~600/s.
+- **Longer first cycles**: the Styx's first Legend now comes ~3 days after its Seal (was <1 day)
+  and the Spire's ~3 days after (was ~1 h of active-equivalent play).
+- **Later Seals**: the Styx opens a few hours after the Bridge instead of at the same moment; the
+  Spire on day 4 instead of day 3.
+
+Still open after pass 3:
+
+- **Cauldron Dread share ~41%** (above): same cause as before, the starter's ~1.2-day week-1
+  cycles. The arc (1.5-3-day cycles) would give it 24-31%. Not gated.
+- **Spire ratio noise**: ~25 baseline minutes per 7-day seed of a payout where one Singularity is
+  worth ~2,000 s of idle. Pooled it sits at 4.1x; `ratioOffline|spire` is not CI-gated.
+- **Weeks 2-4** now stretch in all six departments (next section).
+
+#### Floor growth experiment (not applied)
+
+30-day reference runs, 3 seeds each (`--floor-growth`, or `SimConfig.floorGrowth`). The economy
+floor is `E0 x g^n`; the 100-200% band spans one more step of `g`. Values per department in the
+order Cauldron / Mines / Dungeon / Bridge / Styx / Spire, seed medians.
+
+| | x3 (shipped) | x2.5 | x2 |
+|---|---|---|---|
+| Falls in 30 days | 9 / 5 / 5 / 4 / 3 / 3 | 10 / 6 / 5 / 5 / 4 / 4 | 13 / 7 / 5 / 6 / 5 / 5 |
+| Weeks 2-4 average cycle, days (1.5-3) | 5.2 / 6.1 / 5.6 / 5.8 / 5.6 / 5.3 | 3.6 / 6.9 / 5.0 / 5.9 / 5.9 / 5.7 | 3.0 / 4.0 / 4.5 / 5.0 / 5.5 / 4.4 |
+| Longest cycle incl. open, days (<= 5) | 9.5 / 10.4 / 9.2 / 9.0 / 7.2 / 6.8 | 6.8 / 11.5 / 9.2 / 10.4 / 9.2 / 8.6 | 6.0 / 6.8 / 8.2 / 8.0 / 10.5 / 7.1 |
+| Stalls (cycles > 5 d, per department) | 2-3 | 2-3 | 1-2 |
+| Lifetime Dread day 7 / 14 / 30 | 304 / 579 / 837 | 345 / 720 / 1,102 | 395 / 1,048 / 1,735 |
+| Dread per day, weeks 2-4 | 24 | 33 | 58 |
+| Cauldron Dread share, day 30 (<= 30%) | 37-39% | 37-39% | 48-51% |
+
+In every variant the stalled cycles sit with the skill gate full and the economy gate at 90-99%
+for days: once a department's capped nodes are bought its income plateaus, so the time to the
+next floor still grows geometrically, only with a smaller base. x2 is the only variant near the
+band, and it buys that with 2.4x the Dread rate (more Iron Fist and Ruinborn feed back into
+income) and a 50% Cauldron Dread share. No growth factor on its own brings weeks 2-4 into
+1.5-3 days.

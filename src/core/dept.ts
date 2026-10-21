@@ -44,6 +44,9 @@ export interface DeptEcon {
   skillLabel(target: number): string;
   /** Economy gate base E0: cycle earnings needed for the first Fall (x3 per Fall). */
   econBase: number;
+  /** Balance-sim experiments only: economy floor growth per Fall (default FLOOR_GROWTH = 3 in
+   * economy.ts). No department sets it. */
+  floorGrowth?: number;
   /** Rank reference points (idle rate early, and at first 100% Infamy). */
   rankRef: number;
   rankTarget: number;

@@ -77,8 +77,15 @@ export function tributeRate(s: SaveRoot, id: DeptId, defs: Record<string, DeptEc
   return perMin / 60;
 }
 
+/** Economy floors grow x3 per Fall (00 §8, anti-domination rule 4). */
+export const FLOOR_GROWTH = 3;
+
+/** Per-department floor growth: the shipped FLOOR_GROWTH unless a balance-sim experiment overrides
+ * it on the definition (DeptEcon.floorGrowth; the game never sets it). */
+export const floorGrowth = (def: DeptEcon): number => def.floorGrowth ?? FLOOR_GROWTH;
+
 export function econFloor(def: DeptEcon, n: number): number {
-  return def.econBase * 3 ** n;
+  return def.econBase * floorGrowth(def) ** n;
 }
 
 /** Infamy 0-200, specs/00 §2.2. */
@@ -92,7 +99,8 @@ export function infamy(def: DeptEcon, d: DeptSave): { value: number; skill: numb
   if (skillFrac >= 1 && econFrac >= 1) {
     const t1 = def.skillTarget(n + 1);
     const skillOver = t1 === target ? 1 : (d.cycle.heldLevel - target) / (t1 - target);
-    const econOver = Math.log(d.cycle.earnings / floor) / Math.log(3);
+    // 100% -> 200% spans one more floor step (x3 by default).
+    const econOver = Math.log(d.cycle.earnings / floor) / Math.log(floorGrowth(def));
     value = 100 + 100 * Math.max(0, Math.min(1, skillOver, econOver));
   }
   return { value, skill: skillFrac, econ: econFrac };

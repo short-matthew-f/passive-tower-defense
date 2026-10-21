@@ -138,7 +138,7 @@ export const comboMult = (streak: number) => 1 + 0.05 * Math.min(streak, 20);
 
 export const PILK_NETTERS = 30 / 45; // Pilk's skiff: 1 soul / 45 s, in netter-equivalents
 export const NET_S = 30; // one soul per 30 s per netter
-export const NET_YIELD = 0.65; // TUNED: share of ledger value the netters' stragglers fetch
+export const NET_YIELD = 0.65; // TUNED: share of ledger value the netters' stragglers fetch (balance sim pass 3: kept, 2.5-2.7x on screen at baseline)
 export const netMult = (lv: number) => 1 + 0.1 * lv;
 export const poleFrac = (lv: number) => Math.min(0.6, 0.2 + 0.1 * lv);
 

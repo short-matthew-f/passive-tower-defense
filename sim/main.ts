@@ -8,6 +8,8 @@
 //   --skill S     bot skill: novice | reference | expert
 //   --live        run the Cauldron's live core every second (no activeRate table)
 //   --quick       reference profile only, 1 seed
+//   --floor-growth X  experiment: economy floor growth per Fall (shipped default 3)
+import { SEAL_DREAD } from '../src/core/meta';
 import { allAdapters, type AdapterOpts } from './adapters';
 import { DEFAULT_CONFIG, PROFILES, simulate, type SimResult } from './meta';
 import { aggregate, evaluate, fmt, type Metric } from './metrics';
@@ -31,14 +33,15 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   const fallAt = Number(arg(argv, 'fall-at') ?? 100);
   const skill = (arg(argv, 'skill') ?? 'reference') as Skill;
   const live = argv.includes('--live');
-  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill } };
+  const floorGrowth = arg(argv, 'floor-growth') ? Number(arg(argv, 'floor-growth')) : undefined;
+  const aopts: AdapterOpts = { cauldron: { skill, liveOnly: live }, mines: { skill }, dungeon: { skill }, bridge: { skill }, styx: { skill }, spire: { skill, liveOnly: live } };
 
   // ----- reference profile, N seeds -----
   const runs: SimResult[] = [];
   const perSeed: Metric[][] = [];
   for (let k = 0; k < seeds; k++) {
     const factories = allAdapters(aopts);
-    const cfg = { ...DEFAULT_CONFIG, days, fallAt, seed: 1 + k, adapters: factories };
+    const cfg = { ...DEFAULT_CONFIG, days, fallAt, floorGrowth, seed: 1 + k, adapters: factories };
     const r = simulate(cfg);
     runs.push(r);
     perSeed.push(evaluate(r, factories.map((f) => f(0))));
@@ -88,10 +91,13 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
       phantomEvents = eventsList(r.events, ['seal', 'fall']);
     }
 
-    // Single-department main: the reference schedule, one department only.
+    // Single-department main: the reference schedule, one department only. Departments 5-7 need
+    // lifetime Dread from elsewhere, so they start from the reference player's meta at their
+    // unlock (00 §8.1, W-23).
     for (const f of allAdapters(aopts)) {
       const a = f(0);
-      const solo = simulate({ ...DEFAULT_CONFIG, days, adapters: [f] });
+      const fixture = SEAL_DREAD[a.id] ? runs[0].tracks[a.id]?.metaAtUnlock : undefined;
+      const solo = simulate({ ...DEFAULT_CONFIG, days, adapters: [f], initialMeta: fixture });
       const ref = runs[0].tracks[a.id]?.falls[0];
       const s0 = solo.tracks[a.id]?.falls[0];
       const ok = !!s0 && !!ref && s0.cycleAEH <= 1.5 * ref.cycleAEH;
@@ -100,7 +106,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
         dept: a.id,
         label: 'Single-department main: first Fall vs reference',
         value: s0 ? s0.cycleAEH : null,
-        display: s0 ? `${s0.cycleAEH.toFixed(2)} h AE vs reference ${ref ? ref.cycleAEH.toFixed(2) : 'n/a'} h` : 'no Fall',
+        display: s0 ? `${s0.cycleAEH.toFixed(2)} h AE vs reference ${ref ? ref.cycleAEH.toFixed(2) : 'n/a'} h${fixture ? ' (fixture: reference meta at unlock)' : ''}` : 'no Fall',
         band: '<= 1.5x reference',
         level: 'hard',
         ci: false,
@@ -151,7 +157,7 @@ export async function main(argv: string[] = []): Promise<SimOutput> {
   }
 
   const all = [...metrics, ...side];
-  const title = `Overlord balance sim: reference profile, ${days} days, ${seeds} seed(s), Fall at ${fallAt}%, ${skill} bots`;
+  const title = `Overlord balance sim: reference profile, ${days} days, ${seeds} seed(s), Fall at ${fallAt}%, ${skill} bots${floorGrowth ? `, floor growth x${floorGrowth} (experiment)` : ''}`;
   console.log(consoleTable(title, all));
 
   // ----- reports (written to sim/out by cli.mjs) -----

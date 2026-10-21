@@ -93,6 +93,11 @@ export interface SimConfig {
   /** Pay the Seals of departments not built yet as pure Tribute sinks (models the full suite's
    * Tribute economy; the current build has no such sink, so Tribute all goes to Banners). */
   phantomSeals?: boolean;
+  /** Start from this meta state (Throne, Dread perks, lifetime Dread): the 00 §8.1 single-department
+   * fixture for departments 5-7 (W-23), the reference player's meta at that department's unlock. */
+  initialMeta?: SaveRoot['meta'];
+  /** Experiment: economy floor growth per Fall for every department (shipped default x3). */
+  floorGrowth?: number;
 }
 
 export const DEFAULT_CONFIG: Omit<SimConfig, 'adapters'> = {
@@ -149,6 +154,8 @@ export interface DeptTrack {
   ratioByDay: Record<number, RatioAgg>;
   cycleStartT: number;
   cycleStartOnScreen: number;
+  /** Copy of the meta state when this department unlocked (fixture for single-department runs). */
+  metaAtUnlock?: SaveRoot['meta'];
 }
 
 export interface DaySnap {
@@ -172,7 +179,7 @@ export interface SimEvent {
 }
 
 export interface SimResult {
-  config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean };
+  config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean; floorGrowth: number };
   tracks: Record<string, DeptTrack>;
   snaps: DaySnap[];
   events: SimEvent[];
@@ -198,10 +205,11 @@ export function simulate(cfg: SimConfig): SimResult {
   const byId: Partial<Record<DeptId, DeptAdapter>> = {};
   for (const a of adapters) byId[a.id] = a;
   const defs: Record<string, DeptEcon> = {};
-  for (const a of adapters) defs[a.id] = a.def;
+  for (const a of adapters) defs[a.id] = cfg.floorGrowth ? { ...a.def, floorGrowth: cfg.floorGrowth } : a.def;
   const built = DEPT_ORDER.filter((id) => byId[id]);
 
   const s = newSave(0);
+  if (cfg.initialMeta) s.meta = JSON.parse(JSON.stringify(cfg.initialMeta));
   let t = 0; // sim seconds
   let activeS = 0;
   const nowMs = () => t * 1000;
@@ -285,6 +293,7 @@ export function simulate(cfg: SimConfig): SimResult {
     const tr = tracks[id];
     tr.unlockedAt = t;
     tr.unlockedAtActiveMin = activeS / 60;
+    tr.metaAtUnlock = JSON.parse(JSON.stringify(s.meta));
     tr.cycleStartT = t;
     log('unlock', `${id} unlocked`, id);
   }
@@ -597,6 +606,11 @@ export function simulate(cfg: SimConfig): SimResult {
     checkProgress();
   }
 
+  /** Sim time each department's last on-screen slice ended. SIM CHANGE (pass 3): the slice picker
+   * used "least time today" reset every session, so with 10-min sessions only the first two
+   * departments in order ever got screen time (Cauldron and Mines ~25 min a day, the Dungeon and
+   * the Bridge ~5, and departments 5-6 none outside Legend days). Now it rotates. */
+  const lastVisit: Record<string, number> = {};
   function playSession(plan: SessionPlan, isReturn: boolean): void {
     if (isReturn) {
       for (const id of unlocked()) {
@@ -609,7 +623,6 @@ export function simulate(cfg: SimConfig): SimResult {
     }
     throne();
     let remaining = Math.round(plan.min * 60);
-    const today: Record<string, number> = {};
     if (remaining <= 0) {
       // Collect-All visit: pop into each department to shop, no on-screen play.
       for (const id of unlocked()) enter(id).end();
@@ -620,12 +633,12 @@ export function simulate(cfg: SimConfig): SimResult {
       const ids = unlocked();
       const fresh = ids.find((id) => tracks[id].firstEntryAt === null);
       const legend = ids.find((id) => fallReady(id));
-      const cur = fresh ?? legend ?? ids.slice().sort((a, b) => (today[a] ?? 0) - (today[b] ?? 0))[0];
+      // Otherwise the department visited longest ago (a round robin across sessions and days).
+      const cur = fresh ?? legend ?? ids.slice().sort((a, b) => (lastVisit[a] ?? -1) - (lastVisit[b] ?? -1))[0];
       let sess = enter(cur);
       const slice = Math.min(remaining, cfg.sliceMin * 60);
       for (let i = 0; i < slice; i++) {
         tick(cur, sess);
-        today[cur] = (today[cur] ?? 0) + 1;
         if ((i + 1) % cfg.buyEveryS === 0) shopOnce(cur, sess);
         if (fallReady(cur)) {
           sess.end();
@@ -634,6 +647,7 @@ export function simulate(cfg: SimConfig): SimResult {
         }
       }
       sess.end();
+      lastVisit[cur] = t;
       remaining -= slice;
       throne();
     }
@@ -671,7 +685,7 @@ export function simulate(cfg: SimConfig): SimResult {
   for (const [id, sess] of Object.entries(sessionStats)) adapterStats[id] = sess.stats?.() ?? {};
 
   return {
-    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals },
+    config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? 3 },
     tracks,
     snaps,
     events,

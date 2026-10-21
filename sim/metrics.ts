@@ -34,6 +34,19 @@ export const ARC_FIRST_FALL_DAY: Partial<Record<DeptId, [number, number]>> = {
   mines: [2.0, 3.0], // "the Mines Fall second (day 3)"
   dungeon: [3.0, 4.0], // "the Dungeon third (day 4)"
   bridge: [4.0, 5.0], // not stated; next in line
+  // Not stated in 00 §6. Derived: the Dungeon and the Bridge Fall ~2.8 and ~3.0 days after their
+  // unlock in the reference profile, so departments 5-6 are held to 2.75-3.75 days after theirs
+  // (Styx opens day 2, ~1.5 d; Spire day 4-5, ~3.5 d). That staggers them after the Bridge and
+  // leaves the Spire's first Fall at the end of week 1, as 00 §6 implies (the full suite's
+  // 120-200 Dread has the Spire contributing almost nothing by day 7).
+  styx: [4.25, 5.25],
+  spire: [6.25, 7.25],
+};
+
+/** 00 §6 reference unlock day for departments 5-7 (0-based days), tolerance ± 1 day (00 §8.1). */
+export const ARC_UNLOCK_DAY: Partial<Record<DeptId, [number, number]>> = {
+  styx: [1.0, 2.0], // "day 2"
+  spire: [3.0, 5.0], // "day 4-5"
 };
 
 /** Expected unlock time from 00 §6, in active minutes, with the ±30 min tolerance for departments 2-4. */
@@ -186,6 +199,25 @@ export function evaluate(r: SimResult, adapters: DeptAdapter[]): Metric[] {
           band: `${unlockArc} ± 30 min`,
           lo: Math.max(0, unlockArc - 30),
           hi: unlockArc + 30,
+          level: 'soft',
+          ci: false,
+        }),
+      );
+    }
+
+    const unlockDay = ARC_UNLOCK_DAY[id];
+    if (unlockDay) {
+      const d = tr.unlockedAt === null ? null : tr.unlockedAt / DAY;
+      out.push(
+        mk({
+          id: 'unlockDay',
+          dept: id,
+          label: 'Unlock time (days since start)',
+          value: d,
+          display: d === null ? 'never' : `${d.toFixed(2)} d (${dayClock(tr.unlockedAt!)}, ${tr.unlockedAtActiveMin!.toFixed(0)} active min)`,
+          band: `${unlockDay[0]}-${unlockDay[1]} d ± 1 day (00 §6)`,
+          lo: unlockDay[0] - 1,
+          hi: unlockDay[1] + 1,
           level: 'soft',
           ci: false,
         }),

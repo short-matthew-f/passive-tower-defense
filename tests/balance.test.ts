@@ -8,7 +8,7 @@ import { allAdapters } from '../sim/adapters';
 import { DEFAULT_CONFIG, PROFILES, simulate } from '../sim/meta';
 import { evaluate, type Metric } from '../sim/metrics';
 
-// 7 days, so the later departments (first Falls on days 2-5) have cycles and baseline time to measure.
+// 7 days, so the later departments (first Falls on days 2-7) have cycles and baseline time to measure.
 const DAYS = 7;
 
 /**
@@ -27,6 +27,13 @@ const DAYS = 7;
  *  - ratioLocal.all|bridge: 2.1-2.9x across seeds on ~25-35 baseline minutes (band 2.3-3.2x);
  *    the hard active:offline band is gated instead.
  *  - cycleAvg|bridge: one completed cycle in 7 days.
+ *  - firstFallAE|styx, |spire, econGateAE|*: the same AE-vs-arc conflict as departments 2-4.
+ *  - ratioOffline|spire, ratioLocal.all|spire: ~25 baseline minutes of a lumpy payout (one
+ *    Singularity is worth ~2,000 s of idle), so single seeds read 3.2-5.6x active:offline although
+ *    the pooled 6-seed value is 4.1x (on screen 2.8x). Gated through `npm run sim`'s seed medians.
+ *  - firstFallDay|spire: the first Spire Fall lands on day 7 08:00 or 18:00 (6.3-6.8 d) or just
+ *    after the run, depending on whether the Seal opens on day 4 12:30 or 21:00.
+ *  - dialStep|styx, |spire: as for the other departments.
  */
 const TUNED_GATES = [
   'firstFallAE|cauldron',
@@ -55,6 +62,17 @@ const TUNED_GATES = [
   'cycleMax|bridge',
   'ratioOffline|bridge',
   'returnAffordable|bridge',
+  'unlockDay|styx',
+  'firstFallDay|styx',
+  'cycleMin|styx',
+  'cycleMax|styx',
+  'ratioOffline|styx',
+  'ratioLocal.all|styx',
+  'returnAffordable|styx',
+  'unlockDay|spire',
+  'cycleMin|spire',
+  'cycleMax|spire',
+  'returnAffordable|spire',
 ];
 
 /**
@@ -77,6 +95,22 @@ const SUITE_GATES: Record<string, string[]> = {
     'dreadShare|mines',
     'dreadShare|dungeon',
     'dreadShare|bridge',
+    'dreadPacing|',
+  ],
+  // Six departments (pass 3). dreadShare|cauldron stays a warning for the same reason (~41% vs a
+  // 37.4% cap; the 00 §6 arc itself implies 24-31% for the starter, see the tuning log).
+  'cauldron,mines,dungeon,bridge,styx,spire': [
+    'tributeShare|cauldron',
+    'tributeShare|mines',
+    'tributeShare|dungeon',
+    'tributeShare|bridge',
+    'tributeShare|styx',
+    'tributeShare|spire',
+    'dreadShare|mines',
+    'dreadShare|dungeon',
+    'dreadShare|bridge',
+    'dreadShare|styx',
+    'dreadShare|spire',
     'dreadPacing|',
   ],
 };
