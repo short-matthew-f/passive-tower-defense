@@ -63,7 +63,8 @@ export class Button extends Container {
     this.on('pointerup', this.up, this);
     this.on('pointerupoutside', this.cancel, this);
     this.on('pointerleave', this.cancel, this);
-    this.setLabel(opts.label, opts.sub);
+    // Draw once up front: setLabel() skips no-op changes, and the first label is one.
+    this.redraw();
   }
 
   get enabled(): boolean {

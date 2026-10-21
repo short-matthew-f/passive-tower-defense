@@ -522,7 +522,7 @@ export class MinesScene implements DeptScene {
 
   private forceKind(): M.RockKind | null {
     // Onboarding beat 4: once a goblin is hired, make sure a vein shows up to teach "shiny first".
-    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !this.wall.tiles.some((o) => o.kind === 'vein' || o.next === 'vein')) return 'vein';
+    if (this.ctx.seen('ob.hire') && !this.ctx.seen('ob.vein') && !(this.wall?.tiles ?? []).some((o) => o.kind === 'vein' || o.next === 'vein')) return 'vein';
     return null;
   }
 
