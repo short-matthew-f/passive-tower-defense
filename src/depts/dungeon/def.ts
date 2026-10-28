@@ -1,6 +1,7 @@
 // The Dungeon's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
-import type { Commendation, DeptEcon, StewardCandidate } from '../../core/dept';
+import type { Commendation, DeptEcon, DeptGoal, NightOrderDef, StewardCandidate } from '../../core/dept';
+import { formatNum } from '../../core/format';
 import { LONG_EFFECT, longLocked } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import { FLOORS } from './map';
@@ -102,6 +103,57 @@ function steward(save: DeptSave): StewardCandidate[] {
   return out;
 }
 
+// ---------- Wave 1 hooks: Next Goal and Night Orders (core/goals.ts, core/orders.ts) ----------
+
+const HERO_PLURAL: Record<string, string> = { rogue: 'ROGUES', knight: 'KNIGHTS', cleric: 'CLERICS', wizard: 'WIZARDS' };
+
+/**
+ * The next enticing goal: the first Bait Chest (fatten, then feast), then the next Lure tier
+ * (naming the new hero it brings), and once the dial reaches the skill target, the two Champions.
+ */
+export function nextGoalOf(save: DeptSave): DeptGoal | null {
+  if (!ready(save)) return null;
+  const r = run(save);
+  const bank = Math.max(0, r.bank);
+  const g = gridOf(save);
+  if (!r.bait.length && g.spots.length && (r.stats.placed ?? 0) >= 1) {
+    const c = M.chestCost(r);
+    return { label: 'BAIT A CHEST: FEAST', progress: Math.min(1, bank / c), detail: `${formatNum(bank)}/${formatNum(c)}` };
+  }
+  const target = dungeonEcon.skillTarget(save.cycle?.n ?? 0);
+  if (r.lureMax < target && r.lureMax < M.MAX_LURE) {
+    const T = r.lureMax + 1;
+    const c = M.lureCost(T);
+    const hero = M.NEW_HERO_AT[T];
+    const label = hero ? `LURE ${T}: ${HERO_PLURAL[hero]}` : `LURE ${T}: RICHER VISITORS`;
+    return { label: label.slice(0, 24), progress: Math.min(1, bank / c), detail: `${formatNum(bank)}/${formatNum(c)}` };
+  }
+  const held = r.champs.filter((t) => t >= target).length;
+  if (held < 2) return { label: `SLAY CHAMPIONS AT L${target}`, progress: held / 2, detail: `${held}/2` };
+  return null;
+}
+
+/** Ledger-Bones' two standing orders (ids match the core pair, so a saved choice carries over). */
+const ORDERS: NightOrderDef[] = [
+  { id: 'hold', label: 'FATTEN & FEAST', desc: 'Chests stocked: +25% Plunder', kind: 'income' },
+  { id: 'bait', label: 'SPREAD RUMORS', desc: 'Legend gate fills x1.5, to 100%', kind: 'gate' },
+];
+
+/** The report line for FATTEN & FEAST: looters feasted on overnight (the idle sim's own rule: one
+ * purse per chest per party). */
+export function applyNightOrderTo(save: DeptSave, orderId: string, elapsedSeconds: number): string | void {
+  if (!ready(save)) return;
+  const r = run(save);
+  const parties = Math.floor(Math.max(0, elapsedSeconds) / M.PARTY_EVERY);
+  if (parties < 1) return;
+  if (orderId === 'hold') {
+    const chests = Math.min(r.bait.length, gridOf(save).spots.length);
+    if (!chests) return; // the core's "+X EXTRA PLUNDER" line
+    return `${formatNum(parties * chests)} LOOTERS FEASTED ON`.slice(0, 28);
+  }
+  // 'bait': the core's gate line ("LEGEND GATE 40% > 100%", "THE LEGEND TOOK THE BAIT!") says it best.
+}
+
 export const dungeonEcon: DeptEcon = {
   id: 'dungeon',
   version: 1,
@@ -172,6 +224,10 @@ export const dungeonEcon: DeptEcon = {
   },
 
   stewardCandidates: steward,
+
+  nextGoal: nextGoalOf,
+  nightOrders: () => ORDERS,
+  applyNightOrder: (save, id, elapsed) => applyNightOrderTo(save, id, elapsed),
 
   // Head Start (00 §2.5): the first 2L Lure tiers and 1 + L free Arrow Slits on the Cellar.
   applyHeadStart(save, level) {

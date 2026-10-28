@@ -19,6 +19,7 @@ import {
   gauntletArt,
   glintArt,
   goblinArt,
+  goldGoblinArt,
   GOLD,
   OUTLINE,
   rockArt,
@@ -31,8 +32,13 @@ import { anyAffordable, buildGroups, maxDepthEver } from './upgrades';
 import { U, Wall, type By, type Tile } from './wall';
 import { destroyTree } from '../../ui/destroy';
 
-const SOFT_CAP = 8;
+// Wave 1: the 8 taps/s half-damage soft cap is gone (fast taps fill the Fury meter instead); the
+// 15 hits/s hard cap stays as an input-flood guard.
 const HARD_CAP = 15;
+/** Gold Goblin tap radius in screen px (generous: he is small and moving). */
+const GOLD_HIT = 13;
+/** Hit-stop on a rock you break yourself (Sakurai: ~2 frames). */
+const BREAK_STOP = 0.033;
 const RAKE_MAX = 8;
 const HOLD_DELAY = 0.35;
 const MAX_FX = 12;
@@ -175,6 +181,15 @@ export class MinesScene implements DeptScene {
   private ritual: Ritual | null = null;
   private calib: Calib | null = null;
   private calibPending = false;
+  /** Signed beat offsets of recent judged taps, for silent auto-calibration. */
+  private autoCal: number[] = [];
+  private autoCalN = 0;
+  private tikT = 0;
+  /** Early/late hint for the last judged tap (Arcaea): signed offset and seconds left to show. */
+  private hintOff = 0;
+  private hintT = 0;
+  private goldView = new Graphics();
+  private goldFx = new Graphics();
   private btnCache = new Map<Button, string>();
 
   // ui widgets
@@ -196,6 +211,7 @@ export class MinesScene implements DeptScene {
     this.run = ctx.save.run as M.MinesRun;
     this.per = ctx.save.persistent as M.MinesPersistent;
     this.run.depth = Math.max(1, Math.min(this.run.depth, this.run.maxDepth));
+    const precracked = this.per.precrack;
     this.groups = buildGroups(ctx, {
       onDig: () => this.onDig(),
       onDrum: () => this.onDrumBought(),
@@ -218,6 +234,9 @@ export class MinesScene implements DeptScene {
       onPlant: (t) => (this.view(t).squashT = 0.1),
       onClink: (t) => this.onClink(t),
       onFrenzy: (start) => this.onFrenzy(start),
+      onFury: (start) => this.onFury(start),
+      onGold: (ev) => this.onGold(ev),
+      onGoldEnd: (kind) => this.onGoldEnd(kind),
     });
     this.root.addChild(
       this.bg,
@@ -225,6 +244,8 @@ export class MinesScene implements DeptScene {
       this.ringG,
       this.drum,
       this.gobLayer,
+      this.goldFx,
+      this.goldView,
       this.fxG,
       this.partLayer,
       this.ritualLayer,
@@ -267,6 +288,14 @@ export class MinesScene implements DeptScene {
       t.kind = 'common';
       t.maxHp = M.H(this.run.depth);
       t.hp = t.maxHp * 0.3;
+    }
+    // A return after an absence finds a Gold Goblin waiting (genre-research R1).
+    const away = this.per.gemAt > 0 ? (Date.now() - this.per.gemAt) / 1000 : 0;
+    if (away >= M.GOLD_AWAY_S && this.run.stats.rocks >= M.GOLD_ROCKS) this.wall.queueGold(3);
+    this.goldView.visible = false;
+    if (precracked) {
+      const c = ctx.content();
+      ctx.float('WALL PRE-CRACKED! CHAIN IT!', c.x + c.w / 2, this.wallY - 18, '#ffd070');
     }
     this.creditOfflineGems();
     this.showGemAway();
@@ -572,12 +601,24 @@ export class MinesScene implements DeptScene {
       sfx.gem(this.vol());
       this.ctx.saveSoon();
     }
-    this.burst(cx, cy, by === 'gob' ? 6 : big ? 14 : 10, kind === 'mother' ? GOLD : pal.chip);
-    this.nuggets(cx, cy, kind === 'mother' ? 10 : kind === 'vein' ? 5 : 2);
-    if (by !== 'gob') {
+    this.burst(cx, cy, by === 'gob' ? 6 : big ? 14 : 10, kind === 'mother' ? GOLD : kind === 'soft' ? 0xd8c8a0 : pal.chip);
+    this.nuggets(cx, cy, (kind === 'mother' ? 10 : kind === 'vein' ? 5 : 2) * (this.wall.rushT > 0 ? 2 : 1));
+    if (by === 'tap') {
       this.shake(1, 0.06);
       this.ctx.haptic(8);
-      sfx.break(this.vol());
+      this.hitStop = Math.max(this.hitStop, big ? 0.06 : BREAK_STOP);
+      sfx.break(this.vol(), kind, this.wall.chainN);
+      const ch = this.wall.chainN;
+      if (ch >= 2) this.ctx.float(`CHAIN X${M.chainMult(ch).toFixed(1)}`, cx, cy + 8, ch >= M.CHAIN_STEPS ? '#ff9a30' : '#ffd070');
+    } else if (by === 'gob') {
+      // Quiet ticks from the crew (at most ~5 a second), so an idle wall is never silent.
+      if (this.tikT <= 0) {
+        this.tikT = 0.2;
+        sfx.tik(this.vol(), big);
+      }
+    } else {
+      this.shake(1, 0.06);
+      sfx.break(this.vol(), kind);
     }
   }
 
@@ -657,6 +698,87 @@ export class MinesScene implements DeptScene {
     this.ctx.float('CLINK', this.tx(t) + this.T / 2, this.ty(t) + 4, '#8a8494');
   }
 
+  private onFury(start: boolean): void {
+    const c = this.ctx.content();
+    if (start) {
+      this.ctx.game.juice.shake(1);
+      this.ctx.haptic(30);
+      sfx.fury(this.vol());
+      this.ctx.float('FURY! X2', c.x + c.w / 2, this.wallY + 30, '#ff4030');
+      for (const gv of this.gobViews) gv.cheer = 0.6;
+      if (!this.ctx.seen('m.fury')) {
+        this.ctx.markSeen('m.fury');
+        this.ctx.say('fury');
+      }
+    }
+  }
+
+  private onGold(ev: 'spawn' | 'escape'): void {
+    const g = this.wall.gold;
+    if (ev === 'spawn') {
+      sfx.goldIn(this.vol());
+      if (g) this.goldSparkle(g.x, g.y, 6);
+      if (!this.ctx.seen('m.gold')) {
+        this.ctx.markSeen('m.gold');
+        this.ctx.say('gold');
+      }
+    } else {
+      sfx.goldEscape(this.vol());
+      this.goldView.visible = false;
+    }
+  }
+
+  private onGoldEnd(kind: 'rush' | 'fist'): void {
+    const c = this.ctx.content();
+    this.ctx.float(kind === 'rush' ? 'GOLD RUSH OVER' : 'FIST FADES', c.x + c.w / 2, this.wallY + 40, '#c8a050');
+  }
+
+  /** Sparkles around the Gold Goblin (wall units). */
+  private goldSparkle(wx: number, wy: number, n: number): void {
+    const x = this.wallX + wx * this.k;
+    const y = this.wallY + wy * this.k;
+    for (let i = 0; i < n; i++) this.spawnPart(x + (rand() - 0.5) * 14, y + (rand() - 0.5) * 14, i % 2 ? 0xfff0a0 : GOLD, 1, (rand() - 0.5) * 30, -20 - rand() * 30, 0.5, 40);
+  }
+
+  /** Taps the Gold Goblin if the point is on him; true when caught. */
+  private tryGold(px: number, py: number): boolean {
+    const g = this.wall.gold;
+    if (!g) return false;
+    const gx = this.wallX + g.x * this.k;
+    const gy = this.wallY + g.y * this.k;
+    if (Math.abs(px - gx) > GOLD_HIT || Math.abs(py - gy) > GOLD_HIT) return false;
+    const res = this.wall.catchGold();
+    if (!res) return false;
+    this.goldView.visible = false;
+    const v = this.vol();
+    const c = this.ctx.content();
+    const big = res.kind !== 'sack';
+    sfx.goldCatch(v, big);
+    this.ctx.haptic(big ? 50 : 30);
+    this.goldSparkle(res.x, res.y, 16);
+    for (const gv of this.gobViews) gv.cheer = 1;
+    const mid = c.x + c.w / 2;
+    const ty = this.wallY + 34;
+    // The shared juice kit (ui/juice.ts): a boss-stop, a tiered pop and coins to the bank.
+    const j = this.ctx.game.juice;
+    j.hitStop(big ? 100 : 70);
+    j.shake(big ? 2 : 1);
+    j.flash(this.wallX, this.wallY, this.T * M.GRID, this.T * M.GRID, res.kind === 'fist' ? 0xffffff : 0xffe060, 0.3, 0.35);
+    if (res.kind === 'sack') {
+      j.pop('LUCKY SACK!', mid, ty - 12, { tier: 1, color: '#ffe060' });
+      j.popValue(res.got, mid, ty, { prefix: '+', tier: 2 });
+      j.coinFly(gx, gy, 8);
+    } else if (res.kind === 'rush') j.pop(`GOLD RUSH X${M.GOLD_RUSH_MULT}!`, mid, ty, { tier: 2, color: '#ffe060' });
+    else if (res.kind === 'fist') j.pop(`OVERLORD'S FIST X${M.GOLD_FIST_MULT}!`, mid, ty, { tier: 2, color: '#ff6040' });
+    else {
+      j.pop(`GEM POUCH +${res.gems}{gem}`, mid, ty, { tier: 2, color: '#d090ff' });
+      sfx.gem(v);
+    }
+    if (rand() < 0.5) this.ctx.say('goldCaught');
+    this.ctx.saveSoon();
+    return true;
+  }
+
   private onFrenzy(start: boolean): void {
     if (start) {
       this.shake(2, 0.2);
@@ -695,6 +817,11 @@ export class MinesScene implements DeptScene {
       this.lightRitual(this.ritual.kegs.indexOf(ti));
       return;
     }
+    if (this.tryGold(p.x, p.y)) {
+      // A catch is not a rock tap: no hold auto-hits from this finger.
+      this.pointers.delete(e.pointerId);
+      return;
+    }
     this.playerTap(ti, p.x, p.y, false);
   }
 
@@ -730,18 +857,24 @@ export class MinesScene implements DeptScene {
     while (this.tapTimes.length && now - this.tapTimes[0] >= 1000) this.tapTimes.shift();
     if (this.tapTimes.length >= HARD_CAP) return;
     this.tapTimes.push(now);
-    const soft = this.tapTimes.length > SOFT_CAP ? 0.5 : 1;
     let beat = null;
     if (this.drumActive() && !auto) {
       const p = this.wall.period;
       const tb = this.beatNow() - this.latency();
       const k = Math.round(tb / p);
-      beat = { k, inWindow: Math.abs(tb - k * p) <= this.wall.window };
+      const off = tb - k * p;
+      const w = this.wall.window;
+      beat = { k, inWindow: Math.abs(off) <= w, perfect: Math.abs(off) <= w * M.PERFECT_FRAC };
+      if (k !== this.wall.lastJudged) {
+        this.autoCalibrate(off, p);
+        this.hintOff = off;
+        this.hintT = 0.6;
+      }
     }
     const t = this.wall.tiles[ti];
     const kind = t.kind;
     if (t.gas > 0) this.ctx.markSeen('m.wafted');
-    const res = this.wall.tap(ti, beat, { soft });
+    const res = this.wall.tap(ti, beat, { auto });
     if (kind === 'keg' && res.hit) this.ctx.markSeen('m.kegLit');
     if (!res.hit) return;
     this.showFist(px, py, res.crit);
@@ -753,18 +886,59 @@ export class MinesScene implements DeptScene {
       this.ctx.haptic(15);
       this.ctx.float('CRUNCH!', cx, this.ty(t) - 2, '#ffe060');
       sfx.crunch(v);
-    } else sfx.tock(v, kind === 'vein' || kind === 'mother' || kind === 'geode');
+    } else sfx.tock(v, kind);
     if (res.beatHit) {
       this.lastBeatHitK = beat!.k;
       const st = this.wall.streak;
-      this.ctx.float(st > 1 ? `!X${st}` : '!', cx + 9, this.ty(t) + 2, '#e8c04a');
-      sfx.beatHit(v, st);
+      const tag = res.perfect ? 'PERFECT' : 'GOOD';
+      this.ctx.float(st > 1 ? `${tag} X${st}` : tag, cx + 6, this.ty(t) + 2, res.perfect ? '#ffe060' : '#c8a050');
+      sfx.beatHit(v, st, res.perfect);
       if (res.thunder) this.ctx.float('THUNDER!', cx, this.ty(t) - 10, '#ffe060');
     } else if (!res.judged && beat && beat.k === this.lastBeatHitK) {
       // A follow-up after a boom: a plain chip, nothing lost (drum lesson beat 3, "BOOM-ta-ta").
       this.ctx.markSeen('m.followup');
     }
     if (kind !== 'keg' && kind !== 'rubble') this.chips(px, py, res.crit ? 6 : 3);
+  }
+
+  /** Silent auto-calibration (Rhythm Quest / Rhythm Doctor, genre-research R4): a running median
+   * of the signed offsets of the last 16 judged taps nudges the latency by 25% of it. Offsets more
+   * than 35% of a beat away are ignored (that is a free tap, not an attempt at the beat). Saved to
+   * the suite setting every 8 judged taps. */
+  private autoCalibrate(off: number, period: number): void {
+    if (Math.abs(off) > period * 0.35) return;
+    this.autoCal.push(off);
+    if (this.autoCal.length > M.AUTO_CAL_N) this.autoCal.shift();
+    if (this.autoCal.length < 8) return;
+    const sorted = [...this.autoCal].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    if (Math.abs(med) < 0.008) return;
+    const lat = Math.max(0, Math.min(M.LATENCY_MAX, this.latency() + med * M.AUTO_CAL_RATE));
+    // Shift the stored offsets too, so one median isn't applied again and again.
+    for (let i = 0; i < this.autoCal.length; i++) this.autoCal[i] -= med * M.AUTO_CAL_RATE;
+    if (++this.autoCalN % 8 === 0 || Math.abs(lat - this.latency()) > 0.004) this.ctx.setSetting('latency', lat);
+  }
+
+  /** The Gold Goblin's sprite: scampering, glinting, blinking in his last 2 s. */
+  private renderGold(): void {
+    const g = this.wall.gold;
+    const fx = this.goldFx.clear();
+    if (!g) {
+      this.goldView.visible = false;
+      return;
+    }
+    const frame = Math.floor(this.time * 8) % 2;
+    const art = goldGoblinArt(frame, Math.floor(this.time * 4) % 3 === 0);
+    if (this.goldView.context !== art) this.goldView.context = art;
+    const x = Math.round(this.wallX + g.x * this.k);
+    const hopLift = Math.round(Math.sin(Math.min(1, g.hopT / M.GOLD_HOP) * Math.PI) * 4);
+    const y = Math.round(this.wallY + g.y * this.k) - hopLift;
+    this.goldView.position.set(x, y);
+    this.goldView.scale.x = g.face;
+    this.goldView.visible = g.life > 2 || Math.floor(this.time * 10) % 2 === 0;
+    // A soft halo so he reads against busy rocks.
+    fx.circle(x, y, 10).fill({ color: 0xffe060, alpha: 0.18 + 0.08 * Math.sin(this.time * 10) });
+    if (rand() < 0.25) this.goldSparkle(g.x, g.y, 1);
   }
 
   // ---------- particles ----------
@@ -1011,6 +1185,9 @@ export class MinesScene implements DeptScene {
     this.updateFx(dt);
     this.updateDrum(dt);
     this.renderTiles(dt);
+    this.renderGold();
+    if (this.tikT > 0) this.tikT -= dt;
+    if (this.hintT > 0) this.hintT -= dt;
     this.updateRitual(dt);
     this.updateCalib(dt);
     this.updateUi();
@@ -1228,7 +1405,7 @@ export class MinesScene implements DeptScene {
       const a = drummerArt(onBeat ? 1 : 0);
       if (d.context !== a) d.context = a;
     });
-    const big = this.wall.frenzyT > 0;
+    const big = this.wall.frenzyT > 0 || this.wall.furyT > 0;
     const tf = Math.floor(this.time * (big ? 12 : 6)) % 2;
     for (const t of this.torches) {
       const a = torchArt(tf, big);
@@ -1244,6 +1421,25 @@ export class MinesScene implements DeptScene {
       g.rect(this.wallX - m - 1, this.wallY - 1, m, W + 2).rect(this.wallX + W + 1, this.wallY - 1, m, W + 2);
       const hot = this.wall.frenzyT > 0;
       g.fill({ color: Math.floor(this.time * 8) % 2 ? 0xff6040 : 0xffb030, alpha: hot ? 0.9 : 0.4 });
+    }
+    // Gold Rush: a gold frame just inside the Frenzy one. Fury: the wall glows red.
+    if (this.wall.rushT > 0) {
+      const blink = this.wall.rushT < 3 && Math.floor(this.time * 8) % 2 === 0;
+      if (!blink) {
+        g.rect(this.wallX - 1, this.wallY - 1, W + 2, 1).rect(this.wallX - 1, this.wallY + W, W + 2, 1);
+        g.rect(this.wallX - 1, this.wallY, 1, W).rect(this.wallX + W, this.wallY, 1, W);
+        g.fill({ color: Math.floor(this.time * 6) % 2 ? 0xffe060 : 0xfff0a0, alpha: 1 });
+        g.rect(this.wallX, this.wallY, W, W).fill({ color: 0xffd040, alpha: 0.08 });
+      }
+    }
+    if (this.wall.furyT > 0) g.rect(this.wallX, this.wallY, W, W).fill({ color: 0xff2010, alpha: 0.1 + 0.05 * Math.sin(this.time * 20) });
+    if (this.wall.fistT > 0) g.rect(this.wallX, this.wallY, W, W).fill({ color: 0xffffff, alpha: 0.05 + 0.04 * Math.sin(this.time * 14) });
+    // The Fury meter: the sill under the wall fills orange as you tap, then burns red.
+    const sillY = this.wallY + W + 2;
+    const fw = this.wall.furyT > 0 ? Math.round((W * this.wall.furyT) / M.FURY_DUR) : Math.round(W * this.wall.fury);
+    if (fw > 0) {
+      const hot = this.wall.furyT > 0;
+      g.rect(this.wallX, sillY, fw, 2).fill({ color: hot ? (Math.floor(this.time * 12) % 2 ? 0xff3020 : 0xffb030) : this.wall.fury > 0.8 ? 0xff7030 : 0xe08a30, alpha: 1 });
     }
     // Steady Drum: a screen-edge pulse on every beat (02 §6E accessibility).
     const e = this.edgeG.clear();
@@ -1299,7 +1495,30 @@ export class MinesScene implements DeptScene {
     const gemsTxt = `${streak}${fm(this.per.gems)} GEM${this.per.gems === 1 ? '' : 'S'}`;
     this.statusR.set(gemsTxt, '#d090ff');
     this.statusR.position.set(c.x + c.w - 4 - measure(gemsTxt).w, this.statusY);
-    if (this.drumActive() && r.frenzy > 0) {
+    // Wave 1 windows take the status line while they run: Fist, Gold Rush, Fury, then the chain.
+    const live: string[] = [];
+    if (w.fistT > 0) live.push(`FIST ${Math.ceil(w.fistT)}`);
+    if (w.rushT > 0) live.push(`RUSH ${Math.ceil(w.rushT)}`);
+    if (w.furyT > 0) live.push(`FURY ${Math.ceil(w.furyT)}`);
+    if (w.frenzyT > 0 && live.length) live.push(`FRENZY ${Math.ceil(w.frenzyT)}`);
+    if (w.chainN >= 2) live.push(`CHAIN X${M.chainMult(w.chainN).toFixed(1)}`);
+    const burst = w.fistT > 0 || w.rushT > 0 || w.furyT > 0;
+    if (burst || (w.chainN >= 2 && w.frenzyT <= 0)) {
+      const hot = w.fistT > 0 || w.furyT > 0;
+      // Drop the lowest-priority tokens until the line clears the Gems counter (180 px wide).
+      const room = c.w - 12 - measure(gemsTxt).w;
+      while (live.length > 1 && measure(live.join(' ')).w > room) live.pop();
+      this.status.set(live.join(' '), hot ? (Math.floor(this.time * 8) % 2 ? '#ff6040' : '#ffe060') : w.rushT > 0 ? '#ffe060' : '#ffd070');
+      // Frenzy pips stay visible to the right when there is room (drum owners).
+      if (this.drumActive() && r.frenzy > 0 && w.frenzyT <= 0 && w.encoreT <= 0 && live.length === 1 && w.chainN >= 2) {
+        const need = M.frenzyPips(r.frenzy);
+        for (let i = 0; i < need; i++) {
+          const x = c.x + 56 + i * 6;
+          g.rect(x, this.statusY, 5, 5).fill(OUTLINE);
+          g.rect(x + 1, this.statusY + 1, 3, 3).fill(i < w.pips ? 0xff6040 : 0x3a2a3a);
+        }
+      }
+    } else if (this.drumActive() && r.frenzy > 0) {
       const need = M.frenzyPips(r.frenzy);
       if (w.frenzyT > 0) {
         this.status.set(`FRENZY ${w.frenzyT.toFixed(1)}S`, Math.floor(this.time * 8) % 2 ? '#ff6040' : '#ffe060');
@@ -1342,6 +1561,12 @@ export class MinesScene implements DeptScene {
       const ly = this.digBtn.y + 9;
       g.rect(lx, ly, 5, 5).fill(OUTLINE);
       g.rect(lx + 1, ly + 1, 3, 3).fill(this.beatPulse > 0 ? 0xffe060 : 0x5a3a20);
+      // Early/late tick: a 1 px mark left (early) or right (late) of the lamp after a judged tap;
+      // none when it was Perfect.
+      if (this.hintT > 0 && Math.abs(this.hintOff) > this.wall.window * M.PERFECT_FRAC) {
+        const col = Math.abs(this.hintOff) <= this.wall.window ? 0xffe060 : 0xff6040;
+        g.rect(this.hintOff < 0 ? lx - 2 : lx + 6, ly, 1, 5).fill(col);
+      }
     }
 
     // Buttons.

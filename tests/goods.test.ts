@@ -46,9 +46,9 @@ describe('Goods', () => {
     expect(passivePerH(s, 'cauldron', { cauldron: econ('cauldron', 'potions', 99) })).toBe(4);
     s.meta.throne.imperialRoads = 5;
     expect(passivePerH(s, 'cauldron', { cauldron: econ('cauldron', 'potions', 99) })).toBeCloseTo(6);
-    // Offline: under the 8 h cap.
-    const got = offlineGoods(s, { cauldron: econ('cauldron', 'potions', 99) }, 20 * 3600);
-    expect(got.potions).toBeCloseTo(6 * 8);
+    // Offline: under the offline cap (24 h base since Pass 7).
+    const got = offlineGoods(s, { cauldron: econ('cauldron', 'potions', 99) }, 30 * 3600);
+    expect(got.potions).toBeCloseTo(6 * 24);
   });
 
   it('active bonus: counter increases, held by the token bucket, reset-safe', () => {

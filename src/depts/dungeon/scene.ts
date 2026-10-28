@@ -12,7 +12,8 @@ import { PixelText, measure } from '../../ui/font';
 import { Button, C, drawBar } from '../../ui/widgets';
 import * as M from './model';
 import { COLS, FLOORS, ROWS, TILE, canDig, idx, isWalkable, lairPost, tileKind, K_ROCK, type Grid } from './map';
-import { dungeonImports, Sim, STEP, type SimEvent, type SimHero } from './sim';
+import { dungeonImports, Sim, STEP, type Receipt, type SimEvent, type SimHero } from './sim';
+import { sfx } from './sfx';
 import {
   chestArt,
   clerkArt,
@@ -29,6 +30,7 @@ import {
 } from './art';
 import { anyAffordable, buildGroups } from './upgrades';
 import { destroyTree } from '../../ui/destroy';
+import { sfx as kit } from '../../core/audio';
 
 const BOARD_W = COLS * TILE;
 const BOARD_H = ROWS * TILE;
@@ -69,6 +71,8 @@ type Sel = { t: 'piece'; id: number } | { t: 'chest'; spot: number } | { t: 'gho
 interface HeroView {
   g: Graphics;
   sack: Graphics;
+  /** Bait Chest purse (gold-bag pip). */
+  bag: Graphics;
   hpBg: Sprite;
   hp: Sprite;
 }
@@ -121,6 +125,16 @@ const fm = (n: number) => formatNum(n);
 const EXTRA_LABEL: Record<M.TrayExtra, string> = { chest: 'CHEST', 'dig.w': 'WALL', 'dig.c': 'ROOM', 'dig.p': 'CARVE' };
 const isPiece = (k: Armed): k is M.PieceKind => !!k && k in M.PIECES;
 const digKind = (k: Armed): 'w' | 'c' | 'p' | null => (k === 'dig.w' ? 'w' : k === 'dig.c' ? 'c' : k === 'dig.p' ? 'p' : null);
+/** Receipt names for kill sources (sim.ts SimHero.src). */
+const SRC_NAME: Record<string, string> = {
+  arrow: 'ARROW', brazier: 'FLAME', ballista: 'BOLT', eye: 'EYE', crypt: 'CRYPT', slime: 'SLIME', ogre: 'OGRE',
+  spikes: 'SPIKE', glare: 'GLARE', clerk: 'BONES',
+};
+const HERO_SHORT: Record<M.HeroType, string> = { squire: 'SQUIRE', rogue: 'ROGUE', knight: 'KNIGHT', cleric: 'CLERIC', wizard: 'WIZARD', champ: 'CHAMP' };
+const RECEIPT_S = 1.8;
+const HINT_S = 4;
+/** Seconds before the same adaptive hint may show again. */
+const HINT_REPEAT_S = 90;
 
 export class DungeonScene implements DeptScene {
   root = new Container();
@@ -157,6 +171,12 @@ export class DungeonScene implements DeptScene {
   private bannerG = new Graphics();
   private banner = new PixelText('', '#e8c04a');
   private ritualLayer = new Container();
+  /** Ledger-Bones' per-party receipt (Wave 1, research R10): never takes input. */
+  private receiptLayer = new Container();
+  private receiptG = new Graphics();
+  private receiptTx: PixelText[] = [];
+  private receiptT = 0;
+  private receiptY = 0;
 
   // views
   private pieceViews = new Map<number, PieceView>();
@@ -228,6 +248,15 @@ export class DungeonScene implements DeptScene {
   private hover: [number, number] | null = null;
   private justDropped = -1;
   private ritual: { done: (score: number) => void } | null = null;
+  /** Consecutive parties that leaked / held (adaptive hints, the PERFECT streak). */
+  private leakyRun = 0;
+  private perfectRun = 0;
+  private hintAt = new Map<string, number>();
+  /** The Gong's ripple at the entry (earliness drives size and brightness). */
+  private gongFx: { t: number; f: number } | null = null;
+  /** Kill sound ladder: kills in quick succession climb the scale. */
+  private killChain = 0;
+  private lastKillT = -9;
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -270,6 +299,7 @@ export class DungeonScene implements DeptScene {
       this.dragG,
       this.bannerG,
       this.banner,
+      this.receiptLayer,
       this.ui,
       this.hit,
       this.ritualLayer,
@@ -396,6 +426,17 @@ export class DungeonScene implements DeptScene {
     // Champion banner.
     this.banner.visible = false;
     this.bannerG.visible = false;
+
+    // Receipt: in the band above the top row when the screen has one, else over the board's top.
+    this.receiptLayer.removeChildren();
+    this.receiptTx.forEach((t) => t.destroy());
+    this.receiptTx = [0, 1, 2, 3].map(() => new PixelText(''));
+    this.receiptLayer.addChild(this.receiptG, ...this.receiptTx);
+    this.receiptLayer.eventMode = 'none';
+    this.receiptLayer.visible = false;
+    this.receiptT = 0;
+    // receiptY > 0: the box's bottom edge in the band (it grows upward); < 0: -(top edge) on the board.
+    this.receiptY = this.topY - c.y >= 46 ? this.topY - 3 : -(this.by + 1);
 
     // Board input.
     this.hit.removeAllListeners();
@@ -651,6 +692,11 @@ export class DungeonScene implements DeptScene {
     this.updateBlueprint();
   }
 
+  /** The shared purchase "ka-ching" (ui/juice.ts) over a board tile. */
+  private kaChing(x: number, y: number, text: string): void {
+    this.ctx.game.juice.kaChing(this.tx(x), this.ty(y), TILE, TILE, text);
+  }
+
   private place(k: M.PieceKind, x: number, y: number): boolean {
     if (!this.validTile(k, x, y)) return false;
     if (M.PIECES[k].slot === 'path' && M.runeCount(this.run) >= M.runeSlots(this.run)) {
@@ -670,7 +716,7 @@ export class DungeonScene implements DeptScene {
     if (gi >= 0) this.per.ghosts.splice(gi, 1);
     this.layoutChanged();
     this.puff(x + 0.5, y + 0.5, 0xd8d0b0, 6);
-    this.ctx.haptic(8);
+    this.kaChing(x, y, M.PIECES[k].short);
     if (k === 'ballista') this.ctx.say('firstBallista', { type: 'first_upgrade', key: 'ballista' });
     return true;
   }
@@ -692,7 +738,7 @@ export class DungeonScene implements DeptScene {
     }
     this.layoutChanged();
     this.sparkle(p.x + 0.5, p.y + 0.5);
-    this.ctx.haptic(10);
+    this.kaChing(p.x, p.y, `L${p.l}`);
   }
 
   /** Swap a chosen branch for the other one (50% of that level's price; 01 §6A). Free for an old
@@ -756,7 +802,7 @@ export class DungeonScene implements DeptScene {
     this.run.bait.push(spot);
     this.layoutChanged();
     this.sparkle(x + 0.5, y + 0.5);
-    this.ctx.haptic(12);
+    this.kaChing(x, y, 'BAIT');
     if (this.run.bait.length === 1) this.ctx.say('chestPlaced', { type: 'first_upgrade', key: 'chest' });
   }
 
@@ -914,18 +960,31 @@ export class DungeonScene implements DeptScene {
 
   // ---------- active verbs ----------
 
+  private vol(): number {
+    return this.ctx.game.save.meta.settings.sfx ?? 0.6;
+  }
+
+  /** The Gong, Kingdom Rush's early call: the sooner after it lights, the bigger the bonus and the
+   * more of Glare's cooldown it skips (an early call also banks an unused Trapdoor). */
   private ringGong(): void {
     if (!this.sim.gong()) {
-      this.ctx.game.toast(`THE GONG NEEDS ${M.GONG_GAP}S BETWEEN PARTIES, AND A CLEAR DOOR.`);
+      this.ctx.game.toast(
+        this.sim.spawnQ.length ? 'THE PARTY IS STILL FILING IN. THEN RING EARLY FOR MORE.' : `THE GONG LIGHTS ${M.GONG_GAP}S INTO EACH PARTY. EARLIER PAYS MORE.`,
+      );
       return;
     }
+    const f = this.sim.lastGongF;
     const s = this.run.stats;
     s.gongs++;
     s.bestGong = Math.max(s.bestGong, this.sim.gongStack);
-    this.shakeT = 0.25;
-    this.ctx.haptic(20);
+    if (this.glareCd > 0) this.glareCd *= 1 - M.GONG_CD_CUT * f;
+    this.ctx.game.juice.shake(f >= 0.6 ? 2 : 1);
+    this.ctx.haptic(12 + Math.round(18 * f));
+    this.gongFx = { t: 0, f };
+    sfx.gong(this.vol(), f);
     const [ex, ey] = this.grid.entry;
-    this.floatAt(ex + 0.5, ey + 1, `GONG! +${Math.round(this.sim.gongStack * M.GONG_STEP * 100)}%`, C.goldText);
+    const pct = Math.round(M.gongBonus(this.sim.gongStack, f) * 100);
+    this.floatAt(ex + 0.5, ey + 1, `${f >= 0.6 ? 'EARLY' : 'GONG'}! +${pct}%`, C.goldText);
     if (s.gongs === 1) this.ctx.say('gongTip', { type: 'first_upgrade', key: 'gong' });
     if (this.sim.gongStack >= M.GONG_MAX) this.ctx.say('perfect', { type: 'first_upgrade', key: 'perfect' });
   }
@@ -939,7 +998,7 @@ export class DungeonScene implements DeptScene {
 
   private armTrap(): void {
     if (this.sim.trapCharges <= 0) {
-      this.ctx.game.toast('ONE TRAPDOOR PER PARTY. IT RESETS WHEN THE NEXT PARTY ARRIVES.');
+      this.ctx.game.toast('NO TRAPDOOR LEFT. EACH PARTY BRINGS ONE; AN EARLY GONG BANKS A SPARE.');
       return;
     }
     this.trapArmed = !this.trapArmed;
@@ -986,11 +1045,12 @@ export class DungeonScene implements DeptScene {
     this.addTracer({ kind: 'glare', x1: this.bx + BOARD_W / 2, y1: this.by - 2, x2: this.bx + h.x * TILE, y2: this.by + h.y * TILE - 3, life: 0.3, max: 0.3, miss: false });
     this.floatAt(h.x, h.y - 0.9, `-${fm(dmg)}`, '#ff7090');
     this.ctx.haptic(15);
+    sfx.glare(this.vol());
   }
 
   private steal(h: SimHero): number {
-    const want = M.stealBase(h.type, h.bounty);
-    const amount = Math.max(0, Math.min(want, 0.02 * this.run.bank));
+    const want = M.stealBase(h.type, h.bounty, h.loot);
+    const amount = Math.max(0, Math.min(want, M.stealCap(this.run.bank, h.loot)));
     this.run.bank -= amount;
     return amount;
   }
@@ -1113,7 +1173,7 @@ export class DungeonScene implements DeptScene {
 
   private onDown(e: FederatedPointerEvent): void {
     this.trayDrag = null;
-    if (this.ritual) return;
+    // The return ritual only takes taps inside its box (its layer's hit area); the board stays live.
     const { x, y, tx, ty } = this.local(e);
     const inB = this.inBoard(tx, ty);
 
@@ -1138,7 +1198,10 @@ export class DungeonScene implements DeptScene {
     if (this.trapArmed) {
       const k = tileKind(this.grid, tx, ty);
       if (isWalkable(this.grid, tx, ty) && k !== 'entry' && k !== 'hoard') {
-        if (this.sim.openTrap(tx, ty)) this.ctx.haptic(12);
+        if (this.sim.openTrap(tx, ty)) {
+          this.ctx.haptic(12);
+          sfx.trap(this.vol());
+        }
       }
       this.trapArmed = false;
       return;
@@ -1344,6 +1407,7 @@ export class DungeonScene implements DeptScene {
       this.run.stats.grabs++;
       this.ctx.float(`+${fm(amount)}`, c.x, c.y - 8, C.goldText);
       this.ctx.haptic(6);
+      kit.coin();
     }
     const L = this.ctx.layout;
     c.fly = 0.35;
@@ -1406,9 +1470,19 @@ export class DungeonScene implements DeptScene {
       case 'kill': {
         s.kills++;
         this.puff(e.x, e.y - 0.2, e.hero === 'champ' ? GOLD : 0xc8c0d0, e.hero === 'champ' ? 16 : 7);
+        this.killChain = this.time - this.lastKillT < 1.5 ? this.killChain + 1 : 0;
+        this.lastKillT = this.time;
+        sfx.kill(this.vol(), this.killChain, e.hero === 'champ' || e.loot > 0);
+        if (e.loot > 0) {
+          this.floatAt(e.x, e.y - 1.6, 'FEAST!', '#fff0a0');
+          this.sparkle(e.x, e.y - 0.3);
+        }
         if (e.amount > 0) {
           this.spawnCoin(this.bx + e.x * TILE, this.by + e.y * TILE, e.amount);
-          this.floatAt(e.x, e.y - 1, `+${fm(e.amount)}`, C.goldText);
+          // Sized by what it is worth against ~5 s of income (ui/juice.ts): a fattened looter or a
+          // Champion punches up, a Squire stays small.
+          const tier = this.ctx.game.juice.popValue(e.amount * this.ctx.mult(), this.bx + e.x * TILE, this.by + (e.y - 1) * TILE, e.loot > 0 || e.greed ? { color: '#fff0a0' } : {});
+          if (tier >= 2 && e.hero !== 'champ') this.ctx.game.juice.hitStop(40);
         }
         if (e.greed) {
           s.greedKills++;
@@ -1422,6 +1496,7 @@ export class DungeonScene implements DeptScene {
           this.floatAt(e.x, e.y - 1.6, `SACK +${fm(e.sack + bonus)}`, '#fff0a0');
           this.sparkle(e.x, e.y);
           this.ctx.haptic(25);
+          sfx.recover(this.vol());
           this.ctx.say('recovered', { type: 'hazard_first', key: 'recovered' });
         }
         if (e.hero === 'champ') this.onChampSlain();
@@ -1431,11 +1506,13 @@ export class DungeonScene implements DeptScene {
         s.thieves++;
         this.floatAt(e.x, e.y - 1, e.sack > 0 ? `-${fm(e.sack)}` : 'GRAB!', '#e05050');
         this.ctx.haptic(30);
+        sfx.leak(this.vol());
+        this.ctx.game.juice.shake(1, { px: 1 });
         this.ctx.say('thief', { type: 'hazard_first', key: 'thief' });
         break;
       case 'escape':
         s.escaped++;
-        this.floatAt(this.grid.entry[0] + 0.5, this.grid.entry[1] + 0.6, e.sack > 0 ? 'ESCAPED!' : 'FLED', '#e05050');
+        this.floatAt(this.grid.entry[0] + 0.5, this.grid.entry[1] + 0.6, e.loot > 0 ? 'LOOT GONE!' : e.sack > 0 ? 'ESCAPED!' : 'FLED', '#e05050');
         break;
       case 'rune':
         if (e.kind === 'spikes') this.puff(e.x + 0.5, e.y + 0.5, 0xe0e0f0, 3);
@@ -1466,12 +1543,14 @@ export class DungeonScene implements DeptScene {
           this.champName = CHAMP_NAMES[Math.floor(rand() * CHAMP_NAMES.length)];
           this.showBanner(this.champName);
           this.ctx.haptic(30);
+          sfx.champion(this.vol());
           this.ctx.say('champion', { type: 'hazard_first', key: 'champion' });
         }
         if (this.sim.lure >= 1) live.lureParty = true;
         this.run.party = this.sim.partyN;
         break;
       case 'partyDone':
+        if (e.rc) this.showReceipt(e.rc, e.leaked);
         this.checkStruggle();
         break;
       case 'minionDown':
@@ -1479,14 +1558,112 @@ export class DungeonScene implements DeptScene {
         break;
       case 'loot':
         s.detours++;
+        this.floatAt(e.x, e.y - 1, 'LOOT!', '#fff0a0');
+        sfx.loot(this.vol());
         break;
     }
+  }
+
+  // ---------- receipts and adaptive hints (Wave 1, research R10) ----------
+
+  /** Ledger-Bones stamps a small receipt after each party: who killed whom, what leaked, the haul
+   * as a share of the next Lure tier. A hint line joins it only after two leaky parties in a row. */
+  private showReceipt(rc: Receipt, leaked: number): void {
+    this.perfectRun = leaked === 0 ? this.perfectRun + 1 : 0;
+    this.leakyRun = leaked > 0 ? this.leakyRun + 1 : 0;
+    const r = this.run;
+    const slain = Object.values(rc.kills).reduce((a, b) => a + b, 0);
+    const mult = this.ctx.mult();
+    const got = rc.earned * mult;
+    let share = '';
+    if (r.lureMax < M.MAX_LURE && got > 0) {
+      const pct = (100 * got) / M.lureCost(r.lureMax + 1);
+      share = `  ${pct >= 1 ? Math.round(pct) : '<1'}% L${r.lureMax + 1}`;
+    }
+    const lines: [string, string][] = [];
+    lines.push([`P${rc.n + 1} ${slain}/${rc.size} SLAIN +${fm(got)}${share}`, leaked ? C.ink : C.goldText]);
+    const kills = Object.entries(rc.kills)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([k, n]) => `${SRC_NAME[k] ?? k.toUpperCase()} ${n}`)
+      .join(' ');
+    if (kills) lines.push([kills, C.inkDim]);
+    if (leaked) {
+      const kinds = [...new Set(rc.leakers)];
+      const who = kinds.map((t) => (kinds.length > 2 ? M.HEROES[t].short : HERO_SHORT[t])).join(' ');
+      const lost = rc.stolen > 0 ? ` -${fm(rc.stolen)}` : '';
+      lines.push([`LEAK ${who}${lost}${rc.lootEsc ? ' +LOOT' : ''}`, C.redText]);
+    } else if (rc.looters > 0) lines.push([`FEAST! ${rc.looters} LOOTER${rc.looters > 1 ? 'S' : ''} SLAIN`, '#fff0a0']);
+    else if (rc.gong >= 0.6) lines.push(['EARLY CALL HELD', '#fff0a0']);
+    const hint = this.leakyRun >= 2 ? this.hintFor(rc) : null;
+    if (hint) lines.push([hint, C.goldText]);
+    // Draw.
+    const box = this.receiptG.clear();
+    let w = 0;
+    const maxCh = Math.floor((BOARD_W - 8) / 4);
+    lines.forEach(([t, col], i) => {
+      const tx = this.receiptTx[i];
+      tx.set(t.length > maxCh ? t.slice(0, maxCh) : t, col);
+      tx.visible = true;
+      w = Math.max(w, tx.width);
+    });
+    for (let i = lines.length; i < this.receiptTx.length; i++) this.receiptTx[i].visible = false;
+    w = Math.min(BOARD_W - 2, w + 6);
+    const h = lines.length * 7 + 3;
+    const x = this.bx + Math.floor((BOARD_W - w) / 2);
+    const inBand = this.receiptY > 0;
+    const y = inBand ? this.receiptY - h - 1 : -this.receiptY;
+    lines.forEach((_, i) => this.receiptTx[i].position.set(x + 3, y + 2 + i * 7));
+    box.rect(x - 1, y - 1, w + 2, h + 2).fill({ color: OUTLINE, alpha: inBand ? 1 : 0.85 }).rect(x, y, w, h).fill({ color: 0x1a0e24, alpha: inBand ? 0.92 : 0.8 });
+    box.rect(x, y, w, 1).fill(leaked ? C.red : GOLD);
+    if (this.perfectRun >= 2) {
+      // The PERFECT stamp: a red box with the streak, at the receipt's right edge.
+      const st = `PERFECT X${this.perfectRun}`;
+      const sw = measure(st).w + 4;
+      const tx = this.receiptTx[3];
+      if (lines.length < 4) {
+        // Above the box in the band, below it on the board.
+        const sy = inBand ? y - 9 : y + h + 1;
+        tx.set(st, '#ff6a6a');
+        tx.visible = true;
+        tx.position.set(x + w - sw + 1, sy + 1);
+        box.rect(x + w - sw - 1, sy, sw + 1, 8).fill({ color: 0x3a0a14, alpha: 0.92 }).rect(x + w - sw - 1, sy, sw + 1, 1).fill(0xff6a6a);
+      }
+    }
+    this.receiptLayer.visible = true;
+    this.receiptLayer.alpha = 1;
+    this.receiptT = hint ? HINT_S : RECEIPT_S;
+    sfx.stamp(this.vol(), leaked === 0, this.perfectRun);
+  }
+
+  /** The adaptive hint for a leaky party (only after two in a row; each hint rests 90 s). */
+  private hintFor(rc: Receipt): string | null {
+    const r = this.run;
+    const has = (k: M.PieceKind) => M.countKind(r, k) > 0;
+    const L = rc.leakers;
+    const cands: [string, string][] = [];
+    if (rc.lootEsc > 0) cands.push(['loot', 'LOOTERS FLED. KILL ZONE AFTER THE CHEST?']);
+    if (L.includes('champ')) cands.push(['champ', 'CHAMPIONS: GLARE THEM. BALLISTAS.']);
+    if (L.includes('rogue') && !has('eye')) cands.push(['rogue', 'ROGUES DODGE. AN EYE OF GLOOM STOPS IT.']);
+    if (L.includes('knight') && !has('brazier')) cands.push(['knight', 'KNIGHTS: ARMOR. FLAME IGNORES IT.']);
+    if (L.includes('cleric')) cands.push(['cleric', 'CLERICS HEAL. GLARE THEM FIRST.']);
+    if (rc.gong >= 0) cands.push(['gong', 'RANG TOO EARLY? LET A PARTY CLEAR.']);
+    cands.push(['lure', r.lure > 0 ? 'LEAKING. BUILD BY THE HOARD, OR LURE -.' : 'LEAKING. BUILD NEAR THE HOARD.']);
+    for (const [id, text] of cands) {
+      const at = this.hintAt.get(id) ?? -Infinity;
+      if (this.time - at < HINT_REPEAT_S) continue;
+      this.hintAt.set(id, this.time);
+      return text;
+    }
+    return null;
   }
 
   private onChampSlain(): void {
     const r = this.run;
     r.stats.champs++;
-    this.shakeT = 0.35;
+    this.ctx.game.juice.shake(3);
+    this.ctx.game.juice.hitStop(90);
+    kit.bigWin();
     this.ctx.haptic(40);
     this.showBanner('CHAMPION SLAIN!');
     const leak = this.sim.leakFrac();
@@ -1551,6 +1728,11 @@ export class DungeonScene implements DeptScene {
       this.shakeT -= dt;
       this.root.position.set(this.shakeT > 0 ? Math.round((rand() - 0.5) * 4) : 0, this.shakeT > 0 ? Math.round((rand() - 0.5) * 4) : 0);
     }
+    if (this.receiptT > 0) {
+      this.receiptT -= dt;
+      this.receiptLayer.alpha = Math.min(1, this.receiptT / 0.3);
+      if (this.receiptT <= 0) this.receiptLayer.visible = false;
+    }
     if (this.bannerT > 0) {
       this.bannerT -= dt;
       if (this.bannerT <= 0) {
@@ -1592,21 +1774,22 @@ export class DungeonScene implements DeptScene {
     while (this.heroViews.length < hs.length) {
       const g = new Graphics();
       const sack = new Graphics(sackArt());
+      const bag = new Graphics().rect(0, 0, 4, 4).fill(OUTLINE).rect(1, 1, 2, 2).fill(GOLD).rect(1, 1, 1, 1).fill(0xfff0a0);
       const hpBg = new Sprite(Texture.WHITE);
       const hp = new Sprite(Texture.WHITE);
       hpBg.tint = OUTLINE;
       hp.tint = 0x8fd14f;
       hpBg.height = 2;
       hp.height = 1;
-      this.heroLayer.addChild(g, sack, hpBg, hp);
-      this.heroViews.push({ g, sack, hpBg, hp });
+      this.heroLayer.addChild(g, sack, bag, hpBg, hp);
+      this.heroViews.push({ g, sack, bag, hpBg, hp });
     }
     const frameT = Math.floor(this.time * 8);
     for (let i = 0; i < this.heroViews.length; i++) {
       const v = this.heroViews[i];
       const h = hs[i];
       if (!h || h.dead || h.gone) {
-        v.g.visible = v.sack.visible = v.hpBg.visible = v.hp.visible = false;
+        v.g.visible = v.sack.visible = v.bag.visible = v.hpBg.visible = v.hp.visible = false;
         continue;
       }
       const jx = ((h.id * 7) % 5) - 2;
@@ -1623,6 +1806,12 @@ export class DungeonScene implements DeptScene {
       const top = h.type === 'champ' ? 13 : h.type === 'knight' || h.type === 'wizard' ? 10 : 9;
       v.sack.visible = h.sack > 0;
       if (h.sack > 0) v.sack.position.set(x, y - top - 4);
+      // Fattened: a gold bag at the hip (bigger with two purses).
+      v.bag.visible = h.loot > 0 && h.sack <= 0;
+      if (v.bag.visible) {
+        v.bag.position.set(x + 2, y - 6);
+        v.bag.scale.set(h.loot > 1 ? 1.5 : 1);
+      }
       const showHp = h.hp < h.maxHp;
       v.hpBg.visible = v.hp.visible = showHp;
       if (showHp) {
@@ -1754,6 +1943,33 @@ export class DungeonScene implements DeptScene {
       if (h.type !== 'cleric' || h.dead || h.gone) continue;
       g.circle(Math.round(this.bx + h.x * TILE), Math.round(this.by + h.y * TILE), M.CLERIC_RANGE * TILE).fill({ color: 0xfff0a0, alpha: 0.07 });
       if (Math.floor(this.time * 3 + h.id) % 3 === 0) g.rect(Math.round(this.bx + h.x * TILE) + 5, Math.round(this.by + h.y * TILE) - 12, 1, 3).rect(Math.round(this.bx + h.x * TILE) + 4, Math.round(this.by + h.y * TILE) - 11, 3, 1).fill(0x8fd14f);
+    }
+    // Wizards telegraph a dispel: the staff tip glows in the last second before the cast.
+    for (const h of this.sim.heroes) {
+      if (h.type !== 'wizard' || h.dead || h.gone || h.dir < 0 || h.castT > 0.9) continue;
+      if (!this.sim.runes.some((r) => r.off <= 0 && (r.x + 0.5 - h.x) ** 2 + (r.y + 0.5 - h.y) ** 2 <= M.WIZ_RANGE * M.WIZ_RANGE)) continue;
+      const wx = Math.round(this.bx + h.x * TILE) + 4;
+      const wy = Math.round(this.by + h.y * TILE) - 9;
+      const on = Math.floor(this.time * 10) % 2 === 0;
+      g.rect(wx - 1, wy - 1, 3, 3).fill({ color: 0xb080ff, alpha: on ? 0.9 : 0.4 });
+      g.circle(wx, wy, 3 + (1 - h.castT) * 4).stroke({ width: 1, color: 0xb080ff, alpha: 0.5 });
+    }
+    // The Gong's ripple at the entry.
+    const gf = this.gongFx;
+    if (gf) {
+      gf.t += dt;
+      const dur = 0.5 + 0.4 * gf.f;
+      if (gf.t >= dur) this.gongFx = null;
+      else {
+        const [ex, ey] = this.grid.entry;
+        const cx = this.bx + (ex + 0.5) * TILE;
+        const cy = this.by + (ey + 0.5) * TILE;
+        const k = gf.t / dur;
+        for (let i = 0; i < 1 + Math.round(2 * gf.f); i++) {
+          const rr = (6 + 30 * gf.f) * Math.max(0, k - i * 0.15);
+          if (rr > 0) g.circle(cx, cy, rr).stroke({ width: 1, color: 0xffd060, alpha: (1 - k) * 0.9 });
+        }
+      }
     }
     // Trapdoor.
     const tr = this.sim.trap;
@@ -1916,22 +2132,30 @@ export class DungeonScene implements DeptScene {
     else if (this.glareArmed) hint = 'TAP NEAR A VISITOR TO GLARE';
     else if (this.dragPiece !== null) hint = 'DROP ON A GLOWING TILE. 3S SETTLE';
     else if (this.moving) hint = 'TAP A GLOWING TILE TO MOVE';
-    else if (a === 'chest') hint = 'TAP A GLOWING LOOP END';
+    else if (a === 'chest') hint = `LOOP END. LOOTERS: +${Math.round(M.LOOT_BONUS * 100)}% DEAD, 2X THIEF`;
     else if (a === 'dig.p') hint = `CARVE A CORRIDOR: ${fm(M.digCost(this.dugList().length))}`;
     else if (a === 'dig.w' || a === 'dig.c') hint = `DIG ROCK INTO A ${a === 'dig.w' ? 'WALL' : 'CHAMBER'}: ${fm(M.digCost(this.dugList().length))}`;
     else if (isPiece(a)) hint = `${M.PIECES[a].role}`;
     if (hint) this.status.set(hint, C.goldText);
     else {
-      const gong = sim.gongStack > 0 ? `  GONG+${Math.round(sim.gongStack * M.GONG_STEP * 100)}%` : '';
+      const gong = sim.gongStack > 0 ? `  GONG X${sim.gongStack}` : '';
       this.status.set(`P${sim.partyN} LEAK ${leak}%${gong}  {skull}${Math.min(2, champs)}/2@L${target}`, leak >= 20 ? C.redText : C.inkDim);
     }
 
     // Ability row.
-    const nextBonus = Math.round(Math.min(M.GONG_MAX, sim.gongStack + 1) * M.GONG_STEP * 100);
+    // Gong: the early-call bonus right now (it shrinks as the timer runs down), a greed bar under
+    // the label, and the perfect-wave rings as pips.
+    const early = M.gongEarly(sim.partyTimer);
+    const nextBonus = Math.round(M.gongBonus(sim.gongStack + 1, early) * 100);
     const wait = Math.ceil(sim.partyTimer - (M.PARTY_EVERY - M.GONG_GAP));
     this.setBtn(this.gongBtn, 'GONG', sim.gongReady ? `+${nextBonus}%` : sim.spawnQ.length ? 'WAIT' : `${wait}S`, sim.gongReady);
+    const gb = this.gongBtn;
+    if (gb.visible) {
+      for (let i = 0; i < M.GONG_MAX; i++) pg.rect(gb.x + 2 + i * 3, gb.y + 2, 2, 2).fill(i < sim.gongStack ? 0xfff0a0 : 0x5a3a14);
+      if (sim.gongReady) pg.rect(gb.x + 2, gb.y + gb.height - 3, Math.max(1, Math.round((gb.width - 4) * early)), 1).fill(0xfff0a0);
+    }
     this.setBtn(this.glareBtn, this.glareArmed ? 'AIM!' : 'GLARE', this.glareCd > 0 ? `${Math.ceil(this.glareCd)}S` : 'READY', this.glareCd <= 0);
-    this.setBtn(this.trapBtn, this.trapArmed ? 'AIM!' : 'TRAP', sim.trap ? 'OPEN' : `${sim.trapCharges}/1`, sim.trapCharges > 0);
+    this.setBtn(this.trapBtn, this.trapArmed ? 'AIM!' : 'TRAP', sim.trap ? 'OPEN' : `X${sim.trapCharges}`, sim.trapCharges > 0);
     this.setBtn(this.shopBtn, 'WORKSHOP', undefined, true);
 
     // Tray or panel.
@@ -2067,7 +2291,7 @@ export class DungeonScene implements DeptScene {
       const owned = r.bait.includes(s.spot);
       const carved = s.spot >= 0 && this.grid.dug[s.spot] === 1;
       this.panelTitle.set(carved ? 'BAIT CHEST, CARVED POCKET' : 'BAIT CHEST, LOOP END', C.goldText);
-      this.panelInfo.set(owned ? 'NON-ROGUES DETOUR THROUGH HERE' : 'PULLS PARTIES DOWN TO HERE', C.inkDim);
+      this.panelInfo.set((owned ? `1ST LOOTER: +${Math.round(M.LOOT_BONUS * 100)}% DEAD, 2X THIEF` : 'PULLS PARTIES DOWN TO HERE').slice(0, maxInfo), C.inkDim);
       hide(this.pA, this.pB, this.pMove, this.pUp1);
       if (owned) {
         this.pUp.visible = false;
@@ -2322,7 +2546,7 @@ export class DungeonScene implements DeptScene {
       const T = 6;
       let freed = 0;
       layer.eventMode = 'static';
-      layer.hitArea = new Rectangle(this.bx, this.by, BOARD_W, BOARD_H);
+      layer.hitArea = new Rectangle(box.x, box.y, box.w, box.h);
       const finish = (score: number) => {
         if (!this.ritual) return;
         this.ritual = null;

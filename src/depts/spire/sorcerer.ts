@@ -73,6 +73,9 @@ export const sorcerer: ManagerDef = {
     hexShatter: ['Three hexes, gone! Tidy.', 'Hex triple! (Cursed, but paid.)'],
     bigChain: ['That cascade! Noted. Twice.', 'What a chain! (Delightful.)'],
     farewell: ['The lab is yours, m-my lord.', 'Carry on. I shall... hide.'],
+    // ----- Wave 1: flask scores and the apprentices' study (R1/R6) -----
+    study: ['They copy your best flask. Hm!', 'Good flasks teach the homunculi.'],
+    newBest: ['A new best flask! For the book!', 'Best flask yet! (Swoons.)'],
     // ----- Gobbo's report (00 §5.4.7) -----
     report: [
       'The flask behaved. Mostly.',

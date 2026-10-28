@@ -1,7 +1,7 @@
 // Dungeon adapter. The Dungeon ships a deterministic 20 Hz path sim (src/depts/dungeon/sim.ts):
 // the scene runs it live and idleRate runs it headless (Cautious Mode). This adapter runs that same
 // Sim on screen and ports the scene's thin layer around it (scene.ts is tangled with Pixi): coins
-// and the greedy grab (+10%), steals from the bank (2% cap) and recovered sacks (+25% of the bounty, carved from the kill; D-dungeon-01), Glare,
+// and the greedy grab (+0% since Wave 1; kept as a knob), steals from the bank (2% cap) and recovered sacks (+25% of the bounty, carved from the kill; D-dungeon-01), Glare,
 // the Trapdoor, the Gong, Champion kills feeding the leak-gated skill gate, Lure management, the
 // blueprint snapshot and the post-Fall starter kit (10% of last cycle's layout value).
 // Placement, upgrade, branch and chest prices are model.ts's; the Workshop and the Rumor Mill go
@@ -17,8 +17,8 @@
 //    8-party probe of the same Sim). While the next Lure holds, the bot saves for it and only buys
 //    pieces under 15% of its price; while it doesn't, it builds defense.
 //  - Verbs: Glare (thieves first, then Champions, then whoever is closest to the Hoard), Trapdoor
-//    under a hero in the last quarter of the route, Gong when the door is clear and the last
-//    party didn't leak, all after a reaction delay. Coins are grabbed with a skill-dependent
+//    under a hero in the last quarter of the route, Gong (Wave 1: the early call, ringing as soon
+//    as it lights) when the door is clear and the last party didn't leak, all after a reaction delay. Coins are grabbed with a skill-dependent
 //    chance (the rest auto-collect at 1x).
 //  - Shopping cadence: every few on-screen seconds (a TD player places in bursts), plus on entry.
 import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';
@@ -377,7 +377,7 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
       ...dungeonImports(save.imports),
     });
     sim.stealFn = (h) => {
-      const amount = Math.max(0, Math.min(M.stealBase(h.type, h.bounty), 0.02 * r.bank));
+      const amount = Math.max(0, Math.min(M.stealBase(h.type, h.bounty, h.loot), M.stealCap(r.bank, h.loot)));
       r.bank -= amount;
       return amount;
     };
@@ -503,6 +503,8 @@ export const createDungeon = (opts: DungeonOpts = {}): AdapterFactory => (seed) 
         if (gongWait < 0) gongWait = sk.reaction;
         gongWait -= h;
         if (gongWait <= 0 && sim.gong()) {
+          // Early call (Wave 1): skips part of Glare's cooldown, as in scene.ts ringGong.
+          glareCd *= 1 - M.GONG_CD_CUT * sim.lastGongF;
           r.stats.gongs++;
           r.stats.bestGong = Math.max(r.stats.bestGong, sim.gongStack);
           gongWait = -1;

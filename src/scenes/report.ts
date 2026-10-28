@@ -1,4 +1,6 @@
-// Gobbo's offline report (specs/00 §5.3): one line per department, Tribute, cap warnings, Collect All.
+// Gobbo's offline report (specs/00 §5.3): it opens with how each department's Night Order went
+// (core/orders.ts), then Tribute, Goods and the offline cap, and ends by handing the player one
+// goal with a GO button (the Next Goal ribbon's pick, fun plan A3).
 import { Container, Graphics } from 'pixi.js';
 import type { DeptDef } from '../core/dept';
 import type { Game } from '../core/game';
@@ -6,9 +8,11 @@ import type { DeptId } from '../core/types';
 import { GOOD_ORDER, GOODS, type GoodId } from '../core/goods';
 import { formatNum, formatTime } from '../core/format';
 import { PixelText, wrap } from '../ui/font';
-import { Button, drawPanel, drawSprite } from '../ui/widgets';
+import { Button, C, drawPanel, drawSprite } from '../ui/widgets';
 import { satchelLevel } from '../core/perks';
 import { destroyTree } from '../ui/destroy';
+import { outcomeText, type OrderOutcome } from '../core/orders';
+import { followGoal, goalFor } from '../ui/ribbon';
 
 export interface ReportLine {
   id: DeptId;
@@ -22,6 +26,8 @@ export interface ReportLine {
   ready?: { label: string; cost: number }[];
   /** What the Steward bought while away (Satchel L2-L3). */
   steward?: string[];
+  /** How this department's Night Order went (absent for absences under a minute). */
+  order?: OrderOutcome;
 }
 
 export interface Report {
@@ -41,6 +47,12 @@ export function goodsGainedText(goods: Partial<Record<GoodId, number>> | undefin
     .map((g) => `+${formatNum(Math.floor(goods[g] ?? 0), notation)}${GOODS[g].icon}`)
     .join(' ');
 }
+
+/** "The Cauldron" -> "CAULDRON", "Goblin Mines" -> "MINES": the department's last word. */
+const NAMES_SHORT = (name: string) => {
+  const w = name.toUpperCase().split(/\s+/);
+  return w[w.length - 1] === 'PIT' ? 'WAR PIT' : w[w.length - 1];
+};
 
 const GOBBO = [
   '....GG..GG..',
@@ -80,11 +92,11 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
   const goodsText = goodsGainedText(r.goods, notation);
   const goodsWrapped = goodsText ? wrap(`GOODS ${goodsText}`, w - 16) : '';
   const goodsH = goodsWrapped ? goodsWrapped.split('\n').length * 7 + 3 : 0;
-  const fixedH = 70 + (r.capped ? 10 : 0) + goodsH + 30;
+  const fixedH = 70 + 10 + goodsH + 40;
   const avail = L.h - L.safe.t - L.safe.b - 8;
   // Flavour rows (portrait + one line) when they fit; dropped first on small screens.
   const withFlavor = r.lines.some((l) => l.flavor) && fixedH + r.lines.length * 31 <= avail;
-  const lineH = withFlavor ? 31 : 18;
+  const lineH = withFlavor ? 31 : 17;
   const h = Math.min(avail, fixedH + r.lines.length * lineH);
   const x = L.safe.l + 6;
   const y = Math.max(L.safe.t + 4, Math.floor((L.h - h) / 2));
@@ -95,7 +107,8 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
 
   const title = new PixelText("GOBBO'S REPORT", '#5a2a1a', null);
   title.position.set(x + 34, y + 8);
-  const sub = new PixelText(wrap(`YOU WERE GONE ${formatTime(r.elapsed)}. THE EMPIRE KEPT WORKING.`, w - 40), '#5a4a3a', null);
+  const ordered = r.lines.some((l) => l.order);
+  const sub = new PixelText(wrap(`GONE ${formatTime(r.elapsed)}. ${ordered ? 'HOW YOUR ORDERS WENT:' : 'THE EMPIRE KEPT WORKING.'}`, w - 40), '#5a4a3a', null);
   sub.position.set(x + 34, y + 18);
   root.addChild(title, sub);
 
@@ -105,11 +118,21 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
   };
   const maxChars = Math.floor((w - 30) / 4);
   let ly = y + 40;
+  const fmt = (n: number) => formatNum(n, notation);
+  const clip = (t: string, n: number) => (t.length > n ? `${t.slice(0, Math.max(1, n - 2))}..` : t);
   for (const l of r.lines) {
-    const name = new PixelText(l.def.name.toUpperCase(), '#2a1a3a', null);
+    const goShown = satchel >= 1 && !!l.ready?.length;
+    // Row 1: the department and the order the player left ("CAULDRON: BREW FOR BILE").
+    const head = l.order?.label ? `${NAMES_SHORT(l.def.name)}: ${l.order.label}` : l.def.name.toUpperCase();
+    const name = new PixelText(clip(head, maxChars - 10), '#2a1a3a', null);
     name.position.set(x + 8, ly);
+    // Row 2: what it brought, and the order's result first.
     const stew = l.steward?.length ? ` STEWARD x${l.steward.length}` : '';
-    const amt = new PixelText(`+${formatNum(l.amount, notation)} ${l.def.currency.toUpperCase()}${stew}`, '#3a6a1a', null);
+    const income = `+${fmt(l.amount)} ${l.def.currency.toUpperCase()}`;
+    const res = l.order ? outcomeText(l.order, l.def.currency, fmt) : '';
+    const second = res && l.order?.kind !== 'none' ? `${res}${l.order?.kind === 'income' ? '' : `  ${income}`}` : `${income}${stew}`;
+    const good = l.order && (l.order.kind === 'gate' ? l.order.gateAfter >= 1 : l.order.kind === 'income' ? l.order.bonus > 0 : true);
+    const amt = new PixelText(clip(second, maxChars - (goShown ? 9 : 0)), good ? '#3a6a1a' : '#6a5a3a', null);
     amt.position.set(x + 8, ly + 8);
     root.addChild(name, amt);
     if (l.legend) {
@@ -122,7 +145,7 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
       root.addChild(inf);
     }
     // Gobbo's Satchel L1: "N READY" with a GO button that enters the department.
-    if (satchel >= 1 && l.ready?.length) {
+    if (goShown && l.ready) {
       const id = l.id;
       const go = new Button({
         w: 34,
@@ -158,16 +181,46 @@ export function showReport(game: Game, r: Report, onClose?: () => void): void {
     root.addChild(gt);
     ly += goodsH;
   }
-  if (r.capped) {
-    const cap = new PixelText(`CAP REACHED AT ${formatTime(r.cap)}`, '#a02020', null);
+  {
+    // The offline cap (24 h base): how full it got.
+    const cap = new PixelText(
+      r.capped ? `CAP REACHED AT ${formatTime(r.cap)}` : `CAP ${Math.min(99, Math.floor((100 * r.elapsed) / r.cap))}% OF ${formatTime(r.cap)}`,
+      r.capped ? '#a02020' : '#7a6a5a',
+      null,
+    );
     cap.position.set(x + 8, ly);
     root.addChild(cap);
     ly += 10;
   }
 
-  const btn = new Button({ w: w - 20, h: 18, label: 'COLLECT ALL', onTap: close });
+  // The report ends by handing over one goal: "NEXT: UNSEAL THE STYX 72%  [GO]".
+  const goal = goalFor(game, 'throne');
+  const canGo = !!goal && goal.go.kind !== 'none';
+  if (goal) {
+    const gt = new PixelText(clip(`NEXT: ${goal.text} ${goal.detail}`, maxChars + 4), goal.hot ? '#a02020' : '#5a2a1a', null);
+    gt.position.set(x + 8, y + h - 37);
+    root.addChild(gt);
+  }
+  const bw = canGo ? Math.floor((w - 24) / 2) : w - 20;
+  const btn = new Button({ w: bw, h: 18, label: canGo ? 'COLLECT' : 'COLLECT ALL', onTap: close });
   btn.position.set(x + 10, y + h - 26);
   root.addChild(btn);
+  if (canGo) {
+    const go = new Button({
+      w: bw,
+      h: 18,
+      label: 'GO >',
+      color: C.red,
+      shade: 0x7a2020,
+      textColor: C.ink,
+      onTap: () => {
+        close();
+        followGoal(game, goalFor(game, 'throne') ?? goal);
+      },
+    });
+    go.position.set(x + 14 + bw, y + h - 26);
+    root.addChild(go);
+  }
   // A resize re-opens the report for the new layout, keeping its continuation (C-11).
   game.trackModal(root, { reopen: () => showReport(game, r, onClose) });
   game.modalLayer.addChild(root);

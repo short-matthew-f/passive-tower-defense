@@ -1,6 +1,6 @@
 // The Troll Bridge's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
-import type { Commendation, DeptEcon } from '../../core/dept';
+import type { Commendation, DeptEcon, DeptGoal, NightOrderDef } from '../../core/dept';
 import { longLocked } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import * as M from './model';
@@ -103,6 +103,39 @@ export const bridgeEcon: DeptEcon = {
   applyHeadStart(save, level) {
     const r = norm(save);
     if (r) M.applyHeadStart(r, level);
+  },
+
+  // ----- wave 1 hooks: the next goal strip and Night Orders -----
+
+  nextGoal(save): DeptGoal | null {
+    const r = norm(save);
+    if (!r) return null;
+    const bank = r.bank ?? 0;
+    const buy = (label: string, cost: number): DeptGoal => ({ label, progress: Math.min(1, bank / cost), detail: `${Math.floor(Math.min(bank, cost))}/${Math.ceil(cost)}` });
+    if (r.lv.goons < M.NODES.goons.max) return buy(`HIRE GOON ${r.lv.goons + 1}/3`, M.nodeCost('goons', r.lv.goons));
+    const target = bridgeEcon.skillTarget(save.cycle?.n ?? 0);
+    if (r.menaceMax < target) return buy(`BUY MENACE ${r.menaceMax + 1}`, M.menaceCost(r.menaceMax + 1));
+    const n = Math.min(M.GATE_UNMASKS, M.evAtLeast(r.ev, target));
+    if (n < M.GATE_UNMASKS) return { label: `PROVEN UNMASKS AT M${target}`, progress: n / M.GATE_UNMASKS, detail: `${n}/${M.GATE_UNMASKS}` };
+    if (r.menaceMax < M.MENACE_MAX) return buy(`BUY MENACE ${r.menaceMax + 1}`, M.menaceCost(r.menaceMax + 1));
+    return null;
+  },
+
+  // Grumm's two orders: tolls now, or goons on hero watch (the Legend gate counts x1.5).
+  nightOrders(): NightOrderDef[] {
+    return [
+      { id: 'tolls', label: 'COLLECT TOLLS', desc: '+25% Tollpence while away', kind: 'income' },
+      { id: 'watch', label: 'HERO WATCH', desc: 'Goons scout heroes: gate x1.5', kind: 'gate' },
+    ];
+  },
+
+  applyNightOrder(save, orderId, elapsed) {
+    const r = run(save);
+    if (!r?.lv || r.lv.goons <= 0) return;
+    // Report flavour from the real traffic: heroes the goons saw pass while you were away.
+    const heroes = Math.floor((Math.min(elapsed, 86400) / M.ARRIVE_S) * M.heroShare(r.menace) * M.goonEff(r.lv.goons));
+    if (orderId === 'watch' && heroes > 0) return `GOONS SPOTTED ${Math.min(heroes, 9999)} HEROES`;
+    if (orderId === 'tolls') return `GOONS TOLLED ${Math.min(Math.floor(Math.min(elapsed, 86400) / M.ARRIVE_S), 99999)} FOLK`;
   },
 
   signature: {

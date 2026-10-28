@@ -80,6 +80,19 @@ const pilk: ManagerDef = {
     eel: ['GREY GLOW LIES. GOLD ONE BITES.', 'MEET SPARKY. HE READS BITES.'],
     // ----- flavour (Full chattiness only) -----
     codex: ['IN THE BOOK: %name%', 'NEW PAGE: %name%'],
+    // Wave 1 reveal: records and Pilk's quips on a landed soul (research R3, ~1 in 4 catches).
+    record: ['A RECORD! I SAW IT. MOSTLY.', 'BIGGEST YET! WRITE IT DOWN.', "THAT'S A WALL-SIZED ONE..."],
+    gold: ['IN THE GOLD, THEY COME QUIET.', 'GOLD BAND MOVES. FOLLOW IT.'],
+    'quip.clerk': ['A CLERK! FILING A COMPLAINT.', 'GERALD AGAIN? HI, GERALD.', 'STILL STAMPING. EVEN NOW.'],
+    'quip.tourist': ['LOST? YOU ARE NOW, MATE.', 'HE WANTS A REFUND. NO.', 'NICE HAT. SHAME ABOUT DEATH.'],
+    'quip.poet': ['HE RHYMED "MURK" WITH "MURK".', 'A POET. NOBODY ASKED.', 'SONNET NUMBER NINE HUNDRED...'],
+    'quip.wraiths': ['TWO FOR ONE. BARGAIN.', 'THEY FINISH EACH OTHER... OOH.'],
+    'quip.bishop': ['A BISHOP. MIND THE BLESSING.', 'HE SANK. HOLILY.', 'AMEN TO THAT CATCH.'],
+    'quip.choir': ['SINGS FLAT, DEAD OR NOT.', 'A CHOIRBOY. EARMUFFS, LADS.'],
+    'quip.chorister': ['AMEN! AMEN! ...ENOUGH, AMEN.', 'HE KEEPS HARMONISING. STOP.'],
+    'quip.siren': ['DON\'T LISTEN. HUM SOMETHING.', 'HER SONG LIES. SO DO I.'],
+    'quip.forgotten': ['WHO? ...WHO WAS THAT?', 'NOPE. FORGOT HIM ALREADY.'],
+    'quip.wanderer': ['BLANK STARE. LIKE MY LADS.', 'SLIPPERY. LIKE MY TAXES.'],
     escape: ['THE ONE THAT GOT AWAY...', 'IT STUCK ITS TONGUE OUT. RUDE.', "IT'LL BE BACK. THEY ALWAYS ARE."],
     flavor: [
       'TWITCH IT. SOULS LOVE A WIGGLE.',
@@ -128,6 +141,8 @@ const lessons: Record<string, OnboardingStep[]> = {
   fog: [{ id: 'land', line: 'FOG! WATCH THE BOBBER RING...', target: 'bobber', done: (s) => !!s.seen['styx.fogLand'] || st(s).fogs >= 2 }],
   twin: [{ id: 'land', line: 'TWO HOOKS. LAND ONE, FISH ON.', target: 'reel', done: (s) => st(s).twinLands >= 1 }],
   eel: [{ id: 'hook', line: 'GREY GLOW LIES. GOLD ONE BITES.', target: 'bobber', done: (s) => !!s.seen['styx.eelHook'] }],
+  // Wave 1: the moving gold band on the REEL ring (fires on the first reel after the tutorial).
+  gold: [{ id: 'land', line: 'KEEP THE TENSION IN THE GOLD.', target: 'reel', gesture: 'hold', done: (s) => !!s.seen['styx.gold'] || st(s).lands >= 4 }],
   ripper: [{ id: 'pass', line: 'RIPPER! LET GO TILL IT PASSES.', target: 'reel', done: (s) => st(s).rippers >= 1 || st(s).cuts >= 1 }],
   wall: [{ id: 'keep', line: 'KEEP IT FOR THE WALL? TAP KEEP.', target: 'keep', gesture: 'tap', done: (s) => (per(s)?.wall?.length ?? 0) >= 1 || !!s.seen['styx.sold'] }],
 };

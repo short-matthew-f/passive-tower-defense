@@ -16,15 +16,22 @@ import {
   maxTier,
   shopFoods,
   shopUnits,
+  HUNT_LIST,
   type ArchId,
   type FoodId,
+  type HuntId,
   type ItemId,
   type UnitId,
 } from './units';
 
 /** Bumped when battle or shop rules change; a paused Run keeps the version it started with. */
-export const PARAMS_VERSION = 3; // 2: the Huntmaster 8/14 -> 14/30, gentler Stakes growth (sim pass 5);
-// 3: tactics cards 12/15/18, rival stats grow x1.04 per level above Stakes 10, Huntmaster scars.
+export const PARAMS_VERSION = 4; // 2: the Huntmaster 8/14 -> 14/30, gentler Stakes growth (sim pass 5);
+// 3: tactics cards 12/15/18, rival stats grow x1.04 per level above Stakes 10, Huntmaster scars;
+// 4 (wave 1): rivals drafted from your record (RIVAL_AHEAD), one TOUGH bout per Run, rotating
+// Huntmaster hunts that re-roll on retry, banked Chow. A paused version-3 Run keeps the old rules.
+/** Skirmish Gauntlets keep the version-3 battle seeds: none of the version-4 rules touch them, so
+ * a params bump never reshuffles idle pay. */
+export const GAUNTLET_PV = 3;
 
 export const UNIT_COST = 3;
 export const ROLL_COST = 1;
@@ -103,6 +110,15 @@ export interface RunState {
   crown?: boolean;
   /** This Run left the Huntmaster a scar (summary line). */
   scarred?: boolean;
+  /** Version 4: Chow banked from the last shop (1 per BANK_PER unspent, max BANK_MAX). */
+  bankC?: number;
+  /** Version 4: Huntmaster bouts lost or drawn this Run (each re-rolls his hunt and beasts). */
+  huntTries?: number;
+  /** The Encore after a Triumph: bouts won, the base-Teeth pot (lost on a loss) and whether it
+   * is still open. Paid out on Retreat (or on reopen, so a closed app never loses it). */
+  encore?: { n: number; pot: number; open: boolean };
+  /** Night Order "Scout Rivals": this Run shows rivals as with Scouting 2 (display only). */
+  scoutAll?: boolean;
 }
 
 /** Everything the Run needs from upgrades and persistent buys (snapshotted at Run start). */
@@ -183,8 +199,14 @@ export function newRun(seed: number, stakes: number, opts: RunOpts, now = 0): Ru
 
 export function chowForRound(rs: RunState): number {
   const o = rs.opts;
-  return CHOW_PER_ROUND + o.larder + o.deepLarder + Math.min(2, rs.lossRun) + (rs.round === 1 && o.chowR1 ? 2 : 0);
+  return CHOW_PER_ROUND + o.larder + o.deepLarder + Math.min(2, rs.lossRun) + (rs.round === 1 && o.chowR1 ? 2 : 0) + (rs.bankC ?? 0);
 }
+
+/** Banked Chow (genre research R8, TFT-style interest): 1 per BANK_PER Chow left unspent at
+ * FIGHT, at most BANK_MAX, added to the next round's purse. */
+export const BANK_PER = 3;
+export const BANK_MAX = 2;
+export const bankFor = (rs: RunState, chow = rs.chow) => (rs.pv >= 4 ? Math.min(BANK_MAX, Math.floor(Math.max(0, chow) / BANK_PER)) : 0);
 
 export function startRound(rs: RunState): void {
   rs.chow = chowForRound(rs);
@@ -635,9 +657,11 @@ export const SCAR_MAX = 3;
 export const scarMult = (scars = 0) => 1 - SCAR_STEP * Math.max(0, Math.min(SCAR_MAX, scars | 0));
 
 /** The Huntmaster bout: 4 beasts drafted at budget rB plus the Huntmaster (HUNT_ATK/HUNT_HP, Armor 2) at the back. */
-export function huntmaster(rB: number, S: number, seed: number, pv = PARAMS_VERSION, scars = 0): RivalInfo {
-  const arch = pickArch(rB, hashStr('hunt', seed));
-  let team = ghostDraft(arch, rB, hashStr('huntdraft', seed, rB));
+export function huntmaster(rB: number, S: number, seed: number, pv = PARAMS_VERSION, scars = 0, tries = 0): RivalInfo {
+  // Version 4: every retry re-rolls his beasts (same budget) and his hunt.
+  const v4 = pv >= 4;
+  const arch = pickArch(rB, v4 ? hashStr('hunt', seed, tries) : hashStr('hunt', seed));
+  let team = ghostDraft(arch, rB, v4 ? hashStr('huntdraft', seed, rB, tries) : hashStr('huntdraft', seed, rB));
   team = [...team].sort((x, y) => unitValue(y.k, y.a, y.h, lvlOf(y.xp)) - unitValue(x.k, x.a, x.h, lvlOf(x.xp))).slice(0, 4);
   const rng = mulberry32(hashStr('huntgrow', seed, rB));
   for (let i = 0; i < Math.floor((rB - 1) / 2) && team.length; i++) {
@@ -649,14 +673,49 @@ export function huntmaster(rB: number, S: number, seed: number, pv = PARAMS_VERS
   const sm = pv < 3 ? 1 : scarMult(scars);
   const line = toFighters(orderLine(team), S, pv, sm);
   const mh = m ** HUNT_STAKES_EXP * sm;
-  line.push({ kind: 'hunt', lvl: 1, atk: r5(HUNT_ATK * mh), hp: r5(HUNT_HP * mh), armor: 2 });
+  const boss: Fighter = { kind: 'hunt', lvl: 1, atk: r5(HUNT_ATK * mh), hp: r5(HUNT_HP * mh), armor: 2 };
+  if (v4) boss.hunt = huntOf(seed, tries, pv);
+  line.push(boss);
   return { arch: 'hunt', line };
+}
+
+/**
+ * Rivals drafted from your record (genre research R1, SAP-style matchmaking; params version 4):
+ * a Run that keeps winning meets rivals drafted ahead of the round, a struggling one meets the
+ * round's own draft. ahead = clamp(floor((wins - losses) / RIVAL_AHEAD_STEP), 0, RIVAL_AHEAD_MAX).
+ * SIM-TUNED (scripts/pit-bot.ts greedy bot; sim 30 days seed 1, reference bot): step 4, max 1.
+ * At step 3 the greedy bot's rounds 1-5 win rate read 73% at Stakes 4 (07 §14.1 band >= 75%). At
+ * step 4 with the TOUGH bout and the hunts: reference Triumphs 41% of Runs (was 52%), 50% at the
+ * Infamy target (band 35-50%, was 70%), Huntmaster won 88% at the target (was 100%), rounds 1-5
+ * won 87% (was 90%); first Fall day 9 21:00 (arc 8.75-9.75 d), weeks 2-4 cycles 3.2 d (was 3.1).
+ */
+export const RIVAL_AHEAD_STEP = 4;
+export const RIVAL_AHEAD_MAX = 1;
+export function rivalAhead(rs: Pick<RunState, 'wins' | 'losses' | 'pv'>): number {
+  if (rs.pv < 4) return 0;
+  return Math.max(0, Math.min(RIVAL_AHEAD_MAX, Math.floor((rs.wins - rs.losses) / RIVAL_AHEAD_STEP)));
+}
+
+/** The Run's one TOUGH bout (version 4): a round in 3-6 from the seed, drafted one more round
+ * ahead, and a win there pays TOUGH_PAY x the battle Teeth. SIM-TUNED 2 -> 1.5 (3-seed sim): at
+ * x2 one seed's active : offline read 5.2-5.5x (hard band 3-5x). */
+export const TOUGH_PAY = 1.5;
+export const toughRound = (rs: Pick<RunState, 'seed' | 'pv'>) => (rs.pv >= 4 ? 3 + (hashStr('tough', rs.seed) % 4) : 0);
+export const isTough = (rs: RunState) => rs.pv >= 4 && rs.round === toughRound(rs) && rs.wins < WINS_TO_TRIUMPH - 1;
+
+/** The Huntmaster's hunt for this attempt (version 4: re-rolled on every retry). */
+export function huntOf(seed: number, tries: number, pv = PARAMS_VERSION): HuntId {
+  if (pv < 4) return 'net';
+  return HUNT_LIST[hashStr('huntid', seed, tries) % HUNT_LIST.length];
 }
 
 /** The rival you face next in this Run (the scout shows it). */
 export function nextRival(rs: RunState): RivalInfo {
-  if (rs.wins >= WINS_TO_TRIUMPH - 1) return huntmaster(rs.huntB || Math.max(rs.round, 8), rs.stakes, rs.seed, rs.pv, rs.opts.scars ?? 0);
-  return rival(rs.round, rs.stakes, hashStr('run', rs.seed), rs.pv);
+  if (rs.wins >= WINS_TO_TRIUMPH - 1) return huntmaster(rs.huntB || Math.max(rs.round, 8), rs.stakes, rs.seed, rs.pv, rs.opts.scars ?? 0, rs.huntTries ?? 0);
+  const r = rs.round + rivalAhead(rs) + (isTough(rs) ? 1 : 0);
+  if (rs.pv < 4) return rival(rs.round, rs.stakes, hashStr('run', rs.seed), rs.pv);
+  // Drafted at budget r, but under the round's own seed so the archetype is the round's.
+  return rival(r, rs.stakes, hashStr('run', rs.seed, rs.round), rs.pv);
 }
 
 // ---------- Teeth (07 §8) ----------
@@ -691,6 +750,9 @@ export interface FightOutcome {
   hunt: boolean;
   ended: '' | 'triumph' | 'retreat';
   round: number;
+  /** The TOUGH bout (Teeth x TOUGH_PAY on a win) and Chow banked into the next round. */
+  tough: boolean;
+  banked: number;
 }
 
 /**
@@ -714,7 +776,8 @@ export function fight(rs: RunState, log = true): FightOutcome {
     }
   }
   const round = rs.round;
-  const bt = battleTeeth(round, rs.stakes);
+  const tough = isTough(rs);
+  const bt = battleTeeth(round, rs.stakes) * (tough ? TOUGH_PAY : 1);
   let teeth = 0;
   let gritLost = false;
   if (result.outcome === 1) {
@@ -733,17 +796,66 @@ export function fight(rs: RunState, log = true): FightOutcome {
       gritLost = true;
     }
   }
+  if (hunt && result.outcome !== 1 && rs.pv >= 4) rs.huntTries = (rs.huntTries ?? 0) + 1;
   rs.teeth += teeth;
   if (hunt && result.outcome === 1) rs.ended = 'triumph';
   else if (rs.grit <= 0) rs.ended = 'retreat';
+  const banked = bankFor(rs);
   if (!rs.ended) {
+    rs.bankC = banked;
     rs.round++;
     startRound(rs);
   }
-  return { result, rival: riv, team, outcome: result.outcome, teeth, gritLost, hunt, ended: rs.ended, round };
+  return { result, rival: riv, team, outcome: result.outcome, teeth, gritLost, hunt, ended: rs.ended, round, tough, banked };
 }
 
 /** Forfeit: ends the Run as a Retreat with full payout (07 §4). */
 export function forfeit(rs: RunState): void {
   if (!rs.ended) rs.ended = 'retreat';
+}
+
+// ---------- the Encore (genre research R8: an optional push after the Triumph) ----------
+
+/** Encore bout n (0-based) meets a rival drafted at round ENCORE_R + 2n; each win adds
+ * battleTeeth(ENCORE_R + 2n) x ENCORE_PAY to the pot. Retreat banks the pot; a loss or draw
+ * loses it (never the Triumph). At most ENCORE_MAX bouts. */
+export const ENCORE_R = 9;
+export const ENCORE_PAY = 2;
+export const ENCORE_MAX = 5;
+
+export function encoreRival(rs: RunState, n = rs.encore?.n ?? 0): RivalInfo {
+  return rival(ENCORE_R + 2 * n, rs.stakes, hashStr('encore', rs.seed, n), rs.pv);
+}
+
+export const encoreOpen = (rs: RunState) => rs.ended === 'triumph' && (!rs.encore || (rs.encore.open && rs.encore.n < ENCORE_MAX));
+
+/** Fight the next Encore bout; returns the battle (with a log) and what it did to the pot. */
+export function encoreFight(rs: RunState, log = true): { result: BattleResult; rival: RivalInfo; team: Fighter[]; won: boolean; gain: number } | null {
+  if (!encoreOpen(rs)) return null;
+  const e = (rs.encore ??= { n: 0, pot: 0, open: true });
+  compact(rs);
+  const riv = encoreRival(rs, e.n);
+  const team = prepareLine(rs.line, rs.opts.hardy);
+  const result = battle(team, riv.line, { seed: battleSeed(team, riv.line, 100 + e.n, rs.pv), tactics: tacticsFor(rs.stakes, rs.pv), sigils: rs.opts.sigils, shade: rs.opts.shade, log });
+  let gain = 0;
+  if (result.outcome === 1) {
+    gain = battleTeeth(ENCORE_R + 2 * e.n, rs.stakes) * ENCORE_PAY;
+    e.pot += gain;
+    e.n++;
+    if (e.n >= ENCORE_MAX) e.open = false;
+  } else {
+    e.pot = 0;
+    e.open = false;
+  }
+  return { result, rival: riv, team, won: result.outcome === 1, gain };
+}
+
+/** Close the Encore and return the base-Teeth pot to pay (0 if already paid). */
+export function encoreCashOut(rs: RunState): number {
+  const e = rs.encore;
+  if (!e) return 0;
+  e.open = false;
+  const pot = e.pot;
+  e.pot = 0;
+  return pot;
 }

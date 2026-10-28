@@ -1,8 +1,10 @@
 // The Troll Bridge scene (specs/06): travelers queue on the bench, step up to the gate and
-// state a Claim in icons. You read their parts for contradictions, name a toll on the Coin
-// Stack (0.1x notches), and hold UNMASK or SEARCH for a verdict. Grumm growls it, gets bonked
-// if you push a brute too far, and naps while the goons work the gate.
-// All numbers live in model.ts; art in art.ts.
+// state a Claim in icons. You read their parts against today's Decree (the sky strip: today's
+// tells, unlabeled), name a toll with one of four price tiers and read their mood, and hold UNMASK
+// or SEARCH for a verdict. Grumm growls it, gets bonked if you push a brute too far, and naps
+// while the goons work the gate. Wave 1: the Decree and Codex replace the printed answer key, the
+// mood haggle (faces, Patience pips, Glower) replaces the wallet-revealing counter, and both kinds
+// of mistake cost after two free ones. All numbers live in model.ts; art in art.ts.
 import { Container, Graphics, Rectangle, type FederatedPointerEvent } from 'pixi.js';
 import type { DeptCtx, DeptScene, Rect, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
@@ -10,10 +12,11 @@ import { formatNum } from '../../core/format';
 import { PixelText, measure, wrap } from '../../ui/font';
 import { Button, C, drawPanel } from '../../ui/widgets';
 import * as M from './model';
-import { drawTraveler, goonArt, GOLD, grummArt, icon, OUTLINE, particle, TRAV_H, TRAV_W, WOOD, WOOD_D, WOOD_L, type GrummExpr } from './art';
+import { drawDecreePart, drawTraveler, goonArt, GOLD, grummArt, icon, OUTLINE, particle, TRAV_H, TRAV_W, WOOD, WOOD_D, WOOD_L, type GrummExpr } from './art';
 import { sfx } from './sfx';
 import { anyAffordable, buildGroups } from './upgrades';
 import { destroyTree } from '../../ui/destroy';
+import { sfx as coreSfx } from '../../core/audio';
 
 const HOLD_S = 0.3;
 const IDLE_GATE_S = 10;
@@ -23,6 +26,12 @@ const RITUAL_S = 6;
 const RITUAL_CRATES = 5;
 /** Squint pointers: slot -> icon. */
 const SLOT_ICON: Record<M.Slot, string> = { hat: 'hat', body: 'body', feet: 'boot', hand: 'hand', belt: 'belt', pack: 'pack', aura: 'glow' };
+/** Mood face icon per Moonlighter mood, and its word. */
+const MOOD_ICON: Record<M.Mood, string> = { delighted: 'moodHappy', content: 'moodHmm', grudging: 'moodAnnoyed', furious: 'moodFurious' };
+/** Decree strip cell size (a 24x42 mannequin plus a 1 px frame). */
+const CELL_W = 26;
+const CELL_H = 44;
+const DECREE_H = M.DECREE_HERO;
 /** Rule card id of a scripted lesson traveler. */
 const LESSON_CARD: Record<string, string> = Object.fromEntries(Object.entries(M.CARD_FORCE).map(([card, f]) => [f, card]));
 
@@ -91,6 +100,7 @@ class HoldButton extends Container {
     private color: number,
     private shade: number,
     private onFire: () => void,
+    private onStart?: () => void,
   ) {
     super();
     this.lbl = new PixelText(text, '#f4e8c1');
@@ -105,6 +115,7 @@ class HoldButton extends Container {
       this.holding = true;
       this.prog = 0;
       this.redraw();
+      this.onStart?.();
     });
     const stop = () => {
       if (!this.holding) return;
@@ -210,16 +221,18 @@ export class BridgeScene implements DeptScene {
   private resp = new Container();
   private respBg = new Graphics();
   private respText = new PixelText('', '#2a1a3a', null);
-  private readout = new PixelText('', '#f4e8c1');
-  private coinsText = new PixelText('', '#e8c04a');
-  private mood = new Graphics();
-  private stack = new Container();
-  private stackG = new Graphics();
-  private tickLabels: PixelText[] = [];
+  private respFace = new Graphics();
   private unmaskBtn!: HoldButton;
   private searchBtn!: HoldButton;
   private waveBtn!: Button;
-  private askBtn!: Button;
+  /** Wave 1 price tiers (FAIR, STEEP, GOUGE, ROB) with a mood preview face on each. */
+  private priceBtns: Button[] = [];
+  private priceFaces: Graphics[] = [];
+  private glowerText = new PixelText('', '#e05050');
+  private glowerDim = new PixelText('', '#5a3a4a');
+  private oopsText = new PixelText('', C.inkDim);
+  private panelX = 0;
+  private panelY = 0;
   private upgBtn!: Button;
   private downBtn!: Button;
   private upBtn!: Button;
@@ -248,15 +261,24 @@ export class BridgeScene implements DeptScene {
     return TRAV_H * this.S;
   }
   private pileX = 0;
-  private stackX = 0;
-  private stackY = 0;
-  private stackH = 0;
+  /** Decree strip (sky) and the price grid rects. */
+  private decreeC = new Container();
+  private decreeG = new Graphics();
+  private decreeTitle = new PixelText('', '#8a1a1a');
+  private decreeX = 0;
+  private decreeY = 0;
+  private decreeW = 0;
+  private gridX = 0;
+  private gridY = 0;
+  private gridW = 0;
 
   // state
   private bench: M.Traveler[] = [];
   private cur: Cur | null = null;
-  private notch = 10;
-  private dragging = false;
+  /** The last reply's face in the response bubble, and how long it stays. */
+  private moodFace: M.Mood | null = null;
+  private waveMode = '';
+  private moodT = 0;
   private arriveT = 0;
   private napT = 0;
   private expr: GrummExpr = 'chew';
@@ -320,6 +342,7 @@ export class BridgeScene implements DeptScene {
       this.water,
       this.benchG,
       this.posterC,
+      this.decreeC,
       this.signC,
       this.pileG,
       this.crateG,
@@ -371,6 +394,14 @@ export class BridgeScene implements DeptScene {
     this.posterC.eventMode = 'static';
     this.posterC.cursor = 'pointer';
     this.posterC.on('pointertap', () => this.openBoard());
+    // The Decree strip in the sky: tap for the board (Codex, Wanted, ledger, look guide).
+    this.decreeC.addChild(this.decreeG, this.decreeTitle);
+    this.decreeC.eventMode = 'static';
+    this.decreeC.cursor = 'pointer';
+    this.decreeC.on('pointertap', () => this.openBoard());
+    // A long gap since the last visit starts a new session (Glower refills, free mistakes back).
+    M.session(this.run, Date.now());
+    M.ledgerFor(this.run, this.poster.decree.day);
 
     this.buildLayout();
     // D-bridge-02: the bench and the traveler at the gate are saved in the run, so leaving and
@@ -425,21 +456,22 @@ export class BridgeScene implements DeptScene {
 
     // ---- controls ----
     this.ui.removeChildren().forEach((ch) => destroyTree(ch));
-    this.tickLabels = [];
     this.status = new PixelText('', C.inkDim);
     this.statusR = new PixelText('', C.inkDim);
     this.respText = new PixelText('', '#2a1a3a', null);
-    this.readout = new PixelText('', '#f4e8c1');
-    this.coinsText = new PixelText('', '#e8c04a');
+    this.respFace = new Graphics();
     this.menaceText = new PixelText('', '#e05050');
     this.napText = new PixelText('', '#fff08a');
+    this.glowerText = new PixelText('', '#e05050');
+    this.glowerDim = new PixelText('', '#5a3a4a');
+    this.oopsText = new PixelText('', C.inkDim);
     this.respBg = new Graphics();
     this.resp = new Container();
-    this.mood = new Graphics();
-    this.stack = new Container();
-    this.stackG = new Graphics();
     this.badge = new Graphics();
     this.uiG = new Graphics();
+    this.priceBtns = [];
+    this.priceFaces = [];
+    this.waveMode = '';
     this.ui.addChild(this.uiG, this.status, this.statusR);
 
     const x0 = c.x + 3;
@@ -450,59 +482,69 @@ export class BridgeScene implements DeptScene {
     const rowY = thumbY + 67;
     this.status.position.set(x0, statusY);
 
-    // Response bubble (tap to take a counter-offer).
-    this.resp.addChild(this.respBg, this.respText);
+    // Response bubble (mood face + message; tap to take a counter-offer).
+    this.resp.addChild(this.respBg, this.respFace, this.respText);
     this.resp.position.set(x0, respY);
     this.resp.eventMode = 'static';
     this.resp.cursor = 'pointer';
     this.resp.hitArea = new Rectangle(0, -2, right - x0, 20);
     this.resp.on('pointertap', () => {
       if (this.cur?.phase === 'counter') this.takeCounter();
+      else if (this.bribeOpen()) this.takeBribe();
     });
     this.ui.addChild(this.resp);
 
-    // Verdicts (left), Coin Stack (right): opposite sides so a drag can't fire a verdict.
+    // Verdicts (left), price tiers (right): opposite sides so a price tap can't fire a verdict.
     const vw = 56;
-    this.unmaskBtn = new HoldButton(vw, 30, 'UNMASK', 'mask', 0x8a3a9a, 0x4a1a5a, () => this.unmask());
+    const squint = () => this.grummSay(['eye', 'question'], 'squint');
+    this.unmaskBtn = new HoldButton(vw, 30, 'UNMASK', 'mask', 0x8a3a9a, 0x4a1a5a, () => this.unmask(), squint);
     this.unmaskBtn.position.set(x0, thumbY);
-    this.searchBtn = new HoldButton(vw, 30, 'SEARCH', 'barrel', 0x3a6ea8, 0x1a3a6a, () => this.search());
+    this.searchBtn = new HoldButton(vw, 30, 'SEARCH', 'barrel', 0x3a6ea8, 0x1a3a6a, () => this.search(), squint);
     this.searchBtn.position.set(x0, thumbY + 34);
     this.ui.addChild(this.unmaskBtn, this.searchBtn);
 
-    const sw = 30;
-    this.stackX = right - sw;
-    this.stackY = thumbY;
-    this.stackH = 64;
-    this.stack.position.set(this.stackX, this.stackY);
-    this.stack.addChild(this.stackG);
-    this.stack.eventMode = 'static';
-    this.stack.cursor = 'ns-resize';
-    this.stack.hitArea = new Rectangle(-8, -4, sw + 10, this.stackH + 8);
-    this.stack.on('pointerdown', (e: FederatedPointerEvent) => this.stackDown(e));
-    this.stack.on('globalpointermove', (e: FederatedPointerEvent) => this.stackMove(e));
-    this.stack.on('pointerup', () => this.stackUp());
-    this.stack.on('pointerupoutside', () => this.stackUp());
-    this.ui.addChild(this.stack);
-    for (const m of [1, 2, 3, 4]) {
-      const t = new PixelText(`${m}X`, C.inkDim);
-      t.position.set(this.stackX - 10, this.notchY(m * 10) - 2);
-      this.tickLabels.push(t);
-      this.ui.addChild(t);
-    }
-
+    // 2x2 price grid: GOUGE / ROB on top (they spend Glower), FAIR / STEEP under the thumb.
     const mx = x0 + vw + 4;
-    const mw = this.stackX - 12 - mx;
-    this.readout.scale.set(2);
-    this.readout.position.set(mx, thumbY + 2);
-    this.coinsText.position.set(mx, thumbY + 16);
-    this.mood.position.set(mx + mw - 10, thumbY + 3);
-    this.ui.addChild(this.readout, this.coinsText, this.mood);
+    const mw = right - mx;
     const bw = Math.floor((mw - 3) / 2);
-    this.waveBtn = new Button({ w: bw, h: 29, label: 'WAVE', sub: 'FREE', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => this.waveOrTake() });
-    this.waveBtn.position.set(mx, thumbY + 34);
-    this.askBtn = new Button({ w: mw - bw - 3, h: 29, label: 'ASK', sub: '', color: C.gold, shade: 0x9a7a20, onTap: () => this.demand() });
-    this.askBtn.position.set(mx + bw + 3, thumbY + 34);
-    this.ui.addChild(this.waveBtn, this.askBtn);
+    this.gridX = mx;
+    this.gridY = thumbY;
+    this.gridW = mw;
+    const spot = [
+      [0, 1],
+      [1, 1],
+      [0, 0],
+      [1, 0],
+    ];
+    M.PRICE_TIERS.forEach((tier, i) => {
+      const hot = tier.glower > 0;
+      const b = new Button({
+        w: i % 2 ? mw - bw - 3 : bw,
+        h: 20,
+        label: tier.name,
+        sub: `${tier.mult}X`,
+        color: hot ? 0xd0802a : C.gold,
+        shade: hot ? 0x8a4a1a : 0x9a7a20,
+        onTap: () => this.ask(i),
+      });
+      b.position.set(mx + spot[i][0] * (bw + 3), thumbY + spot[i][1] * 22);
+      const face = new Graphics();
+      face.position.set(b.x + (i % 2 ? mw - bw - 3 : bw) - 11, b.y + 5);
+      face.eventMode = 'none';
+      this.priceBtns.push(b);
+      this.priceFaces.push(face);
+      this.ui.addChild(b, face);
+    });
+    this.waveBtn = new Button({ w: bw, h: 20, label: 'WAVE', sub: 'FREE', color: C.edge, shade: 0x3a2046, textColor: C.ink, onTap: () => this.waveOrTake() });
+    this.waveBtn.position.set(mx, thumbY + 44);
+    this.ui.addChild(this.waveBtn);
+    // Glower budget and the free-mistake count, beside WAVE.
+    this.panelX = mx + bw + 3;
+    this.panelY = thumbY + 44;
+    this.glowerText.position.set(this.panelX + 2, this.panelY + 3);
+    this.glowerDim.position.set(this.panelX + 2, this.panelY + 3);
+    this.oopsText.position.set(this.panelX + 2, this.panelY + 12);
+    this.ui.addChild(this.glowerDim, this.glowerText, this.oopsText);
 
     // Bottom row: Upgrades and the Menace dial.
     const dark = { color: C.edge, shade: 0x3a2046, textColor: C.ink };
@@ -525,6 +567,45 @@ export class BridgeScene implements DeptScene {
     this.shownMenace = -1;
     this.travKey = '';
     this.benchKey = '';
+    this.drawDecree();
+  }
+
+  /** The Decree strip in the sky (wave 1, deduction.md R1): today's tells as pictures, no labels.
+   * The newest tell wears a NEW tag. Hidden when the sky is too short to hold it. */
+  private drawDecree(): void {
+    const g = this.decreeG.clear();
+    const dec = this.poster.decree;
+    const parts = [...dec.hero, ...dec.smug];
+    // Hero and smuggler tells interleaved, so the strip's order gives nothing away.
+    const order = [parts[0], parts[DECREE_H], parts[1], parts[DECREE_H + 1]].filter(Boolean).concat(parts.slice(DECREE_H * 2));
+    const w = order.length * (CELL_W + 2) + 4;
+    const h = CELL_H + 13;
+    const x = this.cx + 3;
+    // Under the manager strip when the sky allows; else at the top (the strip covers it briefly).
+    const claimTop = this.deckY - this.th - 19;
+    const y = claimTop - (this.top + 32) >= h ? this.top + 32 : this.top + 3;
+    this.decreeC.visible = claimTop - y >= h;
+    this.decreeX = x;
+    this.decreeY = y;
+    this.decreeW = w;
+    if (!this.decreeC.visible) return;
+    g.rect(x - 1, y - 1, w + 2, h + 2).fill(OUTLINE);
+    g.rect(x, y, w, h).fill(0xe8d8a8);
+    g.rect(x + 1, y + 1, w - 2, 8).fill(0x8a2a2a);
+    this.decreeTitle.set('DECREE', '#f4e8c1');
+    this.decreeTitle.position.set(x + 3, y + 2);
+    order.forEach(([slot, part], i) => {
+      const cx = x + 3 + i * (CELL_W + 2);
+      const cy = y + 11;
+      g.rect(cx, cy, CELL_W, CELL_H).fill(0xd8c898);
+      drawDecreePart(g, slot, part, cx + 1, cy + 1);
+      if (part === dec.added) {
+        // NEW tag: a red corner flag.
+        g.rect(cx + CELL_W - 7, cy, 7, 4).fill(0xc03a3a);
+        g.rect(cx + CELL_W - 6, cy + 1, 5, 2).fill(0xff8a6a);
+      }
+    });
+    this.decreeC.hitArea = new Rectangle(x - 3, y - 3, w + 6, h + 6);
   }
 
   private drawBackground(w: number, h: number): void {
@@ -539,9 +620,9 @@ export class BridgeScene implements DeptScene {
     let seed = 99;
     const rnd = () => ((seed = (seed * 16807) % 2147483647) % 1000) / 1000;
     for (let i = 0; i < 30; i++) g.rect(Math.floor(rnd() * w), top + Math.floor(rnd() * skyH * 0.6), 1, 1).fill(rnd() < 0.3 ? 0xf4e8c1 : 0x9c8aa8);
-    // moon
-    g.circle(this.cx + Math.floor(this.cw * 0.5), top + 40, 7).fill(0xe8dcc0);
-    g.circle(this.cx + Math.floor(this.cw * 0.5) + 3, top + 38, 6).fill(bands[0]);
+    // moon (top right: the Decree strip has the top left)
+    g.circle(this.cx + this.cw - 22, top + 44, 7).fill(0xe8dcc0);
+    g.circle(this.cx + this.cw - 19, top + 42, 6).fill(bands[0]);
     // far hills and the Overlord's castle on the horizon
     const hy = deck - 28;
     for (let x = 0; x < w; x++) {
@@ -663,11 +744,6 @@ export class BridgeScene implements DeptScene {
     });
   }
 
-  private notchY(n: number): number {
-    const f = (n - M.NOTCH_MIN) / (M.NOTCH_MAX - M.NOTCH_MIN);
-    return this.stackY + this.stackH - 3 - Math.round(f * (this.stackH - 6));
-  }
-
   // ---------- travelers ----------
 
   private gen(force?: M.Force): M.Traveler {
@@ -722,7 +798,6 @@ export class BridgeScene implements DeptScene {
       shiftT: 0,
     };
     this.syncGate();
-    this.notch = 10;
     this.gateOpen = 0;
     this.drawGate();
   }
@@ -755,6 +830,43 @@ export class BridgeScene implements DeptScene {
     }
   }
 
+  /** A traveler went through on a toll, a wave or a bribe. A liar who showed a tell is a mistake
+   * (the second kind: letting one through); one who showed nothing slips by unfined. */
+  private liarPassed(bribed = false): void {
+    const c = this.cur;
+    if (!c) return;
+    const t = c.t;
+    if (t.hero) this.heroSlipped();
+    if ((!t.hero && !t.smuggler) || (t.smuggler && bribed)) return;
+    const msg = t.hero ? 'A HERO SLIPPED BY!' : 'SMUGGLED GOODS GOT BY!';
+    if (t.tells.length > 0 || t.posterMatch) {
+      this.run.stats.missed++;
+      this.mistake(msg);
+    } else this.ctx.float(t.hero ? 'A HERO SLIPPED BY' : 'EELS SLIPPED BY', this.gateX - 30, this.deckY - this.th - 22, '#9c8aa8');
+  }
+
+  /** Wave 1 two-sided stakes (Papers, Please citations): FREE_MISTAKES per session, then a fine
+   * from this session's takings, never the bank you arrived with. */
+  private mistake(msg: string): void {
+    const r = this.run;
+    const ses = this.sess();
+    const fine = M.mistakeFine(ses, r.bank);
+    r.stats.mistakes++;
+    r.streak = 0;
+    const fm = (n: number) => formatNum(n, this.ctx.game.save.meta.settings.notation);
+    if (fine > 0 && this.ctx.spend(fine)) {
+      r.stats.fines += fine;
+      this.say(`${msg} FINE -${fm(fine)}`, '#c03a3a');
+      this.ctx.game.juice.pop(`FINE -${fm(fine)}`, this.cx + this.cw / 2 - 20, this.sceneBottom - 14, { tier: 2, color: C.redText, shake: false });
+      this.ctx.game.juice.shake(1);
+    } else {
+      const left = Math.max(0, M.FREE_MISTAKES - ses.mistakes);
+      this.say(`${msg} ${left ? `${left} FREE OOPS LEFT` : 'NEXT ONE: FINED'}`, '#c03a3a');
+    }
+    coreSfx.error();
+    this.ctx.haptic(25);
+  }
+
   private heroSlipped(): void {
     const c = this.cur;
     if (!c?.t.hero) return;
@@ -779,23 +891,70 @@ export class BridgeScene implements DeptScene {
     return !!c && (c.phase === 'wait' || c.phase === 'counter') && this.napT <= 0 && !this.modal.children.length;
   }
 
-  private demand(): void {
+  /** The active session (Glower, mistakes, purse); renewed after a long gap. */
+  private sess(): M.Session {
+    return M.session(this.run, Date.now());
+  }
+
+  /** Credits hand-earned Tollpence and adds it to the session purse (the fine base). */
+  private earnActive(base: number): number {
+    const got = this.ctx.earn(base);
+    const ses = this.sess();
+    ses.purse += got;
+    ses.paid++;
+    return got;
+  }
+
+  /** Shows a mood face in the response bubble for a moment. */
+  private showMood(m: M.Mood): void {
+    this.moodFace = m;
+    this.moodT = 2.4;
+  }
+
+  /** Price tier i (wave 1): FAIR, STEEP, GOUGE, ROB. The traveler answers with a face. */
+  private ask(i: number): void {
     if (!this.canAct()) return;
     const c = this.cur!;
-    const mult = this.notch / 10;
+    const tier = M.PRICE_TIERS[i];
+    const ses = this.sess();
+    if (ses.glower + 1e-6 < tier.glower) {
+      this.say('NO GLOWER LEFT! FAIR OR STEEP', '#c03a3a');
+      this.grummSay(['eye', 'zzz'], 'blush');
+      return;
+    }
+    ses.glower = Math.max(0, ses.glower - tier.glower);
+    const mult = tier.mult;
     const rep = M.reply(c.t, c.h, this.run, mult);
-    if (rep.kind === 'pay') this.collect(mult);
-    else if (rep.kind === 'counter') {
-      c.h.round = 1;
+    c.h.round++;
+    const led = M.ledgerFor(this.run, this.poster.decree.day);
+    if (rep.kind !== 'pay') led.over[c.t.who] = Math.min(led.over[c.t.who] ?? 99, mult);
+    if (rep.kind === 'pay') {
+      led.best[c.t.who] = Math.max(led.best[c.t.who] ?? 0, mult);
+      this.showMood(rep.mood);
+      this.collect(mult, rep.mood);
+    } else if (rep.kind === 'counter') {
       c.h.counter = rep.mult;
+      c.h.pips = rep.pips;
       c.phase = 'counter';
       c.face = 'angry';
+      this.showMood('grudging');
       this.ctx.haptic(8);
       this.grummSay(['question'], 'squint');
+      sfx.tick(this.vol());
+      this.travKey = '';
+    } else if (rep.kind === 'refuse') {
+      c.h.pips = rep.pips;
+      c.face = 'angry';
+      this.showMood('furious');
+      this.say('FURIOUS! -2 PATIENCE. ASK LOWER', '#c03a3a');
+      this.ctx.haptic(14);
+      this.grummSay(['cross', 'bang'], 'blush');
+      sfx.sad(this.vol());
       this.travKey = '';
     } else if (rep.kind === 'leave') {
       this.run.streak = 0;
-      this.say(`TURNED BACK! TOO PRICEY`, '#c03a3a');
+      this.showMood('furious');
+      this.say('OUT OF PATIENCE! TURNED BACK', '#c03a3a');
       this.ctx.float('NOPE', c.x + this.tw / 2, this.deckY - this.th - 6, C.redText);
       this.grummSay(['cross'], 'blush');
       sfx.sad(this.vol());
@@ -803,14 +962,19 @@ export class BridgeScene implements DeptScene {
     } else this.bonk();
   }
 
-  private collect(mult: number): void {
+  private collect(mult: number, mood: M.Mood = 'content'): void {
     const c = this.cur!;
     const r = this.run;
     if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
     r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
+    // Shop Titans: a FAIR toll gives half a Glower charge back.
+    if (mult <= 1 + 1e-6) {
+      const ses = this.sess();
+      ses.glower = Math.min(M.GLOWER_MAX, ses.glower + M.GLOWER_FAIR_REFUND);
+    }
     const song = this.songT > 0 ? M.SONG_MULT : 1;
     const base = c.t.claimFare * mult * M.fareMult(r, this.skulls) * M.streakMult(r.streak) * song;
-    const got = this.ctx.earn(base);
+    const got = this.earnActive(base);
     r.stats.tolls++;
     if (c.t.kind === 'bard') {
       // Pays in song too (06 §5): +10% tolls for 30 s.
@@ -818,11 +982,12 @@ export class BridgeScene implements DeptScene {
       this.ctx.say('bard', { type: 'tier_reached', key: 'bard' });
     }
     this.coinBurst(c.x + this.tw / 2, this.deckY - this.th / 2, Math.min(8, 2 + Math.round(mult * 2)), got);
-    this.say(`PAID ${mult.toFixed(1)}X${r.streak >= 2 ? `  STREAK ${r.streak}` : ''}`, '#2a6a1a');
-    this.grummSay(['coin'], 'grin');
+    const how = mood === 'delighted' ? 'DELIGHTED: TOO CHEAP!' : r.streak >= 2 ? `STREAK ${r.streak}` : 'CONTENT';
+    this.say(`PAID ${mult.toFixed(1)}X  ${how}`, mood === 'delighted' ? '#6a5a1a' : '#2a6a1a');
+    this.grummSay(mood === 'delighted' ? ['coin', 'question'] : ['coin'], 'grin');
     sfx.clink(this.vol(), r.streak);
     this.ctx.haptic(10);
-    this.heroSlipped();
+    this.liarPassed();
     this.leave(1, 'happy');
   }
 
@@ -842,7 +1007,21 @@ export class BridgeScene implements DeptScene {
     const c = this.cur!;
     this.run.stats.bribes++;
     this.grummSay(['coin', 'check'], 'grin');
-    this.collect(c.t.bribe);
+    this.collectBribe(c.t.bribe);
+  }
+
+  /** A taken bribe: paid like a toll, but the smuggler is let through on purpose (no mistake). */
+  private collectBribe(mult: number): void {
+    const c = this.cur!;
+    const r = this.run;
+    const got = this.earnActive(c.t.claimFare * mult * M.fareMult(r, this.skulls));
+    r.stats.tolls++;
+    this.coinBurst(c.x + this.tw / 2, this.deckY - this.th / 2, 5, got);
+    this.say(`BRIBE ${mult.toFixed(1)}X TAKEN. THEY PASS`, '#6a3a00');
+    sfx.clink(this.vol(), 3);
+    this.ctx.haptic(10);
+    this.liarPassed(true);
+    this.leave(1, 'happy');
   }
 
   private waveOrTake(): void {
@@ -858,7 +1037,7 @@ export class BridgeScene implements DeptScene {
     }
     this.say('WAVED THROUGH, FREE', '#2a1a3a');
     this.grummSay(['check'], 'chew');
-    this.heroSlipped();
+    this.liarPassed();
     this.leave(1, 'happy');
   }
 
@@ -874,8 +1053,9 @@ export class BridgeScene implements DeptScene {
     if (c.t.hero) {
       const ev = M.evidence(c.t);
       const mult = c.t.showdown ? 10 : M.bountyMult(ev);
-      const got = this.ctx.earn(c.t.kindFare * M.unmaskPay(mult, this.ctx.save.imports?.captives ?? 0) * M.fareMult(r, this.skulls));
+      const got = this.earnActive(c.t.kindFare * M.unmaskPay(mult, this.ctx.save.imports?.captives ?? 0) * M.fareMult(r, this.skulls));
       r.stats.unmasks++;
+      this.noteCodex(c.t);
       this.per.bountiesLife++;
       if (ev >= 2) {
         r.stats.evUnmasks++;
@@ -906,16 +1086,18 @@ export class BridgeScene implements DeptScene {
       this.grummSay(mult >= 10 ? ['mask', 'coin', 'coin'] : ['mask', 'coin'], 'thump');
       sfx.poof(this.vol());
       this.ctx.haptic(30);
-      this.shakeT = 0.15;
+      // Shared juice kit: a boss-stop on the reveal, bigger for a X10.
+      this.ctx.game.juice.hitStop(mult >= 10 ? 90 : 50);
+      this.ctx.game.juice.shake(mult >= 10 ? 3 : 2);
+      if (mult >= 10) coreSfx.bigWin();
     } else {
-      this.falseAccusation();
       this.falseInRow++;
       if (this.falseInRow >= 3) {
-        // Struggle (06 §18): the offer opens the Poster board.
+        // Struggle (06 §18): the offer opens the Decree board.
         this.falseInRow = 0;
         this.ctx.say('struggle', { type: 'struggle', offer: () => this.openBoard() });
       }
-      this.say('NOT A HERO! STORMS OFF, NO TOLL', '#c03a3a');
+      this.falseAccusation('NOT A HERO! NO TOLL.');
       this.ctx.float('WRONG!', c.x + this.tw / 2, this.deckY - this.th - 6, C.redText);
       this.grummSay(['mask', 'cross', 'blush'], 'blush');
       sfx.sad(this.vol());
@@ -924,11 +1106,22 @@ export class BridgeScene implements DeptScene {
     }
   }
 
-  /** A false Unmask or Search: the Streak breaks; 3 within 60 s and word gets around (06 §4). */
-  private falseAccusation(): void {
+  /** Codex breadcrumb (deduction.md R9): a caught liar's showing tells are written down; a new
+   * entry floats up so the player learns what the unlabeled Decree pictures mean. */
+  private noteCodex(t: M.Traveler): void {
+    const fresh = M.codexNote(this.per, t);
+    if (!fresh.length) return;
+    const name = fresh.map((k) => M.PART_NAMES[k] ?? (k === 'where' ? 'ODD ROAD' : k === 'writ' ? 'BAD SEAL' : 'SHIFTY CLAIM')).join(', ');
+    this.ctx.float(`CODEX: ${name} = ${t.hero ? 'HERO' : 'GOODS'}`, this.cx + 4, this.deckY - this.th - 34, '#ffe060');
+  }
+
+  /** A false Unmask or Search: a mistake (the first kind), the Streak breaks; 3 within 60 s and
+   * word gets around (06 §4). */
+  private falseAccusation(msg: string): void {
     const r = this.run;
     r.streak = 0;
     r.stats.falseAcc++;
+    this.mistake(msg);
     if (M.falseAccusation(this.falseStamps, this.time)) {
       this.wordT = M.WORD_S;
       this.ctx.float('WORD GETS AROUND', this.cx + this.cw / 2 - 30, this.top + 20, C.redText);
@@ -957,8 +1150,9 @@ export class BridgeScene implements DeptScene {
     if (c.t.smuggler) {
       c.lidOpen = true;
       this.travKey = '';
-      const got = this.ctx.earn(c.t.kindFare * 4 * M.fareMult(r, this.skulls)); // 3x fare goods + 1x fine
+      const got = this.earnActive(c.t.kindFare * M.SEIZE_MULT * M.fareMult(r, this.skulls)); // goods + a fine
       r.stats.confisc++;
+      this.noteCodex(c.t);
       this.falseInRow = 0;
       this.eels(c.x + 3 * this.S, this.deckY - this.th * 0.7);
       this.coinBurst(c.x + this.tw / 2, this.deckY - this.th / 2, 5, got);
@@ -966,6 +1160,8 @@ export class BridgeScene implements DeptScene {
       this.grummSay(['barrel', 'check'], 'grin');
       sfx.clink(this.vol(), 4);
       this.ctx.haptic(20);
+      this.ctx.game.juice.hitStop(40);
+      this.ctx.game.juice.shake(1);
       c.phase = 'reveal';
       c.timer = 0.3;
       c.face = 'shock';
@@ -973,9 +1169,9 @@ export class BridgeScene implements DeptScene {
       // Innocent: offended. Wallet -20%, patience -50%, Streak breaks.
       c.h.offended = true;
       c.face = 'angry';
+      c.h.pips = Math.max(1, M.pipsLeft(c.t, { ...c.h, offended: false }) - 1);
       this.travKey = '';
-      this.falseAccusation();
-      this.say('CLEAN! THEY ARE OFFENDED (PURSE -20%)', '#c03a3a');
+      this.falseAccusation('CLEAN! OFFENDED.');
       this.grummSay(['barrel', 'cross'], 'blush');
       sfx.sad(this.vol());
       c.phase = 'wait';
@@ -1061,36 +1257,6 @@ export class BridgeScene implements DeptScene {
       this.ctx.say(`card_${card.id}`, { type: 'mechanic_unlocked' });
       this.ctx.game.toast(`NEW RULE: ${card.name}. ${card.desc}`);
     } else if (m === 1 || m % 5 === 0 || m > best) this.ctx.say('dialRaised', { type: 'dial_raised', key: `m${m}` });
-  }
-
-  // ---------- coin stack ----------
-
-  private stackDown(e: FederatedPointerEvent): void {
-    e.stopPropagation();
-    if (!this.canAct()) return;
-    this.dragging = true;
-    this.stackMove(e);
-  }
-
-  private stackMove(e: FederatedPointerEvent): void {
-    if (!this.dragging) return;
-    const p = e.getLocalPosition(this.ui);
-    const f = (this.stackY + this.stackH - 3 - p.y) / (this.stackH - 6);
-    const n = Math.max(M.NOTCH_MIN, Math.min(M.NOTCH_MAX, M.NOTCH_MIN + Math.round(f * (M.NOTCH_MAX - M.NOTCH_MIN))));
-    if (n !== this.notch) {
-      if (Math.floor(n / 5) !== Math.floor(this.notch / 5)) {
-        this.ctx.haptic(5);
-        sfx.tick(this.vol());
-      }
-      this.notch = n;
-    }
-  }
-
-  private stackUp(): void {
-    if (!this.dragging) return;
-    this.dragging = false;
-    // Releasing sends the demand (06 §11).
-    this.demand();
   }
 
   // ---------- juice ----------
@@ -1247,7 +1413,7 @@ export class BridgeScene implements DeptScene {
     this.zoomT = 1.8;
   }
 
-  // ---------- the notice board (Poster + look guide) ----------
+  // ---------- the notice board (Decree, Codex, Wanted, ledger, look guide) ----------
 
   private openBoard(): void {
     if (this.modal.children.length) return;
@@ -1256,6 +1422,8 @@ export class BridgeScene implements DeptScene {
     for (const rc of M.RULE_CARDS) if (this.run.menace >= rc.m) this.ctx.markSeen(`b.board.${rc.id}`);
     const c = this.ctx.content();
     const p = this.poster;
+    const dec = p.decree;
+    const m = this.run.menace;
     const box = new Container();
     const dim = new Graphics();
     dim.rect(0, 0, this.ctx.layout.w, this.ctx.layout.h).fill({ color: 0x000000, alpha: 0.6 });
@@ -1263,80 +1431,104 @@ export class BridgeScene implements DeptScene {
     const pw = c.w - 8;
     const px = c.x + 4;
     // Below the manager bubble (which sits on top of the scene layer).
-    const py = c.y + Math.min(34, Math.max(4, c.h - 300));
+    const py = c.y + Math.min(34, Math.max(4, c.h - 330));
     const panel = new Graphics();
-    box.addChild(panel);
+    const art = new Graphics();
+    box.addChild(panel, art);
     const ink = '#2a1a1a';
     const txt = (s: string, x: number, y: number, col = ink, maxW = pw - 12) => {
       const t = new PixelText(wrap(s, maxW), col, null);
       t.position.set(x, y);
       box.addChild(t);
-      return t;
+      return measure(wrap(s, maxW)).h;
+    };
+    const mark = (key: string, x: number, y: number) => {
+      const k = M.codexKind(this.per, key);
+      const ic = new Graphics(icon(k === 'hero' ? 'mask' : k === 'smug' ? 'barrel' : 'question'));
+      ic.position.set(x, y);
+      box.addChild(ic);
     };
     let y = py + 5;
-    txt(`WANTED: ${p.name}`, px + 6, y, '#8a1a1a');
+    txt("TODAY'S DECREE: THESE MARK A LIAR", px + 6, y, '#8a1a1a');
     y += 9;
-    // Hero portrait in the poster's colours.
-    const hero = new Graphics();
+    // Today's tells (interleaved, unlabeled) and yesterday's, now harmless (crossed out).
+    const parts = [dec.hero[0], dec.smug[0], dec.hero[1], dec.smug[1]].filter(Boolean);
+    const exp = [...M.HERO_POOL, ...M.SMUG_POOL].find(([, q]) => q === dec.expired);
+    const cells: [M.Slot, string, boolean][] = parts.map(([sl, q]) => [sl, q, false]);
+    if (exp) cells.push([exp[0], exp[1], true]);
+    const cw = Math.min(CELL_W + 4, Math.floor((pw - 8) / cells.length));
+    cells.forEach(([sl, q, old], i) => {
+      const cx = px + 5 + i * cw;
+      art.rect(cx, y, CELL_W, CELL_H).fill(old ? 0xc8b890 : 0xd8c898);
+      drawDecreePart(art, sl, q, cx + 1, y + 1);
+      if (old) {
+        for (let k = 0; k < CELL_W - 2; k++) art.rect(cx + 1 + k, y + 1 + Math.round((k * (CELL_H - 3)) / (CELL_W - 3)), 1, 1).fill(0xc03a3a);
+        txt('OLD', cx + 7, y + CELL_H + 2, '#8a6a4a');
+      } else {
+        if (q === dec.added) txt('NEW', cx + 1, y + CELL_H + 2, '#c03a3a');
+        mark(q, cx + 16, y + CELL_H + 1);
+      }
+    });
+    y += CELL_H + 12;
+    y += txt('ODD FOR THE CLAIM + ON THE DECREE = LIAR. OTHER ODD PARTS: FASHION.', px + 6, y) + 3;
+    y += txt('MARKS = YOUR CODEX: {mask} HERO {barrel} SMUGGLER ? NOT YET', px + 6, y, '#5a4a3a') + 3;
+    txt('ODD ROAD', px + 6, y + 1, '#5a4a3a');
+    mark('where', px + 42, y);
+    let lx = px + 56;
+    if (m >= 3) {
+      const seal = new Graphics(icon('writ', p.seal));
+      seal.position.set(lx, y);
+      box.addChild(seal);
+      txt(`TRUE SEAL: ${M.SEAL_NAMES[p.seal]}`, lx + 11, y + 1);
+      lx += 70;
+    }
+    y += 11;
+    if (m >= 9) y += txt(`FAKE TELL TODAY: ${M.PART_NAMES[p.fake]} (IGNORE IT)`, px + 6, y, '#8a1a1a') + 3;
+    if (m >= 15) y += txt(m >= 18 ? 'BRIBE: TAKE IT, OR SEARCH. SHIFTER: TAP TWICE' : 'BRIBE: TAKE IT, OR SEARCH', px + 6, y, '#6a3a1a') + 3;
+    // Wanted poster.
     const look: M.Look = { hat: 'none', body: 'armor', feet: 'steel', hand: 'sword', belt: 'none', pack: 'none', aura: 'none', cloak: p.shows.includes('cloak') ? p.cloak : 5, hair: p.shows.includes('hair') ? p.hair : 1, skin: 0, mark: p.shows.includes('mark') ? p.mark : 0 };
-    hero.rect(px + 5, y, 28, 46).fill(0xd8c898);
-    drawTraveler(hero, look, px + 7, y + 2);
-    box.addChild(hero);
+    art.rect(px + 5, y, 26, 44).fill(0xd8c898);
+    drawTraveler(art, look, px + 6, y + 1);
     const feats: string[] = [];
     if (p.shows.includes('cloak')) feats.push(`${M.CLOAK_NAMES[p.cloak]} CLOTHES`);
     if (p.shows.includes('hair')) feats.push(M.HAIR_NAMES[p.hair]);
     if (p.shows.includes('mark')) feats.push(M.MARK_NAMES[p.mark]);
-    txt(`${feats.join('\n')}\n\nMATCH 2+ = WANTED.\nUNMASK FOR X10!`, px + 38, y + 1, ink, pw - 44);
-    y += 50;
-    const m = this.run.menace;
-    if (m >= 3) {
-      const seal = new Graphics(icon('writ', p.seal));
-      seal.position.set(px + 6, y - 1);
-      box.addChild(seal);
-      txt(`TRUE WRIT SEAL: ${M.SEAL_NAMES[p.seal]}`, px + 18, y + 1);
-      y += 11;
-    }
-    if (m >= 9) {
-      txt(`FAKE TELL TODAY: ${M.HERO_TELL_NAMES[p.fake]} (IGNORE)`, px + 6, y, '#8a1a1a');
-      y += 9;
-    }
-    if (m >= 15) {
-      const bl = m >= 18 ? 'BRIBE: TAKE IT, OR SEARCH. SHIFTER: TAP TWICE' : 'BRIBE: TAKE IT, OR SEARCH';
-      txt(bl, px + 6, y, '#6a3a1a');
-      y += measure(wrap(bl, pw - 12)).h + 3;
-    }
-    // Look guide: the normal look of each Claim.
-    txt('WHO LOOKS LIKE WHAT', px + 6, y, '#6a3a1a');
-    y += 8;
+    txt(`WANTED: ${p.name}\n${feats.join('\n')}\nMATCH 2+ = UNMASK X10`, px + 36, y + 2, '#8a1a1a', pw - 42);
+    y += 48;
+    // Today's ledger: the best price each Claim paid (wallets drift daily).
+    const led = this.run.ledger?.day === dec.day ? this.run.ledger : null;
     const whos: M.Who[] = ['peasant', 'pilgrim', 'merchant', 'adventurer'];
     if (this.run.lv.booth >= 1) whos.push('noble');
     if (this.run.lv.booth >= 2) whos.push('bard');
+    txt('LEDGER TODAY: BEST PRICE PAID', px + 6, y, '#6a3a1a');
+    y += 8;
     const slot = Math.floor((pw - 8) / whos.length);
-    const guide = new Graphics();
+    whos.forEach((w, i) => {
+      const gx = px + 4 + i * slot;
+      const ic = new Graphics(icon(w));
+      ic.position.set(gx, y);
+      box.addChild(ic);
+      const b = led?.best[w];
+      txt(b ? `${b}X` : '-', gx + 11, y + 2, b ? '#2a6a1a' : '#8a7a6a', slot - 11);
+    });
+    y += 12;
+    // Look guide: the normal look of each Claim.
+    txt('WHO LOOKS LIKE WHAT', px + 6, y, '#6a3a1a');
+    y += 8;
     whos.forEach((w, i) => {
       const n = M.NORMAL[w];
       const l: M.Look = { hat: n.hat[0], body: n.body[0], feet: n.feet[0], hand: n.hand[0], belt: n.belt[0], pack: n.pack[0], aura: n.aura[0], cloak: 0, hair: 1, skin: 0, mark: 0 };
       const gx = px + 4 + i * slot + Math.floor((slot - TRAV_W) / 2);
-      drawTraveler(guide, l, gx, y);
+      drawTraveler(art, l, gx, y);
       const ic = new Graphics(icon(w));
       ic.position.set(gx + 2, y + TRAV_H + 1);
       const dst = new Graphics(icon(n.where[0]));
       dst.position.set(gx + 13, y + TRAV_H + 1);
       box.addChild(ic, dst);
     });
-    box.addChildAt(guide, 2);
     y += TRAV_H + 12;
-    txt('GOODS: BIG SACK, BARREL, SHINY NEW BOOTS' + (m >= 6 ? ', TALL HAT' : '') + ' = HOLD SEARCH', px + 6, y);
-    y += measure(wrap('GOODS: BIG SACK, BARREL, SHINY NEW BOOTS' + (m >= 6 ? ', TALL HAT' : '') + ' = HOLD SEARCH', pw - 12)).h + 4;
-    const heroLine = 'HERO: STEEL BOOTS, GLOW, HIDDEN HILT, SHIELD, ODD PLACE' + (m >= 3 ? ', WRONG SEAL' : '') + ' = HOLD UNMASK. 2+ CLUES = X10';
-    txt(heroLine, px + 6, y, '#5a1a6a');
-    y += measure(wrap(heroLine, pw - 12)).h + 4;
-    const ok = 'ODD BUT OK: NO HAT, OLD BOOTS, FLIES, A STINGY MERCHANT IN PATCHES. MERCHANTS ALSO GO TO FORT + CASTLE';
-    txt(ok, px + 6, y, '#5a4a3a');
-    y += measure(wrap(ok, pw - 12)).h + 4;
     const cards = M.RULE_CARDS.map((rc) => (m >= rc.m ? `M${rc.m} ${rc.name}` : `M${rc.m} ???`)).join('  ');
-    txt(cards, px + 6, y, '#6a3a1a');
-    y += measure(wrap(cards, pw - 12)).h + 4;
+    y += txt(cards, px + 6, y, '#6a3a1a') + 3;
     txt('TAP TO CLOSE', px + pw - 54, y, '#8a6a4a');
     const ph = Math.min(c.y + c.h - 2, y + 10) - py;
     drawPanel(panel, px, py, pw, ph, 0xe8d8a8, 0x8a5a2a);
@@ -1384,9 +1576,12 @@ export class BridgeScene implements DeptScene {
       }
     } else if (this.exprT > 0) {
       this.exprT -= dt;
-      if (this.exprT <= 0) this.expr = this.dragging ? 'squint' : 'chew';
+      if (this.exprT <= 0) this.expr = 'chew';
     }
-    if (this.dragging && this.napT <= 0) this.expr = 'squint';
+    // Session upkeep: still here (the gap clock), and Glower trickles back.
+    const ses = this.sess();
+    ses.at = Date.now();
+    if (ses.glower < M.GLOWER_MAX) ses.glower = Math.min(M.GLOWER_MAX, ses.glower + dt / M.GLOWER_REGEN_S);
 
     // Arrivals: one every 7 s (fewer while word gets around); bench overflow goes to the goons.
     if (this.wordT > 0) this.wordT = Math.max(0, this.wordT - dt);
@@ -1489,6 +1684,13 @@ export class BridgeScene implements DeptScene {
       // arrow between who and where
       bg.rect(14, 7, 4, 1).fill(0x6a5a7a);
       bg.rect(17, 6, 1, 3).fill(0x6a5a7a);
+      // Patience pips (wave 1): red = left, dark = spent. Over-asks spend them.
+      const maxP = c.t.pips ?? 3;
+      const left = M.pipsLeft(c.t, c.h);
+      for (let i = 0; i < maxP; i++) {
+        bg.rect(w + 2 + i * 5, 4, 4, 6).fill(OUTLINE);
+        bg.rect(w + 3 + i * 5, 5, 2, 4).fill(i < left ? 0xe05050 : 0x3a2a3a);
+      }
       // A shifter's Claim flickers to the truth for a moment after a second look.
       const flick = c.shiftT > 0 && Math.floor(this.time * 8) % 2 === 0;
       this.claimIcons[0].context = icon(flick ? 'adventurer' : items[0][0]);
@@ -1656,11 +1858,13 @@ export class BridgeScene implements DeptScene {
       g.rect(px0 + i * 6 + 1, this.sceneBottom + 4, 2, 2).fill(i < r.whisper ? 0xe05050 : 0x3a2a3a);
     }
 
-    // Response bubble.
+    // Response bubble: the last reply's mood face, then the message.
     if (this.respT > 0) this.respT -= dt;
+    if (this.moodT > 0) this.moodT -= dt;
     let msg = '';
     let col = '#2a1a3a';
     const rit = this.ritual && !this.ritual.done ? this.ritual : null;
+    const fare = c ? c.t.claimFare * M.fareMult(r, this.skulls) : 0;
     if (this.respT > 0) {
       msg = this.respMsg;
       col = this.respColor;
@@ -1671,13 +1875,14 @@ export class BridgeScene implements DeptScene {
       msg = `GRUMM NAPS ${Math.ceil(this.napT)}S. TAP HIM TO WAKE`;
       col = '#6a4a1a';
     } else if (c?.phase === 'counter') {
-      msg = `OFFERS ${c.h.counter.toFixed(1)}X = ${fm(c.t.claimFare * c.h.counter * M.fareMult(r, this.skulls) * M.streakMult(r.streak + (c.h.counter >= M.STREAK_MIN ? 1 : 0)))}. TAP TO TAKE`;
+      msg = `GRUDGING: OFFERS ${c.h.counter.toFixed(1)}X = ${fm(fare * c.h.counter * M.streakMult(r.streak + (c.h.counter >= M.STREAK_MIN ? 1 : 0)))}. TAKE?`;
       col = '#6a3a00';
     } else if (c?.phase === 'wait' && this.bribeOpen()) {
-      msg = `PSST: BRIBE ${c.t.bribe.toFixed(1)}X = ${fm(c.t.claimFare * c.t.bribe * M.fareMult(r, this.skulls))}. TAP TO TAKE`;
+      msg = `PSST: BRIBE ${c.t.bribe.toFixed(1)}X = ${fm(fare * c.t.bribe)}. TAP TO TAKE`;
       col = '#6a3a00';
     } else if (c?.phase === 'wait') {
-      msg = r.stats.tolls < 3 ? `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}. DRAG COINS UP, LET GO` : `FARE ${fm(c.t.claimFare * M.fareMult(r, this.skulls))}{coin}`;
+      const best = r.ledger?.day === this.poster.decree.day ? r.ledger.best[c.t.who] : undefined;
+      msg = r.stats.tolls < 3 ? `FARE ${fm(fare)}{coin}. TAP A PRICE, READ THE FACE` : `FARE ${fm(fare)}{coin}${best ? `  LEDGER: PAID ${best}X` : ''}`;
       if (c.t.sniff) msg = 'WOOF! THE DOG SMELLS SOMETHING';
     } else if (c?.phase === 'search') msg = 'SEARCHING...';
     else if (!c) msg = 'WAITING FOR TRAVELERS...';
@@ -1686,44 +1891,38 @@ export class BridgeScene implements DeptScene {
     const hot = (c?.phase === 'counter' || this.bribeOpen()) && this.respT <= 0;
     bg.rect(0, 0, rw, 16).fill(OUTLINE);
     bg.rect(1, 1, rw - 2, 14).fill(hot ? (Math.floor(this.time * 3) % 2 ? 0xfff0a0 : 0xf4e8c1) : 0xe8dcc0);
-    this.respText.set(msg.slice(0, Math.floor((rw - 6) / 4)), col);
-    this.respText.position.set(4, 5);
+    const face = this.moodT > 0 && this.moodFace ? this.moodFace : c?.phase === 'counter' ? 'grudging' : null;
+    this.respFace.visible = !!face;
+    if (face) {
+      this.respFace.context = icon(MOOD_ICON[face]);
+      this.respFace.position.set(3, 3);
+    }
+    const tx = face ? 14 : 4;
+    this.respText.set(msg.slice(0, Math.floor((rw - tx - 2) / 4)), col);
+    this.respText.position.set(tx, 5);
 
-    // Readout + mood face + coin stack.
-    const mult = this.notch / 10;
-    const fare = c ? c.t.claimFare * M.fareMult(r, this.skulls) : 0;
-    this.readout.set(`${mult.toFixed(1)}X`, act ? '#f4e8c1' : '#7a6e80');
-    this.coinsText.set(c ? `= ${fm(fare * mult)}{coin}` : '');
+    // Price tiers: each shows the face its price would likely get (read from the Wallet Sense
+    // band, a hint, never the wallet). GOUGE and ROB need a Glower charge.
+    const ses = this.sess();
     const band = c ? M.band(c.t, r.lv.sense, c.h.offended) : ([1, 1.3] as [number, number]);
-    const moodName = !c ? 'moodHmm' : mult < band[0] ? 'moodHappy' : mult <= band[1] ? 'moodHmm' : mult <= band[1] * 1.25 ? 'moodAnnoyed' : 'moodFurious';
-    this.mood.context = icon(moodName);
-
-    const sg = this.stackG.clear();
-    const sw = 30;
-    sg.rect(0, 0, sw, this.stackH).fill(OUTLINE);
-    sg.rect(1, 1, sw - 2, this.stackH - 2).fill(0x24162f);
-    if (c) {
-      // Wallet Sense band (where their purse probably tops out).
-      const y0 = this.notchY(Math.min(M.NOTCH_MAX, Math.max(M.NOTCH_MIN, Math.round(band[1] * 10)))) - this.stackY;
-      const y1 = this.notchY(Math.min(M.NOTCH_MAX, Math.max(M.NOTCH_MIN, Math.round(band[0] * 10)))) - this.stackY;
-      if (y1 > y0) sg.rect(1, y0, sw - 2, y1 - y0 + 1).fill({ color: 0x8fd14f, alpha: 0.28 });
-      if (c.phase === 'counter') {
-        const cy = this.notchY(Math.round(c.h.counter * 10)) - this.stackY;
-        sg.rect(1, cy, sw - 2, 1).fill(0xe08a3a);
-      }
-    }
-    // coins up to the demand: one sliver per notch, a bigger coin every 0.5x
-    for (let n = M.NOTCH_MIN; n <= this.notch; n++) {
-      const y = this.notchY(n) - this.stackY;
-      const big = n % 5 === 0;
-      const w = big ? 18 : 14;
-      const x = Math.floor((sw - w) / 2);
-      sg.rect(x, y - 1, w, 2).fill(act ? (big ? 0xfff0a0 : GOLD) : 0x6a5a40);
-      sg.rect(x, y + 1, w, 1).fill(act ? 0xa07a20 : 0x4a3a2a);
-    }
-    for (let m = 1; m <= 4; m++) sg.rect(sw - 4, this.notchY(m * 10) - this.stackY, 3, 1).fill(0x9c8aa8);
-    const my = this.notchY(this.notch) - this.stackY;
-    sg.rect(0, my - 1, 3, 3).fill(0xffffff);
+    M.PRICE_TIERS.forEach((tier, i) => {
+      const b = this.priceBtns[i];
+      const ok = act && ses.glower + 1e-6 >= tier.glower;
+      b.setEnabled(ok);
+      const f = this.priceFaces[i];
+      f.visible = !!c && act;
+      if (f.visible) f.context = icon(MOOD_ICON[M.previewMood(band, tier.mult)]);
+      f.alpha = ok ? 1 : 0.4;
+    });
+    // Glower eyes (bright = charges left) and the free mistakes left.
+    const gl = Math.floor(ses.glower + 1e-6);
+    this.glowerText.set('GLOWER ' + '{eye}'.repeat(gl), '#e05050');
+    this.glowerDim.set(' '.repeat(7 + gl) + '{eye}'.repeat(Math.max(0, M.GLOWER_MAX - gl)), '#5a3a4a');
+    const free = Math.max(0, M.FREE_MISTAKES - ses.mistakes);
+    const nt = M.fineTolls(ses.mistakes + 1);
+    this.oopsText.set(free > 0 ? `FREE OOPS ${free}` : `FINE ${nt} TOLL${nt > 1 ? 'S' : ''}`, free > 0 ? C.inkDim : C.redText);
+    g.rect(this.panelX, this.panelY, this.gridX + this.gridW - this.panelX, 21).fill(OUTLINE);
+    g.rect(this.panelX + 1, this.panelY + 1, this.gridX + this.gridW - this.panelX - 2, 19).fill(0x24162f);
 
     // Buttons.
     const waiting = c?.phase === 'wait' && act;
@@ -1731,11 +1930,16 @@ export class BridgeScene implements DeptScene {
     this.searchBtn.setEnabled(!!rit || (!!waiting && !c?.searched));
     this.unmaskBtn.setSub('HOLD');
     this.searchBtn.setSub(rit ? 'CRATE' : c?.searched ? 'DONE' : 'HOLD');
-    if (c?.phase === 'counter') this.waveBtn.setLabel('TAKE', `${c.h.counter.toFixed(1)}X`).setColor(0x8fd14f, 0x4a7a22);
-    else if (this.bribeOpen()) this.waveBtn.setLabel('BRIBE', `${c!.t.bribe.toFixed(1)}X`).setColor(0x8fd14f, 0x4a7a22);
-    else this.waveBtn.setLabel('WAVE', 'FREE').setColor(C.edge, 0x3a2046);
+    const wave = c?.phase === 'counter' ? 'take' : this.bribeOpen() ? 'bribe' : 'wave';
+    if (wave !== this.waveMode) {
+      this.waveMode = wave;
+      if (wave === 'wave') this.waveBtn.setColor(C.edge, 0x3a2046);
+      else this.waveBtn.setColor(0x8fd14f, 0x4a7a22);
+    }
+    if (wave === 'take') this.waveBtn.setLabel('TAKE', `${c!.h.counter.toFixed(1)}X`);
+    else if (wave === 'bribe') this.waveBtn.setLabel('BRIBE', `${c!.t.bribe.toFixed(1)}X`);
+    else this.waveBtn.setLabel('WAVE', 'FREE');
     this.waveBtn.setEnabled(act);
-    this.askBtn.setLabel('ASK', `${mult.toFixed(1)}X`).setEnabled(act);
 
     // Menace dial.
     this.menaceText.set(`M${r.menace}`, r.menace > 0 ? '#ff6040' : C.ink);
@@ -1800,7 +2004,6 @@ export class BridgeScene implements DeptScene {
   isIntense(): boolean {
     const ph = this.cur?.phase;
     return (
-      this.dragging ||
       this.unmaskBtn.isHolding ||
       this.searchBtn.isHolding ||
       ph === 'counter' ||
@@ -1811,13 +2014,14 @@ export class BridgeScene implements DeptScene {
     );
   }
 
-  /** The Poster board and the wallet stack: toasts and the intro line keep off them. */
+  /** The Decree strip, the Wanted poster and the price grid: toasts and the intro line keep off. */
   avoidRects(): Rect[] {
     const out: Rect[] = [];
-    const poster = this.targetRect('poster');
+    const poster = this.targetRect('wanted');
     if (poster) out.push({ x: poster.x - 4, y: poster.y - 4, w: poster.w + 8, h: poster.h + 8 });
-    const stack = this.targetRect('stack');
-    if (stack) out.push(stack);
+    const dec = this.targetRect('decree');
+    if (dec) out.push(dec);
+    out.push({ x: this.gridX, y: this.gridY, w: this.gridW, h: 64 });
     return out;
   }
 
@@ -1828,18 +2032,20 @@ export class BridgeScene implements DeptScene {
       case 'traveler':
         if (!c || (c.phase !== 'wait' && c.phase !== 'counter')) return null;
         return { x: this.travX - 2, y: this.deckY - this.th - 2, w: this.tw + 4, h: this.th + 4 };
+      case 'prices':
       case 'stack':
-        return { x: this.stackX, y: this.stackY, w: 30, h: this.stackH };
-      case 'stackGrab': {
-        if (!c || c.phase !== 'wait') return null;
-        const y = this.notchY(10) - 3;
-        return { x: this.stackX, y, w: 30, h: this.stackY + this.stackH - y };
+        return { x: this.gridX, y: this.gridY, w: this.gridW, h: 42 };
+      case 'fair':
+      case 'stackGrab':
+      case 'ask': {
+        if (!c || (c.phase !== 'wait' && c.phase !== 'counter')) return null;
+        const b = this.priceBtns[0];
+        return btn(b, b.width, 20);
       }
+      case 'steep':
       case 'stackBand': {
-        if (!c) return null;
-        const b = M.band(c.t, this.run.lv.sense, c.h.offended);
-        const n = Math.max(M.NOTCH_MIN, Math.min(M.NOTCH_MAX, Math.round(b[0] * 10 + 1)));
-        return { x: this.stackX, y: this.notchY(n) - 3, w: 30, h: 6 };
+        const b = this.priceBtns[1];
+        return btn(b, b.width, 20);
       }
       case 'upgrades':
         return btn(this.upgBtn, this.upgBtn.width, 16);
@@ -1849,11 +2055,14 @@ export class BridgeScene implements DeptScene {
         return this.unmaskBtn.enabled ? btn(this.unmaskBtn, 56, 30) : null;
       case 'search':
         return this.searchBtn.enabled ? btn(this.searchBtn, 56, 30) : null;
-      case 'ask':
-        return btn(this.askBtn, this.askBtn.width, 29);
       case 'resp':
         return { x: this.resp.x, y: this.resp.y, w: this.cw - 6, h: 16 };
       case 'poster':
+      case 'decree':
+        if (this.modal.children.length) return null;
+        if (!this.decreeC.visible) return { x: this.cx + 2, y: this.deckY - 51, w: 26, h: 29 };
+        return { x: this.decreeX - 2, y: this.decreeY - 2, w: this.decreeW + 4, h: CELL_H + 17 };
+      case 'wanted':
         return this.modal.children.length ? null : { x: this.cx + 2, y: this.deckY - 51, w: 26, h: 29 };
       case 'grumm':
         return { x: this.grummX, y: this.deckY - 40 * this.S, w: 36 * this.S, h: 40 * this.S };
@@ -1940,7 +2149,6 @@ export class BridgeScene implements DeptScene {
 
   destroy(): void {
     this.endRitual();
-    this.stack.removeAllListeners();
     destroyTree(this.root);
   }
 }

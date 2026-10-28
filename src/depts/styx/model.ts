@@ -48,7 +48,8 @@ export interface Species {
 
 export const BAND_PX = 60;
 export const MAX_BANDS = 5; // 03 §5.1: Shallows, Murk, Drowned Halls, Abyssal Choir, Lethe Bottom
-export const SINK_PX_S = 40;
+/** SIM-TUNED (Wave 1, fishing research R1): 40 -> 90 px/s, a Shallows cast sinks in ~0.3-0.7 s. */
+export const SINK_PX_S = 90;
 
 export const BANDS = [
   { id: 'shallows', name: 'SHALLOWS', cost: 0, mult: 1 },
@@ -163,7 +164,30 @@ export const wrathActive = (w: number) => 1.12 ** w;
 export const wrathIdle = (w: number) => 1.1 ** w;
 export const wrathPull = (w: number) => 1.08 ** w;
 export const wrathThrashes = (w: number) => Math.floor(w / 3);
-export const fakeChance = (w: number) => Math.min(0.6, 0.3 + 0.05 * w);
+/**
+ * Fake-outs as a nibble COUNT, not a chance (Wave 1, research R1; Animal Crossing's guaranteed
+ * bite): a soul makes 0..fakeMax fake dips, then the next dip is the real plunge, and never later
+ * than the MAX_NIBBLES-th nibble (the Choirboy and the Siren add one lie, inside that cap).
+ * Wrath raises the count only a little (none at Wrath 0, up to 3 from Wrath 8); mostly it makes
+ * the fakes harder to tell from the plunge (fakeTell). SIM-TUNED (was 30% + 5%/Wrath, up to 60%,
+ * re-rolled after every dip: unbounded, the audit's 38 s cast).
+ */
+export const MAX_NIBBLES = 5;
+export const fakeMax = (w: number) => (w < 1 ? 1 : w < 8 ? 2 : 3);
+/** Fake dips before the plunge; `r` is a uniform draw in [0, 1). */
+export function fakeCount(w: number, liar: boolean, r: number): number {
+  const n = Math.min(fakeMax(w), Math.floor(Math.max(0, Math.min(0.999999, r)) * (fakeMax(w) + 1)));
+  return Math.min(MAX_NIBBLES - 1, n + (liar ? 1 : 0));
+}
+/** Expected fake dips per bite (the bot's estimate). */
+export const fakeMean = (w: number, liar = false) => fakeMax(w) / 2 + (liar ? 1 : 0);
+/** How much a fake dip mimics the plunge, 0..1: at Wrath 0 a 1 px bob with a grey ring, by Wrath
+ * 10 a 2 px plunge with a gold flicker (the real bite is still a 3 px plunge and a thunk). */
+export const fakeTell = (w: number) => Math.max(0, Math.min(1, w / 10));
+/** Nibble timings (s): the bob before each dip, and the pause after a fake dip. SIM-TUNED from
+ * 0.5-0.9 and 0.4-0.9 (anticipation stays, the dead air goes). */
+export const NIB_S = [0.35, 0.3] as const;
+export const NIB_AFTER_S = [0.3, 0.3] as const;
 /** Fog Surges from Wrath 5 (03 §7): 20 s of murk every 70-130 s. */
 export const FOG_WRATH = 5;
 export const FOG_S = 20;
@@ -196,8 +220,12 @@ export const lineCap = (lv: number) => 1 + 0.06 * lv;
 export const drainRate = (lv: number) => 2 * REEL_RISE * (1 + 0.05 * lv);
 export const hookWindowMs = (strike: number, w: number) => Math.max(250, (600 + 40 * strike) * 0.97 ** w);
 export const barbChance = (lv: number) => 0.015 * lv;
-/** Mean seconds from the hook settling to a soul starting to nibble. */
-export const biteWait = (lantern: number) => Math.max(1, 4.5 * 0.96 ** lantern);
+/** Mean seconds from the hook settling to a soul starting to nibble. SIM-TUNED (Wave 1, research
+ * R1): base 4.5 -> 2 s, floor 1 -> 0.6 s. */
+export const biteWait = (lantern: number) => Math.max(0.6, 2 * 0.96 ** lantern);
+/** One bite-wait draw (`r` uniform): bounded around the mean, 0.4x-1.6x (Webfishing's pity ramp:
+ * no long tail). Was exponential, up to ~3x the mean. */
+export const biteSample = (mean: number, r: number) => mean * (0.4 + 1.2 * Math.max(0, Math.min(1, r)));
 export const scentMult = (lv: number) => 1.04 ** lv;
 export const wispMult = (lv: number) => 1 + 0.2 * lv;
 export const wispEvery = (lv: number) => 10 / (1 + 0.05 * lv);
@@ -213,6 +241,168 @@ export function thrashS(sp: Species): number {
 }
 /** Seconds at 0% tension before the soul drifts loose (the Blank Wanderer slips sooner). */
 export const driftS = (sp: Species) => (sp.behavior === 'drifter' ? 1.2 : 2.5);
+
+// ---------- the gold band (Wave 1, research R2: a second, moving axis in every reel) ----------
+//
+// The Last Stand's gold band (laststand.ts) moved into the main reel, and it MOVES: the soul's
+// comfort zone drifts on the tension track by its behaviour (Stardew's archetypes). Holding with
+// the tension inside the band reels at ZONE_IN x speed, outside it at ZONE_OUT x, so the old
+// "hold to 65, let go" threshold bot still lands souls (casual play is never locked out) but a
+// thumb that tracks the band lands them much faster. Thrashes jerk the band low (let go!).
+export const ZONE_W = 24; // band width, tension %
+export const ZONE_IN = 1.3; // SIM-TUNED: reel speed x inside the band
+export const ZONE_OUT = 0.55; // SIM-TUNED: reel speed x outside it (still below the red)
+const ZONE_LO = 6 + ZONE_W / 2;
+const ZONE_HI = 80 - 2 - ZONE_W / 2; // under the red (RED = 80)
+/** Deterministic 0..1 hash (shared by the scene and the balance sim). */
+function hash01(n: number, seed: number): number {
+  const x = Math.sin(n * 12.9898 + seed * 78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
+/** Centre of the gold band (tension %) `t` seconds into a reel. `seed` in [0, 1) per reel. */
+export function zoneCenter(b: Behavior, t: number, seed: number, thrashing = false): number {
+  const ph = seed * 6.283;
+  let c: number;
+  switch (b) {
+    case 'zigzag':
+    case 'twin':
+      c = (Math.floor(t / 1.1 + seed) % 2 ? 34 : 60) + 4 * (hash01(Math.floor(t / 1.1 + seed), seed) - 0.5);
+      break;
+    case 'heavy':
+    case 'sinker':
+    case 'leviathan':
+    case 'king':
+      c = 34 + 8 * Math.sin(0.7 * t + ph);
+      break;
+    case 'circle':
+      c = 46 + 16 * Math.sin(1.6 * t + ph);
+      break;
+    case 'teleport':
+      c = 26 + 42 * hash01(Math.floor(t / 1.4 + seed), seed);
+      break;
+    case 'singer':
+    case 'canon':
+    case 'conductor':
+      c = 46 + 12 * Math.sin(1.2 * t + ph) + (hash01(Math.floor(t / 2), seed) > 0.6 ? 10 : 0);
+      break;
+    case 'echo':
+      c = 46 + 18 * Math.sin(1.8 * t + ph);
+      break;
+    default: // drift, drifter, fader
+      c = 46 + 14 * Math.sin(0.9 * t + ph);
+  }
+  if (thrashing) c -= 16;
+  return Math.max(ZONE_LO, Math.min(ZONE_HI, c));
+}
+export const inZone = (tension: number, center: number) => Math.abs(tension - center) <= ZONE_W / 2;
+
+// ---------- the catch roll (Wave 1, research R3: size, stars, records) ----------
+//
+// Every landed soul rolls a Heft (normal, ~+-20%, clamped) and 0-3 stars. A CLEAN reel adds a
+// star (Stardew's perfect catch), any paid bait leans the roll up. Both scale the Obols of that
+// one catch; the netters (idle) keep paying the plain EV, so idleRate is untouched.
+export const STAR_W = [52, 32, 13, 3];
+/** Star value factors. EV ~0.99 without a CLEAN reel, so stars move value around, not up. */
+export const STAR_MULT = [0.85, 1, 1.3, 1.8];
+export const STAR_NAMES = ['FAINT', 'BRIGHT', 'RADIANT', 'LUMINOUS'];
+export const HEFT_SD = 0.2;
+export const HEFT_MIN = 0.5;
+export const HEFT_MAX = 1.7;
+/**
+ * SIM-TUNED: Obols per hand catch x CATCH_K. Wave 1 cut a cast from ~10-25 s to ~6-9 s and added
+ * the gold band, so ~1.6x the catches per minute; CATCH_K holds active : on-screen idle in its
+ * 2.4-3.2x band (more catches and more reveals, not more money per minute).
+ */
+export const CATCH_K = 0.62;
+/** Stars for one catch: `r` uniform. Paid bait halves the 0-star weight; CLEAN adds one (max 3). */
+export function rollStars(r: number, clean: boolean, bait: BaitId = 'worm'): number {
+  const w = STAR_W.slice();
+  if (bait !== 'worm') w[0] *= 0.5;
+  const tot = w.reduce((a, b) => a + b, 0);
+  let x = Math.max(0, Math.min(0.999999, r)) * tot;
+  let s = 0;
+  for (; s < 3; s++) {
+    x -= w[s];
+    if (x < 0) break;
+  }
+  return Math.min(3, s + (clean ? 1 : 0));
+}
+/** Expected star factor (the bot's estimate). */
+export function starEV(clean: boolean, bait: BaitId = 'worm'): number {
+  const w = STAR_W.slice();
+  if (bait !== 'worm') w[0] *= 0.5;
+  const tot = w.reduce((a, b) => a + b, 0);
+  let ev = 0;
+  for (let s = 0; s < 4; s++) ev += (w[s] / tot) * STAR_MULT[Math.min(3, s + (clean ? 1 : 0))];
+  return ev;
+}
+/** Heft from a standard normal draw `g`. */
+export const rollHeft = (g: number) => Math.max(HEFT_MIN, Math.min(HEFT_MAX, 1 + HEFT_SD * g));
+/** Value factor of one catch (before CLEAN, combo and the rest). */
+export const catchMult = (heft: number, stars: number) => heft * STAR_MULT[Math.max(0, Math.min(3, stars))] * CATCH_K;
+/** A soul's weight in stone for the reveal card and the Codex (deeper and rarer = heavier). */
+export function heftSt(sp: Species, heft: number): number {
+  const rk = sp.rarity === 'legendary' ? 6 : sp.rarity === 'rare' ? 2.6 : sp.rarity === 'uncommon' ? 1.6 : 1;
+  const bk = 1 + 0.7 * Math.max(0, sp.band);
+  return Math.round(heft * rk * bk * 10) / 10;
+}
+
+export interface CodexBest {
+  h: number; // best heft
+  s: number; // best stars
+}
+/** Records a catch in the per-species bests. Returns which records it broke (none on a first). */
+export function recordCatch(p: StyxPersistent, id: string, heft: number, stars: number): { heft: boolean; stars: boolean; first: boolean } {
+  p.best = p.best ?? {};
+  const b = p.best[id];
+  if (!b) {
+    p.best[id] = { h: heft, s: stars };
+    return { heft: false, stars: false, first: true };
+  }
+  const out = { heft: heft > b.h + 1e-9, stars: stars > b.s, first: false };
+  if (out.heft) b.h = heft;
+  if (out.stars) b.s = stars;
+  return out;
+}
+
+// ---------- the Codex as a map (Wave 1, research R4) ----------
+
+/** Frame tier per species: 1 / 10 / 50 catches = bronze / silver / gold. */
+export const codexTier = (n: number) => (n >= 50 ? 3 : n >= 10 ? 2 : n >= 1 ? 1 : 0);
+export const TIER_AT = [1, 10, 50];
+/** Rumoured hints for unseen souls (Moonglow Bay's rumoured fish), <= 34 characters. */
+export const HINTS: Record<string, string> = {
+  clerk: 'SOMETHING WEEPS OVER PAPERWORK',
+  tourist: 'A VOICE ASKS THE WAY. IN SHALLOWS',
+  knight: 'ARMOUR CLANKS ON THE SHALLOW BED',
+  poet: 'SOMEONE RHYMES IN THE MURK',
+  wraiths: 'TWO SHADOWS SWIM AS ONE. MURK',
+  witch: 'MOONLIGHT BLINKS DEEP IN THE MURK',
+  bishop: 'A MITRE SINKS THROUGH THE HALLS',
+  choir: 'A CHILD SINGS IN THE DROWNED HALLS',
+  king: 'A CROWN GLINTS AT THE HALLS FLOOR',
+  chorister: 'AMENS ECHO IN THE ABYSSAL CHOIR',
+  siren: 'A RED SONG LIES IN THE CHOIR',
+  conductor: 'SOMETHING KEEPS TIME. THE CHOIR',
+  forgotten: 'NOBODY REMEMBERS. LETHE BOTTOM',
+  wanderer: 'A BLANK FACE DRIFTS IN THE LETHE',
+  leviathan: 'THE LETHE BOTTOM BREATHES',
+  echo: "A HERO'S GOLD. ANY DEPTH. RARE.",
+};
+
+// ---------- netters fish what you know (Wave 1, research R9) ----------
+
+/** The netters only know a species once you landed one by hand (the Codex); Pilk's lads always
+ * know the band's common soul. A soul they don't know mostly slips the net: it fetches
+ * NET_UNKNOWN of its value. No persistent data = every species (headless callers). */
+export function netKnows(p: StyxPersistent | undefined, sp: Species): boolean {
+  return !p || sp.rarity === 'common' || (p.codex?.[sp.id] ?? 0) > 0;
+}
+/** SIM-TUNED: share of an unknown soul's value the netters still fetch. 0 (a hard gate) cut early
+ * idle ~half (day-1 active : idle ~6x, the first Fall a day late); 0.4 keeps the gate felt. */
+export const NET_UNKNOWN = 0.4;
+/** Species the netters know (for the Codex header). */
+export const netKnownCount = (p: StyxPersistent) => SPECIES.filter((s) => netKnows(p, s)).length;
 
 /** CLEAN reel bonus (the line never touched the red): rarity-scaled, so the rare fights pay most. */
 export const CLEAN_MULT: Record<Rarity, number> = { common: 1.1, uncommon: 1.15, rare: 1.35, legendary: 1.5 };
@@ -354,6 +544,14 @@ export function netWindow(bands: number, poles: number): { top: number; depth: n
   return { top, depth: poleFrac(poles) * Math.min(bands, NET_SPAN_BANDS) * BAND_PX };
 }
 
+/** bandEV with the souls the netters don't know yet mostly let go (Wave 1, R9). */
+function knownEV(band: number, wt: Weights, p: StyxPersistent): number {
+  const total = wt.common + wt.uncommon + wt.rare + wt.legendary;
+  let ev = 0;
+  for (const k of ['common', 'uncommon', 'rare', 'legendary'] as Rarity[]) ev += (wt[k] / total) * RARITY_MULT[k] * (netKnows(p, speciesFor(band, k)) ? 1 : NET_UNKNOWN);
+  return ev * COMMON_BASE[band];
+}
+
 /** Expected ledger value of a netted soul: the depth-weighted average over the netters' window.
  * With a worm and no Wall this is the plain base-table EV per band. */
 export function netEV(bands: number, poles: number, bait: BaitId = 'worm', chum = 0, p?: StyxPersistent, fill = 1): number {
@@ -366,7 +564,7 @@ export function netEV(bands: number, poles: number, bait: BaitId = 'worm', chum 
     const top = b * BAND_PX;
     const span = Math.max(0, Math.min(w1, top + BAND_PX) - Math.max(w0, top));
     if (span <= 0) continue;
-    const ev = eff > 0 ? bandEV(b, netWeights(bait, b, eff)) : BAND_EV0[b];
+    const ev = !p ? (eff > 0 ? bandEV(b, netWeights(bait, b, eff)) : BAND_EV0[b]) : knownEV(b, eff > 0 ? netWeights(bait, b, eff) : RARITY_W, p);
     sum += span * ev * wallMult(p, b);
   }
   return depth > 0 ? (sum / depth) * gild : BAND_EV0[0];
@@ -484,6 +682,11 @@ export interface StyxPersistent {
   baits: Record<BaitId, number>; // stock (worm is infinite)
   wall: Trophy[]; // the Trophy Wall (03 §6.4)
   maxBand: number; // deepest band ever opened (tier_reached lines)
+  /** Per-species personal bests (Wave 1 records): heft and stars. Persists through Falls. */
+  best?: Record<string, CodexBest>;
+  /** Night Order "SCOUT A RARE": a rare Pilk spotted while you were away; the scene turns it
+   * into a glowing trail on the next visit (then clears it). */
+  scout?: { id: string; band: number };
 }
 
 export function defaultStats(): StyxStats {
@@ -506,7 +709,7 @@ export function defaultRun(): StyxRun {
 }
 
 export function defaultPersistent(): StyxPersistent {
-  return { codex: {}, baits: { worm: 0, promise: 0, debt: 0, gilded: 0, lock: 0 }, wall: [], maxBand: 1 };
+  return { codex: {}, baits: { worm: 0, promise: 0, debt: 0, gilded: 0, lock: 0 }, wall: [], maxBand: 1, best: {} };
 }
 
 /** Fills in fields missing from older or partial saves. */
@@ -529,6 +732,13 @@ export function normalize(r: StyxRun, p: StyxPersistent): void {
   r.chumUsed = Math.max(0, Math.min(1, Number(r.chumUsed) || 0));
   p.wall = Array.isArray(p.wall) ? p.wall.filter((t) => t && SPECIES_BY_ID[t.id] && t.band >= 0 && t.band < MAX_BANDS).slice(0, WALL_MAX) : [];
   p.maxBand = Math.max(p.maxBand ?? 1, r.bands);
+  const best: Record<string, CodexBest> = {};
+  for (const [id, b] of Object.entries(p.best ?? {})) {
+    if (SPECIES_BY_ID[id] && b && Number.isFinite(b.h)) best[id] = { h: Math.max(HEFT_MIN, Math.min(HEFT_MAX, b.h)), s: Math.max(0, Math.min(3, Math.floor(b.s) || 0)) };
+  }
+  p.best = best;
+  const sc = p.scout;
+  if (sc && !(SPECIES_BY_ID[sc.id] && sc.band >= 0 && sc.band < MAX_BANDS)) delete p.scout;
 }
 
 export const codexCount = (p: StyxPersistent) => SPECIES.filter((s) => (p.codex?.[s.id] ?? 0) > 0).length;

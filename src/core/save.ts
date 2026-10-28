@@ -36,6 +36,9 @@ export function migrate(raw: any): SaveRoot | null {
   }
   if (typeof s.meta.steward !== 'object' || !s.meta.steward) s.meta.steward = {};
   s.meta.managerClock = { ...base.meta.managerClock, ...(s.meta.managerClock ?? {}) };
+  if (typeof s.meta.orders !== 'object' || !s.meta.orders || Array.isArray(s.meta.orders)) s.meta.orders = {};
+  for (const k of Object.keys(s.meta.orders)) if (typeof s.meta.orders[k] !== 'string') delete s.meta.orders[k];
+  if (s.meta.lastAway && !(Number.isFinite(s.meta.lastAway.seconds) && Number.isFinite(s.meta.lastAway.cap) && s.meta.lastAway.cap > 0)) delete s.meta.lastAway;
   if (s.meta.edict && (typeof s.meta.edict.id !== 'string' || typeof s.meta.edict.since !== 'number')) delete s.meta.edict;
   return s as SaveRoot;
 }

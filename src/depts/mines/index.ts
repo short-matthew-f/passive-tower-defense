@@ -18,7 +18,7 @@ const lessons: Record<string, OnboardingStep[]> = {
   drum: [
     { id: 'ring', line: 'BOOM! Hit when it CLOSES!', target: 'rock.any', gesture: 'tap', done: (s) => st(s).beatHits >= 1 },
     { id: 'four', line: 'Four on the BOOM!', target: 'rock.any', gesture: 'tap', done: (s) => st(s).beatHits >= 4 },
-    { id: 'free', line: 'Miss? Still a hit! BOOM-ta-ta!', target: 'rock.any', gesture: 'tap', done: (s) => !!s.seen['m.followup'] },
+    { id: 'free', line: 'Off beat? Still hits! BOOM!', target: 'rock.any', gesture: 'tap', done: (s) => !!s.seen['m.followup'] },
     { id: 'more', line: 'More drum = more BOOM. Shop!', target: 'btn.upgrades', gesture: 'tap', done: (s) => run(s).frenzy + run(s).drummers + run(s).drumhead > 0 || !!s.seen['m.sheet'] },
   ],
   // Keg micro-lesson (02 §18): the first natural Powder Keg.
@@ -68,6 +68,10 @@ export const mines: DeptDef = {
       // mechanic_unlocked
       drumReady: ['BOSS. The DRUM. Buy drum. {gem}', 'Gems for the DOOM DRUM! {gem}'],
       firstFrenzy: ['That FRENZY! Do again, BOSS!', 'FRENZY! My ears! MORE!'],
+      // Wave 1: Fury (fast taps), the Gold Goblin.
+      fury: ['FURY! Smash smash SMASH!', 'Tap FAST = FURY, BOSS!'],
+      gold: ['GOLD GOBLIN! TAP HIM!', 'Thief! Shiny thief! TAP!'],
+      goldCaught: ['Got him! Sack is OURS!', 'Gold thief! Now OUR gold!', 'He squeaked! I love it!'],
       mother: ['MOTHERLODE! Ingots! {ingot}', 'THE BIG ONE! Mine! I mean yours'],
       vein: ['SHINY!', 'Gold! Mine! I mean YOURS!', 'VEIN! VEIN!'],
       gem: ['GEM! GEM! {gem}', 'Pretty rock! {gem}'],
@@ -81,7 +85,7 @@ export const mines: DeptDef = {
       returnLong: ['Crew dug all night, BOSS! {coin}', 'We dug while you slept!'],
       returnLong3d: ['BOSS! Days! Crew is rich!', 'You came back! We dug MILES!'],
       report: ['Rocks smashed. Crew happy.', 'Snik found a gem. Ate it.', 'More shinies, BOSS! {coin}', 'Picks sharp. Crew sharper.', 'Dug deep. Want deeper.', 'No cave-ins! ...today.'],
-      ambient: ['Snik found a rock. A ROCK.', 'No breaks! Breaks are rocks!', 'Glinty ones first, BOSS.', 'Deeper pays more. Just saying', 'Kegs by big rocks = FUN.', 'I taught them picks. Mostly.'],
+      ambient: ['Pale rocks crumble. CHAIN em!', 'Snik found a rock. A ROCK.', 'No breaks! Breaks are rocks!', 'Glinty ones first, BOSS.', 'Deeper pays more. Just saying', 'Kegs by big rocks = FUN.', 'I taught them picks. Mostly.'],
       flavor: ['Snik found a rock. A ROCK.', 'No breaks! Breaks are rocks!', 'Glinty ones first, BOSS.', 'Kegs by big rocks = FUN.'],
       flavorDrum: ['BOOM-ta-ta! BOOM-ta-ta!', 'Hit the boom, then tap away!', 'Taps late? CALIBRATE, BOSS!'],
     },

@@ -15,6 +15,22 @@
 //  - Hire Goon caps at 3: goon_efficiency is already 1 at 3 goons (06 §3), so levels 4-6 would buy
 //    nothing.
 //  - Rule cards 3/6/9/15/18 are in; 12 (Travelling Pairs) needs a two-traveler gate and is not.
+//
+// Wave 1 (genre-research README "Troll Bridge" #1-#5, deduction.md R1-R4, R9):
+//  - The Daily Decree replaces the printed answer key. Each day shows 2 hero tells and 2 smuggler
+//    tells (pictures, no labels) out of a 7 + 5 part pool; every day exactly one tell expires and
+//    one is added. Off-Decree pool parts turn up on ~30% of travelers as harmless fashion (red
+//    herrings), yesterday's expired tell most often, so memorising never works. Smugglers can hide
+//    their first tell too (no more "always shows").
+//  - The Codex (persistent) records which parts you have caught liars wearing: the breadcrumbs
+//    that make an unlabeled Decree learnable.
+//  - Haggle by mood: 4 price tiers (FAIR, STEEP, GOUGE, ROB), Moonlighter's 4 faces, 3 Patience
+//    pips that over-asks spend, counters at wallet x U(0.8, 1.0) (never the wallet itself),
+//    wallets that drift per Claim each day, and a per-day ledger of the best price per Claim.
+//  - Glower (Shop Titans energy): GOUGE and ROB spend a charge from a per-session budget.
+//  - Both mistakes cost: a false accusation, or letting a liar through when a tell was showing.
+//    Two are free per session, then each takes an escalating fine from this session's takings
+//    (never from what was banked before you arrived).
 
 import { LONG_GROWTH, LONG_MAX, longMult } from '../../core/longnode';
 
@@ -66,6 +82,8 @@ export interface Traveler {
   bribe: number;
   /** Shapeshifters rule card (Menace 18): the Claim flickers to the true one on a second look. */
   shift: boolean;
+  /** Wave 1: Patience pips at the start of the haggle. */
+  pips: number;
 }
 
 // ---------- palettes (shared with art.ts) ----------
@@ -87,18 +105,20 @@ interface KindStats {
   wallet: [number, number];
   patience: number;
   brawn: number;
+  /** Patience pips (wave 1 mood haggle): over-asks spend them; at 0 the traveler walks. */
+  pips: number;
 }
 
 export const KINDS: Record<Kind, KindStats> = {
-  peasant: { weight: 30, fare: 4, wallet: [1.0, 1.3], patience: 0.3, brawn: 0.05 },
-  pilgrim: { weight: 15, fare: 6, wallet: [1.1, 1.5], patience: 0.5, brawn: 0 },
-  merchant: { weight: 20, fare: 12, wallet: [1.5, 2.5], patience: 0.4, brawn: 0.1 },
-  adventurer: { weight: 10, fare: 10, wallet: [1.2, 1.8], patience: 0.3, brawn: 0.6 },
-  smuggler: { weight: 12, fare: 8, wallet: [1.0, 1.6], patience: 0.6, brawn: 0.2 },
-  hero: { weight: 7, fare: 10, wallet: [1.0, 1.0], patience: 0.1, brawn: 0.8 },
-  noble: { weight: 5, fare: 30, wallet: [2.0, 3.5], patience: 0.2, brawn: 0 },
+  peasant: { weight: 30, fare: 4, wallet: [1.0, 1.3], patience: 0.3, brawn: 0.05, pips: 3 },
+  pilgrim: { weight: 15, fare: 6, wallet: [1.1, 1.5], patience: 0.5, brawn: 0, pips: 3 },
+  merchant: { weight: 20, fare: 12, wallet: [1.5, 2.5], patience: 0.4, brawn: 0.1, pips: 3 },
+  adventurer: { weight: 10, fare: 10, wallet: [1.2, 1.8], patience: 0.3, brawn: 0.6, pips: 2 },
+  smuggler: { weight: 12, fare: 8, wallet: [1.0, 1.6], patience: 0.6, brawn: 0.2, pips: 4 },
+  hero: { weight: 7, fare: 10, wallet: [1.0, 1.0], patience: 0.1, brawn: 0.8, pips: 2 },
+  noble: { weight: 5, fare: 30, wallet: [2.0, 3.5], patience: 0.2, brawn: 0, pips: 2 },
   // Toll Booth 2 (06 §5 "later"): a cheap purse but endless patience; pays in song too.
-  bard: { weight: 4, fare: 5, wallet: [0.7, 0.9], patience: 1.0, brawn: 0 },
+  bard: { weight: 4, fare: 5, wallet: [0.7, 0.9], patience: 1.0, brawn: 0, pips: 5 },
 };
 
 export const WHO_LIST: Who[] = ['peasant', 'pilgrim', 'merchant', 'adventurer', 'noble', 'bard'];
@@ -114,25 +134,59 @@ export const NORMAL: Record<Who, Record<Slot, string[]> & { where: Where[] }> = 
   bard: { hat: ['cap', 'none'], body: ['coat', 'patched'], feet: ['worn', 'fancy'], hand: ['lute'], belt: ['rope', 'purse'], pack: ['none', 'satchel'], aura: ['notes', 'none'], where: ['castle', 'market'] },
 };
 
-/** Liar tells: slot -> part. Smugglers carry goods; heroes carry steel and holiness. */
-export const SMUGGLE_TELLS: [Slot, string][] = [
-  ['pack', 'bulge'],
-  ['pack', 'barrel'],
-  ['feet', 'newboots'],
-];
-export const HAT_SMUGGLE: [Slot, string] = ['hat', 'tall'];
-export const HERO_TELLS: [Slot, string][] = [
+/** Liar tell pools (slot -> part), in Decree rotation order. Heroes carry steel and holiness;
+ * smugglers carry goods. Neighbours never share a slot, so a Decree window never asks one liar to
+ * wear two parts in the same slot. Only today's Decree window marks a liar; the rest of the pool
+ * is harmless fashion today. */
+export const HERO_POOL: [Slot, string][] = [
   ['feet', 'steel'],
   ['aura', 'glow'],
   ['belt', 'hilt'],
   ['pack', 'shield'],
+  ['hat', 'helm'],
+  ['hand', 'sword'],
+  ['body', 'armor'],
 ];
-export const HERO_TELL_NAMES: Record<string, string> = { steel: 'STEEL BOOTS', glow: 'HOLY GLOW', hilt: 'HIDDEN HILT', shield: 'SHIELD PACK' };
+export const SMUG_POOL: [Slot, string][] = [
+  ['pack', 'barrel'],
+  ['feet', 'newboots'],
+  ['pack', 'bulge'],
+  ['hand', 'scales'],
+  ['hat', 'feather'],
+];
+/** Rule card 6 (Hat Smuggling): a standing smuggler tell on top of the Decree. */
+export const HAT_SMUGGLE: [Slot, string] = ['hat', 'tall'];
+/** Back-compat names (the sim and older code read these): the full pools. */
+export const HERO_TELLS = HERO_POOL;
+export const SMUGGLE_TELLS = SMUG_POOL;
+export const PART_NAMES: Record<string, string> = {
+  steel: 'STEEL BOOTS',
+  glow: 'HOLY GLOW',
+  hilt: 'HIDDEN HILT',
+  shield: 'SHIELD',
+  helm: 'HELM',
+  sword: 'SWORD',
+  armor: 'ARMOR',
+  barrel: 'BARREL',
+  newboots: 'NEW BOOTS',
+  bulge: 'BIG SACK',
+  scales: 'SCALES',
+  feather: 'PLUMED HAT',
+  tall: 'TALL HAT',
+};
+export const HERO_TELL_NAMES = PART_NAMES;
+/** Tells per day on the Decree (deduction.md R1: 3-4 of ~12 parts). */
+export const DECREE_HERO = 2;
+export const DECREE_SMUG = 2;
+/** Share of travelers wearing one off-Decree pool part (P11: ~30% red herrings), and how often
+ * that part is yesterday's expired tell. */
+export const HERRING_P = 0.3;
+export const HERRING_EXPIRED = 0.4;
 
 export const RULE_CARDS: { m: number; id: string; name: string; desc: string }[] = [
   { m: 3, id: 'writ', name: 'WRITS', desc: 'SOME CARRY A WRIT. ITS SEAL MUST MATCH THE POSTER. HEROES FORGE THEM.' },
   { m: 6, id: 'hats', name: 'HAT SMUGGLING', desc: 'A TALL LUMPY HAT HIDES GOODS. SEARCH IT.' },
-  { m: 9, id: 'kits', name: 'DISGUISE KITS', desc: "TODAY'S FAKE TELL (ON THE POSTER) IS WORN BY ANYONE. IGNORE IT." },
+  { m: 9, id: 'kits', name: 'DISGUISE KITS', desc: "ONE DECREE TELL IS A FAKE TODAY (SEE THE BOARD): ANYONE WEARS IT. IGNORE IT." },
   { m: 15, id: 'bribe', name: 'BRIBES', desc: 'SMUGGLERS MAY OFFER A BRIBE. TAKE IT AND THEY PASS, OR SEARCH FOR THE GOODS.' },
   { m: 18, id: 'shift', name: 'SHAPESHIFTERS', desc: "TAP A TRAVELER TWICE: A SHIFTER'S CLAIM FLICKERS TO THE TRUTH." },
 ];
@@ -166,6 +220,65 @@ export interface Poster {
   shows: ('cloak' | 'hair' | 'mark')[];
   seal: number;
   fake: string; // hero tell that is "fake" today (Menace 9 rule card)
+  /** Today's Decree (wave 1): the tells that mark a liar today. */
+  decree: Decree;
+}
+
+export interface Decree {
+  /** Day number (days since 1970 for a calendar day). */
+  day: number;
+  hero: [Slot, string][];
+  smug: [Slot, string][];
+  /** The part added today and the one that expired (yesterday's, harmless today). */
+  added: string;
+  expired: string;
+  /** Wallet drift per Claim today (Moonlighter demand): x0.85-1.15. */
+  drift: Record<Who, number>;
+}
+
+/** Day number of a day key: 'Y-M-D' -> days since 1970 (local calendar date); otherwise the key's
+ * trailing number (the sim's 'sim-N'), else a hash. */
+export function dayIndex(day: string): number {
+  const m = /^(\d+)-(\d+)-(\d+)$/.exec(day);
+  if (m) return Math.floor(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000);
+  const n = /(\d+)$/.exec(day);
+  if (n) return Number(n[1]);
+  let h = 7;
+  for (let i = 0; i < day.length; i++) h = Math.imul(h ^ day.charCodeAt(i), 16777619) >>> 0;
+  return h % 100000;
+}
+
+const windowOf = <T>(pool: T[], k: number, n: number): T[] => Array.from({ length: n }, (_, i) => pool[(((k + i) % pool.length) + pool.length) % pool.length]);
+
+/** The Decree for day d. Hero and smuggler windows take turns to slide one step, so each day
+ * exactly one tell expires and one is added (Papers, Please rules come and go). */
+export function decreeFor(d: number): Decree {
+  const kh = Math.floor((d + 1) / 2);
+  const ks = Math.floor(d / 2);
+  const hero = windowOf(HERO_POOL, kh, DECREE_HERO);
+  const smug = windowOf(SMUG_POOL, ks, DECREE_SMUG);
+  const heroMoved = kh !== Math.floor(d / 2);
+  const added = heroMoved ? hero[DECREE_HERO - 1][1] : smug[DECREE_SMUG - 1][1];
+  const expired = heroMoved ? windowOf(HERO_POOL, kh - 1, 1)[0][1] : windowOf(SMUG_POOL, ks - 1, 1)[0][1];
+  const r = rng((d * 2654435761) >>> 0);
+  const drift = {} as Record<Who, number>;
+  for (const w of WHO_LIST) drift[w] = Math.round((0.85 + 0.3 * r()) * 100) / 100;
+  return { day: d, hero, smug, added, expired, drift };
+}
+
+/** Whether a part marks a liar today (Decree, plus the Hat Smuggling card). */
+export function decreeKind(dec: Decree, part: string, menace: number): 'hero' | 'smug' | null {
+  if (dec.hero.some(([, p]) => p === part)) return 'hero';
+  if (dec.smug.some(([, p]) => p === part)) return 'smug';
+  if (menace >= 6 && part === HAT_SMUGGLE[1]) return 'smug';
+  return null;
+}
+
+/** Which pool a part belongs to (what kind of liar wears it on a day it is on the Decree). */
+export function poolKind(part: string): 'hero' | 'smug' | null {
+  if (HERO_POOL.some(([, p]) => p === part)) return 'hero';
+  if (SMUG_POOL.some(([, p]) => p === part) || part === HAT_SMUGGLE[1]) return 'smug';
+  return null;
 }
 
 const NAMES = ['SIR PELLAM', 'DAME OSRIC', 'SIR BEDWIN', 'LADY MAEVE', 'SIR TOMAS', 'DAME HILDE', 'SIR GAWEN', 'LADY ISOLT', 'SIR ROLF', 'DAME BRYN'];
@@ -179,6 +292,7 @@ export function posterFor(day: string): Poster {
   let h = 7;
   for (let i = 0; i < day.length; i++) h = Math.imul(h ^ day.charCodeAt(i), 16777619) >>> 0;
   const r = rng(h);
+  const decree = decreeFor(dayIndex(day));
   const all: ('cloak' | 'hair' | 'mark')[] = ['cloak', 'hair', 'mark'];
   const n = r() < 0.5 ? 2 : 3;
   const shows = n === 3 ? all : all.filter((x) => x !== pick(r, all));
@@ -190,7 +304,8 @@ export function posterFor(day: string): Poster {
     mark: 1 + Math.floor(r() * 3),
     shows,
     seal: Math.floor(r() * SEALS.length),
-    fake: pick(r, HERO_TELLS)[1],
+    fake: pick(r, decree.hero)[1],
+    decree,
   };
 }
 
@@ -219,6 +334,11 @@ export interface BridgeStats {
   /** Looks at a traveler (taps on the sprite; the onboarding's first beat). */
   looks: number;
   bribes: number;
+  /** Wave 1: mistakes (false accusations + liars let through while a tell showed) and fines. */
+  mistakes: number;
+  fines: number;
+  /** Liars that passed with a tell showing (the second kind of mistake). */
+  missed: number;
 }
 
 export interface Levels {
@@ -257,14 +377,45 @@ export interface BridgeRun {
   /** D-bridge-02: the travelers on the bench, and the one at the gate with its haggle so far. */
   bench?: Traveler[];
   gate?: { t: Traveler; h: Haggle; searched: boolean; looks: number } | null;
+  /** Wave 1: this session's Glower budget, mistakes and takings (the fine base). */
+  sess?: Session;
+  /** Wave 1: today's haggle ledger per Claim (best price paid, lowest over-ask). */
+  ledger?: Ledger;
+}
+
+export interface Session {
+  /** Glower charges left (GOUGE / ROB spend one). */
+  glower: number;
+  /** Mistakes so far this session (the first FREE_MISTAKES are free). */
+  mistakes: number;
+  /** Tollpence earned by hand this session: fines come out of this, never the older bank. */
+  purse: number;
+  /** Hand earnings this session (tolls, bounties, seizures): the purse / paid = an average toll. */
+  paid: number;
+  /** Last activity (ms epoch): a gap over SESSION_GAP_S starts a new session. */
+  at: number;
+}
+
+export interface Ledger {
+  day: number;
+  best: Partial<Record<Who, number>>;
+  over: Partial<Record<Who, number>>;
+}
+
+export interface CodexEntry {
+  /** Times seen on a caught hero / smuggler. */
+  h: number;
+  s: number;
 }
 
 export interface BridgePersistent {
   bountiesLife: number;
+  /** Wave 1 Codex breadcrumbs: part (or 'where' / 'writ') -> catches. Survives Falls. */
+  codex?: Record<string, CodexEntry>;
 }
 
 export function defaultStats(): BridgeStats {
-  return { travelers: 0, tolls: 0, unmasks: 0, evUnmasks: 0, bounty10: 0, falseAcc: 0, confisc: 0, bonks: 0, bestStreak: 0, posterOpens: 0, slipped: 0, looks: 0, bribes: 0 };
+  return { travelers: 0, tolls: 0, unmasks: 0, evUnmasks: 0, bounty10: 0, falseAcc: 0, confisc: 0, bonks: 0, bestStreak: 0, posterOpens: 0, slipped: 0, looks: 0, bribes: 0, mistakes: 0, fines: 0, missed: 0 };
 }
 
 export function defaultLevels(): Levels {
@@ -293,7 +444,7 @@ export function defaultRun(): BridgeRun {
 }
 
 export function defaultPersistent(): BridgePersistent {
-  return { bountiesLife: 0 };
+  return { bountiesLife: 0, codex: {} };
 }
 
 /** Fills fields missing from older saves (cheap; safe to call often). */
@@ -304,6 +455,71 @@ export function normalize(run: any, per: any): void {
     run.stats = { ...defaultStats(), ...run.stats };
   }
   if (per && per.bountiesLife === undefined) per.bountiesLife = 0;
+  if (per && !per.codex) per.codex = {};
+}
+
+// ---------- wave 1: sessions, Glower, mistakes, ledger, Codex ----------
+
+/** A gap this long (s) since the last activity starts a new session (Glower refills, the free
+ * mistakes come back, the purse empties). */
+export const SESSION_GAP_S = 600;
+/** Glower budget per session (Shop Titans energy). SIM-TUNED 6 (deduction.md R4's "say, 6"). */
+export const GLOWER_MAX = 6;
+/** One Glower charge comes back every this many seconds, and half a charge per FAIR toll. */
+export const GLOWER_REGEN_S = 60;
+export const GLOWER_FAIR_REFUND = 0.5;
+/** Papers, Please citations: 2 free mistakes per session, then each costs 1, 2, 3, then 4 average
+ * tolls of this session (purse / paid), and never more than the session purse. SIM-TUNED: a share
+ * of the whole session purse (5-25%) read as ruinous on long sessions (an hour's reference play
+ * lost ~80% of its takings); counted in tolls it costs the reference bot ~5-10%. */
+export const FREE_MISTAKES = 2;
+export const FINE_MAX_TOLLS = 4;
+export const fineTolls = (n: number) => (n <= FREE_MISTAKES ? 0 : Math.min(FINE_MAX_TOLLS, n - FREE_MISTAKES));
+
+export function newSession(now: number): Session {
+  return { glower: GLOWER_MAX, mistakes: 0, purse: 0, paid: 0, at: now };
+}
+
+/** The run's session, renewed after a long gap (pure apart from writing r.sess). */
+export function session(r: BridgeRun, now: number): Session {
+  if (!r.sess || !(now - r.sess.at <= SESSION_GAP_S * 1000) || now < r.sess.at - 60000) r.sess = newSession(now);
+  r.sess.paid ??= 0;
+  return r.sess;
+}
+
+/** Records a mistake; returns the fine (Tollpence, <= the session purse and the bank). */
+export function mistakeFine(s: Session, bank: number): number {
+  s.mistakes++;
+  const fine = Math.max(0, Math.min(bank, s.purse, (s.purse / Math.max(1, s.paid)) * fineTolls(s.mistakes)));
+  s.purse = Math.max(0, s.purse - fine);
+  return fine;
+}
+
+export function ledgerFor(r: BridgeRun, day: number): Ledger {
+  if (!r.ledger || r.ledger.day !== day) r.ledger = { day, best: {}, over: {} };
+  return r.ledger;
+}
+
+/** Codex breadcrumb: a caught liar's visible tells are written down. */
+export function codexNote(per: BridgePersistent, t: Traveler): string[] {
+  const book = (per.codex ??= {});
+  const fresh: string[] = [];
+  for (const tag of t.tells) {
+    const key = tag === 'where' || tag === 'writ' || tag === 'shift' ? tag : t.look[tag as Slot];
+    if (!key) continue;
+    const e = (book[key] ??= { h: 0, s: 0 });
+    if (e.h + e.s === 0) fresh.push(key);
+    if (t.hero) e.h++;
+    else e.s++;
+  }
+  return fresh;
+}
+
+/** What the Codex says a part means: 'hero', 'smug' or null (never caught). */
+export function codexKind(per: BridgePersistent, key: string): 'hero' | 'smug' | null {
+  const e = per.codex?.[key];
+  if (!e || e.h + e.s === 0) return null;
+  return e.h >= e.s ? 'hero' : 'smug';
 }
 
 // ---------- upgrade numbers (06 §6) ----------
@@ -357,9 +573,27 @@ export const ARRIVE_S = 7;
 export const GOON_RATE = 0.05;
 export const goonEff = (goons: number) => Math.min(1, (goons * GOON_RATE) / TRAFFIC);
 export const streakMult = (s: number) => 1 + 0.05 * Math.min(10, s);
-export const STREAK_MIN = 1.3;
+/** A toll at or above this multiple extends the Streak. Wave 1: 1.3 -> 1.0, so the one-tap FAIR
+ * on a poor Claim keeps the Streak (the price tiers have no 1.3). */
+export const STREAK_MIN = 1.0;
 export const NOTCH_MIN = 5; // 0.5x
 export const NOTCH_MAX = 40; // 4.0x
+
+/** Wave 1 price tiers (fun-review P13), x claimed fare. GOUGE and ROB spend a Glower charge.
+ * SIM-TUNED from P13's 1.0 / 1.5 / 2.2 / 3.0: STEEP 1.4 and GOUGE 2.0 sit on the pilgrim and
+ * merchant wallets, so the coarse tiers keep the reference bot's active:idle near the old 2.7x. */
+export interface PriceTier {
+  id: 'fair' | 'steep' | 'gouge' | 'rob';
+  name: string;
+  mult: number;
+  glower: number;
+}
+export const PRICE_TIERS: PriceTier[] = [
+  { id: 'fair', name: 'FAIR', mult: 1.0, glower: 0 },
+  { id: 'steep', name: 'STEEP', mult: 1.4, glower: 0 },
+  { id: 'gouge', name: 'GOUGE', mult: 2.0, glower: 1 },
+  { id: 'rob', name: 'ROB', mult: 3.0, glower: 1 },
+];
 export const nap = napSeconds;
 export const visibleChance = (nose: number) => Math.min(0.95, 0.6 + 0.04 * nose);
 export const sniffChance = (sniffer: number) => Math.min(1, 0.1 * sniffer);
@@ -584,29 +818,34 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
   const tells: string[] = [];
   let concealed = 0;
   const vis = visibleChance(o.nose);
+  const dec = o.poster.decree;
   const fake = o.menace >= 9 || f === 'kitLesson' ? o.poster.fake : '';
   const lesson = !!f && f !== 'merchant' && f !== 'showdown';
+  const used = new Set<Slot>();
 
   if (smuggler) {
-    const pool = SMUGGLE_TELLS.slice();
+    const pool = dec.smug.slice();
     if (o.menace >= 6) pool.push(HAT_SMUGGLE);
-    // One bulky load (bulge or barrel), plus maybe new boots / a tall hat.
-    const load = o.force ? SMUGGLE_TELLS[1] : r() < 0.5 ? SMUGGLE_TELLS[0] : SMUGGLE_TELLS[1];
-    const extra = pool.filter(([s]) => s !== 'pack').filter(() => r() < 0.45);
-    const chosen = f === 'hatLesson' ? [HAT_SMUGGLE] : f ? [load] : [load, ...extra];
-    chosen.forEach(([slot, part], i) => {
-      // Smugglers are bad at hiding goods: the first tell always shows.
-      if (i === 0 || o.force || r() < vis) {
+    // One load from today's Decree (a scripted lesson prefers a bulky pack), maybe one more.
+    const load = o.force ? (dec.smug.find(([s]) => s === 'pack') ?? dec.smug[0]) : pick(r, dec.smug);
+    const extra = pool.filter(([s, p]) => p !== load[1] && s !== load[0]).filter(() => r() < 0.45);
+    const chosen = f === 'hatLesson' ? [HAT_SMUGGLE] : f ? [load] : [load, ...extra].filter(([s], i, a) => a.findIndex(([t]) => t === s) === i);
+    for (const [slot, part] of chosen) {
+      // Wave 1: smugglers can hide their first tell too (P11), with the heroes' odds.
+      used.add(slot);
+      if (o.force || r() < vis) {
         look[slot] = part;
         tells.push(slot);
       } else concealed++;
-    });
+    }
   } else if (hero) {
-    const pool = HERO_TELLS.slice().sort(() => r() - 0.5);
-    const n = o.force === 'heroLesson' ? 2 : 2 + (r() < 0.4 ? 1 : 0);
+    const pool = dec.hero.slice().sort(() => r() - 0.5);
+    // One or both of today's hero tells (2 of 2 at 60%).
+    const n = o.force === 'heroLesson' ? DECREE_HERO : 1 + (r() < 0.6 ? 1 : 0);
     const chosen =
-      f === 'heroLesson' ? [HERO_TELLS[0], HERO_TELLS[1]] : f === 'writLesson' ? [HERO_TELLS[2]] : f === 'shiftLesson' ? [HERO_TELLS[1]] : pool.slice(0, n);
+      f === 'heroLesson' ? dec.hero.slice() : f === 'writLesson' ? [dec.hero[0]] : f === 'shiftLesson' ? [dec.hero[DECREE_HERO - 1]] : pool.slice(0, n);
     for (const [slot, part] of chosen) {
+      used.add(slot);
       const show = lesson || (o.force === 'showdown' ? tells.length === 0 : r() < vis);
       if (show) {
         look[slot] = part;
@@ -621,8 +860,18 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
     }
   } else if (fake && (f === 'kitLesson' || r() < 0.2)) {
     // Disguise kits are in fashion: honest folk wear today's fake tell too.
-    const t = HERO_TELLS.find(([, p]) => p === fake)!;
+    const t = HERO_POOL.find(([, p]) => p === fake)!;
     look[t[0]] = t[1];
+    used.add(t[0]);
+  }
+
+  // Red herrings (wave 1): an off-Decree pool part, yesterday's expired tell most often. Liars wear
+  // them too, so an odd part only means something when it is on today's Decree.
+  if (!o.force && r() < HERRING_P) {
+    const off = [...HERO_POOL, ...SMUG_POOL, ...(o.menace >= 6 ? [] : [HAT_SMUGGLE])].filter(([s, p]) => !decreeKind(dec, p, o.menace) && !used.has(s));
+    const exp = off.find(([, p]) => p === dec.expired);
+    const hz = exp && r() < HERRING_EXPIRED ? exp : off.length ? pick(r, off) : null;
+    if (hz && !NORMAL[who][hz[0]].includes(hz[1])) look[hz[0]] = hz[1];
   }
 
   // Poster: 30% of heroes are today's Wanted hero; nobody else matches 2+ shown features.
@@ -650,7 +899,8 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
 
   const ks = KINDS[kind];
   const claimFare = KINDS[who].fare;
-  const walletCoins = ks.fare * (ks.wallet[0] + r() * (ks.wallet[1] - ks.wallet[0]));
+  // Wallets drift per Claim each day (Moonlighter demand), so the ledger never fully solves it.
+  const walletCoins = ks.fare * (ks.wallet[0] + r() * (ks.wallet[1] - ks.wallet[0])) * (dec.drift[who] ?? 1);
   const slackCoins = ks.fare * ks.patience;
   const t: Traveler = {
     id,
@@ -675,6 +925,7 @@ export function generate(seed: number, id: number, o: GenOpts): Traveler {
     scripted: o.force ?? '',
     bribe: 0,
     shift: false,
+    pips: ks.pips,
   };
   // Later rule cards draw after everything else, so lower Menace levels keep their streams.
   if (smuggler && (f === 'bribeLesson' || (!f && o.menace >= 15 && r() < BRIBE_SHARE))) {
@@ -705,19 +956,39 @@ export function evidence(t: Traveler): number {
   return t.posterMatch ? Math.max(2, t.tells.length) : t.tells.length;
 }
 
+/** A seizure pays the goods plus a fine, in multiples of the smuggler's real fare. SIM-TUNED
+ * 4 -> 5: smugglers can now hide every tell, so fewer are caught (~75% of liars, reference bot). */
+export const SEIZE_MULT = 5;
+
+/** SIM-TUNED (wave 1): a one-tell unmask 5x -> 6x. Heroes wear 1-2 of today's 2 Decree tells, so
+ * a single showing tell is the common honest read, not a lucky hunch. */
 export function bountyMult(ev: number): number {
-  return ev >= 2 ? 10 : ev === 1 ? 5 : 2;
+  return ev >= 2 ? 10 : ev === 1 ? 6 : 2;
 }
 
-// ---------- haggling (06 §2 step 4) ----------
+// ---------- haggling (06 §2 step 4; wave 1 mood haggle) ----------
 
 export interface Haggle {
-  round: number; // 0 first demand, 1 after a counter
-  counter: number; // counter-offer (x claimed fare), 0 if none
+  round: number; // asks so far
+  counter: number; // standing counter-offer (x claimed fare), 0 if none
   offended: boolean;
+  /** Patience pips left (undefined = not started: the traveler's full pips). */
+  pips?: number;
 }
 
-export type Reply = { kind: 'pay'; mult: number } | { kind: 'counter'; mult: number } | { kind: 'leave' } | { kind: 'bonk' };
+/** Moonlighter's four faces: DELIGHTED (paid, and you undercharged), CONTENT (paid), GRUDGING
+ * (too much: counters, 1 pip), FURIOUS (far too much: no counter, 2 pips). */
+export type Mood = 'delighted' | 'content' | 'grudging' | 'furious';
+
+export type Reply =
+  | { kind: 'pay'; mult: number; mood: 'delighted' | 'content' }
+  | { kind: 'counter'; mult: number; pips: number }
+  | { kind: 'refuse'; pips: number }
+  | { kind: 'leave' }
+  | { kind: 'bonk' };
+
+/** Paying at or under this share of the wallet reads as DELIGHTED (you left coin on the table). */
+export const DELIGHT_FRAC = 0.8;
 
 export function effWallet(t: Traveler, h: Haggle): number {
   return t.wallet * (h.offended ? 0.8 : 1);
@@ -727,23 +998,38 @@ export function effSlack(t: Traveler, h: Haggle, r: BridgeRun): number {
   return t.slack * glareMult(r.lv.glare) * patienceMult(r.menace) * (h.offended ? 0.5 : 1);
 }
 
-/** The traveler's answer to a demand of `mult` x claimed fare. Pure (the bonk roll is pre-rolled). */
+/** Patience pips left (an offended traveler starts one short). */
+export function pipsLeft(t: Traveler, h: Haggle): number {
+  return h.pips ?? Math.max(1, (t.pips ?? 3) - (h.offended ? 1 : 0));
+}
+
+/** Where a counter lands inside the wallet: U(0.8, 1.0), pre-rolled per traveler and ask, so the
+ * counter never names the wallet (P12). */
+export function counterFrac(t: Traveler, round: number): number {
+  return 0.8 + 0.2 * rng((Math.imul(t.id + 1, 9973) + round * 7919 + 17) >>> 0)();
+}
+
+/** The traveler's answer to a demand of `mult` x claimed fare. Pure (rolls are pre-rolled). */
 export function reply(t: Traveler, h: Haggle, r: BridgeRun, mult: number): Reply {
   const w = effWallet(t, h);
   const s = effSlack(t, h, r);
   const eps = 1e-6;
+  const pips = pipsLeft(t, h);
   const walkOrBonk = (): Reply => (t.bonkRoll < t.brawn * brawnMult(r.lv.fists) ? { kind: 'bonk' } : { kind: 'leave' });
-  if (h.round === 0) {
-    if (mult <= w + eps) return { kind: 'pay', mult };
-    if (mult <= w + s + eps) {
-      const c = w + (mult - w) * tongueFrac(r.lv.tongue);
-      return { kind: 'counter', mult: Math.max(0.1, Math.floor(c * 10 + eps) / 10) };
-    }
-    return walkOrBonk();
+  if ((h.counter > 0 && mult <= h.counter + eps) || mult <= w + eps) return { kind: 'pay', mult, mood: mult <= w * DELIGHT_FRAC + eps ? 'delighted' : 'content' };
+  if (mult <= w + s + eps) {
+    if (pips - 1 <= 0) return walkOrBonk();
+    const c0 = w * counterFrac(t, h.round);
+    const c = c0 + Math.max(0, mult - c0) * tongueFrac(r.lv.tongue);
+    return { kind: 'counter', mult: Math.max(h.counter, Math.max(0.1, Math.floor(c * 10 + eps) / 10)), pips: pips - 1 };
   }
-  if (mult <= h.counter + eps) return { kind: 'pay', mult };
-  if (mult <= w + s * 0.5 + eps) return { kind: 'pay', mult };
-  return walkOrBonk();
+  if (pips - 2 <= 0) return walkOrBonk();
+  return { kind: 'refuse', pips: pips - 2 };
+}
+
+/** The face a price would likely get, read from the Wallet Sense band (a hint, not the wallet). */
+export function previewMood(b: [number, number], mult: number): Mood {
+  return mult < b[0] ? 'delighted' : mult <= b[1] ? 'content' : mult <= b[1] * 1.25 ? 'grudging' : 'furious';
 }
 
 /** The Wallet Sense band (x claimed fare). Deterministic per traveler; always contains the wallet. */

@@ -192,7 +192,8 @@ export const createCauldron = (opts: CauldronOpts = {}): AdapterFactory => (seed
             const dy = p.y - b.y;
             if (dy < 2 || dy > 2.2 * ROW_H) continue;
             if (Math.abs(b.x - p.x) > 7) continue;
-            s += needed.has(b.ing) ? 3 : 1;
+            // Heavy (bundled) ingredients carry several drops (logic.ts RAIN_VIS).
+            s += (needed.has(b.ing) ? 3 : 1) * b.drops;
           }
           // Lower rows send the kicked ingredient straight into the inner buckets.
           s *= 0.6 + (0.4 * p.row) / Math.max(1, rows(run) - 1);

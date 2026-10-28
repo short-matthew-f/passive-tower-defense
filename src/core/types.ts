@@ -32,6 +32,8 @@ export interface DeptSave<Run = any, Persistent = any> {
   lateRecruitDone?: boolean;
   /** Local haul from the last absence not yet "ritualised" (return rituals, 00 §5.3). */
   haul?: number;
+  /** How the last Night Order went (core/orders.ts), said by the manager on the next entry. */
+  orderNote?: string;
 }
 
 export interface Settings {
@@ -41,6 +43,8 @@ export interface Settings {
   chatter: 'full' | 'milestones' | 'off';
   /** Left-handed layouts (00 §9): departments that support it mirror their thumb zone. */
   leftHanded: boolean;
+  /** iPhone: play sound with the ring/silent switch on silent (core/audio.ts). Missing = on. */
+  soundOnSilent?: boolean;
   /** Upgrade sheet buy amount: 0 = x1, 1 = x10, 2 = MAX (02 §15, now suite-wide). */
   buyMode: 0 | 1 | 2;
   /** Per-department settings (DeptDef.settings), keyed by department then setting key. Values
@@ -80,6 +84,11 @@ export interface SaveRoot {
     steward: Partial<Record<DeptId, StewardSetting>>;
     /** Suite-wide manager rate limits (00 §5.4.4); ms epoch. */
     managerClock: { lastLineAt: number; lastAmbientAt: number; lastThroneCameoDay: string };
+    /** Night Orders (core/orders.ts): the standing order id per department, remembered between
+     * absences (absent = that department's first order). Default-filled on load. */
+    orders: Partial<Record<DeptId, string>>;
+    /** The last absence credited (seconds, and the offline cap then): the Throne doors' cap vaults. */
+    lastAway?: { seconds: number; cap: number; at: number };
   };
   depts: Partial<Record<DeptId, DeptSave>>; // absent = locked
   /** Present-but-idle time (00 §7) already paid live to the on-screen department, in seconds,
@@ -110,6 +119,7 @@ export function newSave(now: number): SaveRoot {
       settings: { notation: 'suffix', haptics: true, sfx: 0.6, chatter: 'full', leftHanded: false, buyMode: 0, depts: {} },
       steward: {},
       managerClock: { lastLineAt: 0, lastAmbientAt: 0, lastThroneCameoDay: '' },
+      orders: {},
     },
     depts: {},
   };

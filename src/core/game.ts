@@ -3,6 +3,7 @@ import { Application, Container } from 'pixi.js';
 import type { DeptCtx, DeptDef, DeptScene, SayOpts, UpgradeGroup, VoiceSource } from './dept';
 import { deptSetting, migrateDeptSettings, setDeptSetting } from './settings';
 import {
+  ACTIVE_GATE_MULT,
   coreMult,
   commendationReward,
   idleEarnAllowed,
@@ -22,6 +23,7 @@ import { computeLayout, type Layout } from './layout';
 import { acquireWriterLock, loadSave, repairClock, requestPersistence, writeMirror, writeSave } from './save';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from './types';
 import { SEAL_COST, SEAL_DREAD } from './meta';
+import { creditOffline, effectOf, outcomeText, standingOrder, type OrderOutcome } from './orders';
 import {
   econGateMult,
   headStartLevel,
@@ -62,6 +64,13 @@ import { formatNum } from './format';
 import { goodsGroup } from '../ui/goods';
 import { maybeExportNag, maybeShowA2hs } from '../scenes/install';
 import { destroyTree } from '../ui/destroy';
+// Waves 0-1 (fun plan A1/A2/A7/A8 + playtest log): juice, sfx, haptics, Legend rosters, playtest.
+import { Juice } from '../ui/juice';
+import { maybeRatingPrompt } from '../ui/rating';
+import { installAudioUnlock, setAudioSettings, sfx } from './audio';
+import { setHapticsEnabled } from './haptics';
+import { clearDawn, dawnLine, dawnMult, dawnPhase, legendFor, onLegendReady } from './legends';
+import { isStandalone, launchSource, playtestOf, ptBoot, ptCount, ptHide, ptShow, ptWhere } from './playtest';
 
 const AUTOSAVE_MS = 10_000;
 export const IDLE_INPUT_MS = 10 * 60_000;
@@ -114,16 +123,21 @@ export class Game {
   /** On-screen active Goods (core/goods.ts): the export counter's last value and token bucket. */
   private goodsTrack: Partial<Record<DeptId, ActiveGoodsTrack>> = {};
   readOnly = false;
+  /** Shared juice kit (ui/juice.ts): pops, ka-ching, shake, hit-stop, coin-fly. */
+  juice: Juice;
+  /** Start of the absence being credited (ms), while applyOffline runs: Dawn Ambush. */
+  private awayFrom: number | null = null;
 
   constructor(app: Application, layout: Layout) {
     this.app = app;
     this.layout = layout;
     this.floatLayer = new FloatLayer();
+    this.juice = new Juice(this);
     this.manager = new ManagerDirector(this);
     this.managerLayer.addChild(this.manager);
     // The manager's guidance overlay (highlight, ghost finger, caption) sits above the modal layer so
     // a beat can point inside the open upgrade sheet.
-    app.stage.addChild(this.sceneLayer, this.hudLayer, this.floatLayer, this.managerLayer, this.modalLayer, this.manager.guide);
+    app.stage.addChild(this.sceneLayer, this.hudLayer, this.floatLayer, this.managerLayer, this.modalLayer, this.juice.layer, this.manager.guide);
     app.stage.eventMode = 'static';
     // DOM capture: sees every touch, even ones a Pixi button stops (the manager strip is
     // pass-through and collapses when touched; 00 §5.4.5).
@@ -142,6 +156,9 @@ export class Game {
 
   register(def: DeptDef): void {
     this.defs[def.id] = def;
+    // Night Orders (core/orders.ts): a core return line when the department has none of its own.
+    const lines = def.manager.lines;
+    if (lines && !lines.nightOrder?.length) lines.nightOrder = ['AS ORDERED: %note%', 'DONE, BOSS: %note%'];
   }
 
   /** Departments that exist in this build, in unlock order. */
@@ -155,6 +172,7 @@ export class Game {
     const now = Date.now();
     this.save = (await loadSave()) ?? newSave(now);
     this.migrateSettings();
+    this.wave1Boot(now);
     if (!this.save.depts.cauldron && this.defs.cauldron) this.unlock('cauldron', now);
     const elapsed = this.clampElapsed(now);
     const live = this.save.idleLive;
@@ -170,7 +188,10 @@ export class Game {
     this.lastFrameAt = performance.now();
     this.app.ticker.add((t) => this.frame(t.deltaMS / 1000));
     document.addEventListener('visibilitychange', () => this.onVisibility());
-    window.addEventListener('pagehide', () => this.persistSync());
+    window.addEventListener('pagehide', () => {
+      this.guard('playtest', () => ptHide(playtestOf(this.save), Date.now()));
+      this.persistSync();
+    });
     if (this.readOnly) this.showReadOnly();
   }
 
@@ -219,9 +240,11 @@ export class Game {
       this.hiddenAt = now;
       this.idleSince = null;
       this.idleDept = null;
+      this.guard('playtest', () => ptHide(playtestOf(this.save), now));
       this.persistSync();
       void writeSave(this.save, now);
     } else if (this.hiddenAt !== null) {
+      this.guard('playtest', () => ptShow(playtestOf(this.save), now, { standalone: isStandalone(), src: 'direct' }));
       if (now < this.save.lastSeen) this.guard('clock', () => repairClock(this.save, now, this.marketDay(now)));
       const elapsed = this.clampElapsed(now);
       const live = this.save.idleLive;
@@ -274,6 +297,8 @@ export class Game {
     const s = this.save;
     const cap = offlineCapSeconds(s);
     const lines: ReportLine[] = [];
+    const outcomes: Partial<Record<DeptId, OrderOutcome>> = {};
+    const goodsBoost: [DeptId, number][] = [];
     const greet = absenceGreeting(elapsed);
     let tribute = 0;
     for (const id of this.built) {
@@ -285,8 +310,12 @@ export class Game {
         const t = offlineSecondsFor(elapsed, cap, live?.id === id ? live.seconds : 0);
         const factor = offlineFactor(s, id); // + Iron Discipline here, <= 0.9
         const rate = safeIdleRate(def, d) * coreMult(s, id, this.defs, now);
-        const amount = rate * factor * t;
-        this.credit(d, amount, econGateMult(s, id));
+        // Night Orders: the standing order shapes a real absence's credit (>= 60 s); any offline
+        // credit fills the economy gate only to 90% unless a gate order lifts it (economy.ts).
+        const order = elapsed >= 60 ? standingOrder(s, id, def) : null;
+        const outcome = creditOffline(id, def, d, order, rate * factor * t, econGateMult(s, id));
+        const amount = outcome.amount;
+        if (order && effectOf(order).goods > 1) goodsBoost.push([id, effectOf(order).goods]);
         // Department offline extras (Mines Gems ...): gentle, a throwing hook skips only itself.
         if (def.onOffline && t > 0) {
           try {
@@ -295,6 +324,15 @@ export class Game {
             console.error(err);
           }
         }
+        if (order && def.applyNightOrder && t > 0) {
+          try {
+            const txt = def.applyNightOrder(d, order.id, t, factor);
+            if (typeof txt === 'string' && txt) outcome.deptText = txt.slice(0, 40);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+        if (order) outcomes[id] = outcome;
         const tr = tributeRate(s, id, this.defs, false) * factor * Math.min(elapsed, tributeCapSeconds(s));
         if (Number.isFinite(tr)) tribute += tr;
       // Return ritual (00 §5.3): the haul waits for the first entry after this absence.
@@ -309,12 +347,32 @@ export class Game {
       delete d.reportCarry;
       if (greet) d.seen['mgr.greet'] = greet;
       const inf = this.guard(`infamy.${id}`, () => infamy(def, d).value) ?? 0;
-      lines.push({ id, def, amount, legend: d.cycle.legendWaiting, infamy: inf, flavor, ready: this.readyBuys(id), steward });
+      lines.push({ id, def, amount, legend: d.cycle.legendWaiting, infamy: inf, flavor, ready: this.readyBuys(id), steward, order: outcomes[id] });
       });
     }
     this.addTribute(tribute);
     const goods = this.guard('offline.goods', () => offlineGoods(s, this.defs, elapsed)) ?? {};
+    // A Goods order multiplies that department's own export for the absence.
+    for (const [id, k] of goodsBoost) {
+      const g = EXPORT_OF[id];
+      const extra = (goods[g] ?? 0) * (k - 1);
+      if (extra > 0 && Number.isFinite(extra)) {
+        goods[g] = (goods[g] ?? 0) + extra;
+        if (outcomes[id]) outcomes[id]!.goods = extra;
+      }
+    }
     for (const [g, amt] of Object.entries(goods)) if (Number.isFinite(amt)) addGoods(s, g as GoodId, amt);
+    // The manager's return line about the order (said on the next entry), and the door vaults.
+    if (elapsed >= 60) {
+      const notation = s.meta.settings.notation;
+      for (const [id, o] of Object.entries(outcomes) as [DeptId, OrderOutcome][]) {
+        const d = s.depts[id];
+        if (d && o) d.orderNote = outcomeText(o, this.defs[id].currency, (n) => formatNum(n, notation)).slice(0, 40);
+      }
+      s.meta.lastAway = { seconds: elapsed, cap, at: now };
+    }
+    // Legends that got ready during this absence (A7 Dawn Ambush) show in this report.
+    this.guard('legends.pre', () => this.legendsBeforeReport(lines, now, elapsed));
     if (elapsed >= 60) {
       this.guard('report', () => showReport(this, { elapsed, capped: elapsed > cap, cap, lines, tribute, goods }, () => maybeExportNag(this)));
       // The first manager with a report line speaks it in their own voice.
@@ -417,7 +475,8 @@ export class Game {
       }
     }
     try {
-      this.scene?.update(dt);
+      // Hit-stop (juice): the scene holds still for a few frames; the economy keeps running.
+      if (!this.juice.frozen()) this.scene?.update(dt);
     } catch (err) {
       this.recover(err);
       return;
@@ -426,6 +485,7 @@ export class Game {
     this.guard('hud', () => this.hud?.update());
     this.guard('manager', () => this.manager.update(dt));
     this.guard('floats', () => this.floatLayer.update(dt));
+    this.guard('juice', () => this.juice.update(dt));
     if (!this.readOnly && now - this.lastSave > AUTOSAVE_MS) {
       this.lastSave = now;
       this.syncClock(now);
@@ -489,6 +549,7 @@ export class Game {
     this.addTribute(tribute);
     s.lastSeen = now;
     this.guard('progress', () => this.checkProgress(now));
+    this.guard('rating', () => maybeRatingPrompt(this, now));
   }
 
   /** Infamy thresholds, peak rank, commendations. Each department, and each commendation test,
@@ -510,6 +571,9 @@ export class Game {
         }
         if (inf >= 100 && !d.cycle.legendWaiting) {
           d.cycle.legendWaiting = true;
+          // A Legend ready at night camps until dawn (A7); on screen, the sting plays.
+          this.guard('dawn', () => onLegendReady(s, id, Date.now(), this.awayFrom));
+          if (this.current === id) sfx.legend();
           // Off screen, the director carries it to the next report (00 §5.4.7).
           this.managerSay(id, 'legend', { type: 'legend_arrives' });
         }
@@ -617,6 +681,7 @@ export class Game {
   goThrone(): void {
     this.teardown();
     this.current = 'throne';
+    if (this.save) this.guard('playtest', () => ptWhere(playtestOf(this.save), 'throne', Date.now()));
     const t = new ThroneScene(this);
     this.scene = t;
     this.sceneLayer.addChild(t.root);
@@ -628,6 +693,7 @@ export class Game {
     if (!def || !d) return;
     this.teardown();
     this.current = id;
+    this.guard('playtest', () => ptWhere(playtestOf(this.save), id, Date.now()));
     const ctx = this.makeCtx(def, d);
     this.ctx = ctx;
     this.hud = new DeptHud(this, def, d);
@@ -649,12 +715,17 @@ export class Game {
     this.manager.attach(def, d, scene);
     const greet = d.seen['mgr.greet'];
     delete d.seen['mgr.greet'];
+    const note = d.orderNote;
+    delete d.orderNote;
     if (!d.seen.intro) {
       d.seen.intro = 1;
       this.managerSay(id, 'intro', { milestone: true });
     } else if (d.cycle.n > 0 && !d.seen[`returnFall.${d.cycle.n}`]) {
       d.seen[`returnFall.${d.cycle.n}`] = 1;
       this.managerSay(id, 'returnFall', { type: 'return_after_fall' });
+    } else if (note) {
+      // Night Orders: the manager reports how the standing order went.
+      this.managerSay(id, 'nightOrder', { milestone: true, vars: { note } });
     } else if (greet) {
       // The report already carried the long-absence greeting: just a wave (R4-14).
       this.manager.wave();
@@ -790,7 +861,8 @@ export class Game {
           amount = idleEarnAllowed(game.idleSince, now, offlineCapSeconds(game.save)) ? amount * offlineFactor(game.save, def.id) : 0;
         }
         if (!Number.isFinite(amount)) return 0;
-        game.credit(d, amount, econGateMult(game.save, def.id));
+        // A5: on-screen play counts x2 toward the economy gate (not while present but idle).
+        game.credit(d, amount, econGateMult(game.save, def.id) * (game.idleSince === null ? ACTIVE_GATE_MULT : 1));
         return amount;
       },
       mult() {
@@ -938,10 +1010,16 @@ export class Game {
     const def = this.defs[id];
     const d = this.save.depts[id];
     if (!def || !d) return;
-    const dread = dreadPayout(d, inf, crush, legendsBane(this.save, id));
+    // Dawn Ambush (A7): +50% when the Legend is met inside the dawn window.
+    const dawn = this.guard('dawn', () => dawnMult(this.save, id, Date.now())) ?? 1;
+    const dread = Math.floor(dreadPayout(d, inf, crush, legendsBane(this.save, id)) * dawn);
     this.save.meta.dread += dread;
     this.save.meta.dreadLifetime += dread;
-    this.save.meta.trophies.push({ dept: id, name: def.legend.name, at: Date.now() });
+    // The cycle's Legend from the roster (A7); the first is the department's original Legend.
+    const legendName = this.guard('legend', () => legendFor(def, d.cycle.n).full) ?? def.legend.name;
+    this.save.meta.trophies.push({ dept: id, name: legendName, at: Date.now() });
+    this.guard('dawn', () => clearDawn(this.save, id));
+    this.guard('playtest', () => ptCount(playtestOf(this.save), 'falls'));
     d.lifetime.falls += 1;
     d.run = def.defaultRun() as DeptSave['run'];
     d.cycle = { n: d.cycle.n + 1, startedAt: Date.now(), earnings: 0, heldLevel: 0, legendWaiting: false };
@@ -978,8 +1056,42 @@ export class Game {
     const now = Date.now();
     this.save.lastSeen = now;
     this.guard('clock', () => repairClock(this.save, now, this.marketDay(now)));
+    this.guard('playtest', () => ptBoot(playtestOf(this.save), now, { standalone: isStandalone(), src: 'direct' }));
     this.persistSync();
     this.goThrone();
+  }
+
+  // ---------- waves 0-1: playtest, sound, haptics, Legends ----------
+
+  /** Boot hooks: the playtest session, the audio/haptics settings sources, the iOS unlock. */
+  private wave1Boot(now: number): void {
+    this.guard('playtest', () => ptBoot(playtestOf(this.save), now, { standalone: isStandalone(), src: launchSource() }));
+    const st = () => this.save.meta.settings;
+    setAudioSettings(
+      () => st().sfx ?? 0.6,
+      () => st().soundOnSilent !== false,
+    );
+    setHapticsEnabled(() => st().haptics !== false);
+    installAudioUnlock();
+  }
+
+  /** Runs the progress check for the absence just credited (so Legends that got ready while away
+   * know about it and camp until dawn), then puts each Legend's appointment into the report. */
+  private legendsBeforeReport(lines: ReportLine[], now: number, elapsed: number): void {
+    this.awayFrom = now - elapsed * 1000;
+    try {
+      this.checkProgress(now);
+    } finally {
+      this.awayFrom = null;
+    }
+    for (const line of lines) {
+      const d = this.save.depts[line.id];
+      if (!d) continue;
+      line.legend = d.cycle.legendWaiting;
+      const ph = dawnPhase(this.save, line.id, now);
+      const text = dawnLine(legendFor(line.def, d.cycle.n), ph.phase, ph.at);
+      if (text) line.flavor = text;
+    }
   }
 
   // ---------- resize ----------

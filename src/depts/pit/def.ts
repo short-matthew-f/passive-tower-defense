@@ -1,14 +1,15 @@
 // The War Pit's pure economy (specs/07 §3, §6-§8; 00 §2.2). No Pixi: the shared core, the
 // headless balance simulation and the scene all read this. index.ts spreads `pitEcon` into the
 // full DeptDef.
-import type { Commendation, DeptEcon, StewardCandidate } from '../../core/dept';
+import type { Commendation, DeptEcon, DeptGoal, NightOrderDef, StewardCandidate } from '../../core/dept';
 import { LONG_GROWTH, LONG_MAX, longDesc, longLocked, longMult } from '../../core/longnode';
 import type { DeptSave } from '../../core/types';
 import { battle, battleSeed, hashStr, type Fighter } from './engine';
 import {
   BASE_GRIT,
-  PARAMS_VERSION,
+  GAUNTLET_PV,
   SHOWMAN_STEP,
+  WINS_TO_TRIUMPH,
   battleTeeth,
   lvlOf,
   newPet,
@@ -50,6 +51,11 @@ export interface PitRun {
   /** Huntmaster scars this cycle (run.ts SCAR_STEP each): +1 per Run at Stakes >= the Infamy
    * target that reached him and still Retreated, cleared by a Crown at the target. */
   scars?: number;
+  /** The visible Skirmish purse (base Teeth, before core multipliers): on-screen Skirmish pay
+   * waits here until tapped (research R9). Banked on leaving, so nothing is lost. */
+  purse?: number;
+  /** Night Order "Scout Rivals": the next Run reads rivals as with Scouting 2 (display only). */
+  scouted?: boolean;
 }
 
 export interface PitPersistent {
@@ -124,6 +130,7 @@ export function normalize(run: PitRun, per: PitPersistent): void {
   run.cur ??= null;
   run.crowns ??= {};
   run.scars ??= 0;
+  run.purse ??= 0;
   run.stats = { ...defaultStats(), ...(run.stats ?? {}) };
   run.stakes = Math.max(0, Math.min(run.stakes, run.stakesBought));
   per.crests ??= 0;
@@ -317,8 +324,10 @@ export function crownsAtOrAbove(crowns: Record<string, number>, S: number): numb
  * (07 §3 band 2.6-3.8x, centre 3.2x) early in the 30-day runs; later cycles add Run-only levels
  * (Showman, Grit, Larder) and read higher. At 0.05 the reference profile reads ~3-4x on screen
  * across 30 days (~4-5x active : offline at the Pit's ~0.75-0.8 factor).
+ * SIM-TUNED 0.05 -> 0.0525 (wave 1, 3-seed 7-day sim, with TOUGH_PAY 2 -> 1.5): one seed read
+ * 5.50x active : offline (hard band 3-5x). Now 3.32-3.70x (median 3.66x, on-screen 2.65x).
  */
-export const K_IDLE = 0.05;
+export const K_IDLE = 0.0525;
 export const GAUNTLETS = 8;
 export const GAUNTLET_ROUNDS = 12;
 
@@ -346,7 +355,7 @@ export function runGauntlet(team: Fighter[], cycle: number, g: number, S: number
   const seed = gauntletSeed(cycle, g);
   for (let r = 1; r <= GAUNTLET_ROUNDS; r++) {
     const riv = rival(r, S, seed);
-    const res = battle(team, riv.line, { seed: battleSeed(team, riv.line, r, PARAMS_VERSION), tactics: S, ...opts });
+    const res = battle(team, riv.line, { seed: battleSeed(team, riv.line, r, GAUNTLET_PV), tactics: S, ...opts });
     if (res.outcome === 1) {
       teeth += battleTeeth(r, S);
       rounds = r;
@@ -361,14 +370,14 @@ export function runGauntlet(team: Fighter[], cycle: number, g: number, S: number
 /** One Gauntlet battle with its frame log, for the on-screen Skirmish (same seeds as idleRate). */
 export function runGauntletLog(save: DeptSave, team: Fighter[], g: number, r: number, S: number) {
   const riv = rival(r, S, gauntletSeed(save.cycle?.n ?? 0, g));
-  const res = battle(team, riv.line, { seed: battleSeed(team, riv.line, r, PARAMS_VERSION), tactics: S, sigils: importSigils(save), shade: importShade(save), log: true });
+  const res = battle(team, riv.line, { seed: battleSeed(team, riv.line, r, GAUNTLET_PV), tactics: S, sigils: importSigils(save), shade: importShade(save), log: true });
   return { frames: res.frames, outcome: res.outcome, arch: riv.arch };
 }
 
 const memo = new Map<string, GauntletReport>();
 
 function gauntletKey(run: PitRun, save: DeptSave): string {
-  let s = `${PARAMS_VERSION}|${save.cycle?.n ?? 0}|${run.stakes ?? 0}|${lvOf(run, 'hardy')}|${lvOf(run, 'drill')}|${importShade(save)}|${importSigils(save)}|`;
+  let s = `${GAUNTLET_PV}|${save.cycle?.n ?? 0}|${run.stakes ?? 0}|${lvOf(run, 'hardy')}|${lvOf(run, 'drill')}|${importShade(save)}|${importSigils(save)}|`;
   for (const p of run.garrison ?? []) s += `${p.k}${p.xp}.${p.a}.${p.h}${p.it ?? ''}${p.br ? '*' : ''},`;
   return s;
 }
@@ -511,6 +520,51 @@ export const commendations: Commendation[] = [
   { id: 'beast', label: 'BESTIARY: FIRST BEAST', test: (s) => (per(s)?.beasts?.length ?? 0) >= 1 },
 ];
 
+// ---------- Wave 1: Next Goal and Night Orders (core/goals.ts, core/orders.ts) ----------
+
+/** The Pit's next goal: the open Run's Huntmaster, else the Stakes the skill gate needs, else its
+ * Crown. Pure and cheap. */
+export function nextGoalOf(save: DeptSave): DeptGoal | null {
+  const r = save.run as PitRun;
+  if (!r?.lv) return null;
+  const cur = r.cur;
+  if (cur && !cur.ended) return { label: 'BEAT THE HUNTMASTER', progress: Math.min(1, cur.wins / (WINS_TO_TRIUMPH - 1)), detail: `${cur.wins}/${WINS_TO_TRIUMPH} WINS` };
+  const target = pitEcon.skillTarget(save.cycle?.n ?? 0);
+  const b = r.stakesBought ?? 0;
+  if (b < target && b < STAKES_MAX) {
+    const c = stakesCost(b);
+    return { label: `BUY STAKES ${b + 1}`, progress: Math.min(1, Math.max(0, r.bank) / c), detail: `${Math.floor((100 * Math.min(c, Math.max(0, r.bank))) / c)}%` };
+  }
+  if (crownsAtOrAbove(r.crowns ?? {}, target) < PIT_CROWNS) {
+    const best = r.stats?.bestWins ?? 0;
+    return { label: `PIT CROWN AT STAKES ${target}`.slice(0, 24), progress: Math.min(1, best / WINS_TO_TRIUMPH), detail: `BEST ${best}/${WINS_TO_TRIUMPH} WINS` };
+  }
+  return null;
+}
+
+/** Snarl's two Night Orders. The first (the default) is the core's income order with the Pit's
+ * own report line; the second baits the Legend and scouts the next Run's rivals. */
+export const PIT_ORDERS: NightOrderDef[] = [
+  { id: 'skirmish', label: 'DOUBLE SHIFTS', desc: '+25% Teeth: gnolls fight all night', kind: 'income' },
+  { id: 'scout', label: 'SCOUT RIVALS', desc: 'Legend lured; next Run scouted', kind: 'gate' },
+];
+
+export function applyPitOrder(save: DeptSave, orderId: string, elapsedSeconds: number): string | void {
+  const r = save.run as PitRun;
+  if (!r?.lv) return;
+  if (orderId === 'skirmish') {
+    const n = Math.floor(Math.max(0, elapsedSeconds) / intervalL(lvOf(r, 'pace')));
+    return n > 0 ? `${formatCount(n)} GAUNTLETS FOUGHT` : undefined;
+  }
+  if (orderId === 'scout') {
+    if (elapsedSeconds < 900) return;
+    r.scouted = true;
+    return 'NEXT RUN FULLY SCOUTED';
+  }
+}
+
+const formatCount = (n: number) => (n >= 1e4 ? `${Math.floor(n / 1000)}K` : `${n}`);
+
 // ---------- the DeptEcon ----------
 
 export const pitEcon: DeptEcon = {
@@ -570,6 +624,9 @@ export const pitEcon: DeptEcon = {
   stewardCandidates,
   applyHeadStart,
   signature: oldGuard,
+  nextGoal: nextGoalOf,
+  nightOrders: () => PIT_ORDERS,
+  applyNightOrder: (save, id, elapsed) => applyPitOrder(save, id, elapsed),
 };
 
 /** Unit display helper for the garrison tab and previews. */

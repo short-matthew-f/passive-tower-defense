@@ -1,4 +1,5 @@
-// The department HUD strip: home, local bank and idle rate, Infamy (skill | economy) and the Legend button.
+// The department HUD strip: home, local bank and idle rate, Infamy (skill | economy) and the Legend
+// button, over the Next Goal ribbon (fun plan A3, ui/ribbon.ts).
 import { Container, Graphics, Rectangle } from 'pixi.js';
 import type { DeptDef } from '../core/dept';
 import type { Game } from '../core/game';
@@ -7,8 +8,11 @@ import { coreMult, econFloor, infamy } from '../core/economy';
 import { formatNum } from '../core/format';
 import { PixelText } from './font';
 import { Button, C, drawBar } from './widgets';
+import { Ribbon, RIBBON_H } from './ribbon';
 
-export const HUD_H = 24;
+/** Rows (24 px) plus the Next Goal ribbon (8 px). Departments lay out under it via ctx.content(). */
+export const HUD_ROWS_H = 24;
+export const HUD_H = HUD_ROWS_H + RIBBON_H;
 
 export class DeptHud extends Container {
   private game: Game;
@@ -28,6 +32,8 @@ export class DeptHud extends Container {
   private slowAt = -Infinity;
   private lastRate = 0;
   private inf = { value: 0, skill: 0, econ: 0 };
+  private ribbon: Ribbon;
+  private lastT = performance.now();
 
   constructor(game: Game, def: DeptDef, d: DeptSave) {
     super();
@@ -49,6 +55,9 @@ export class DeptHud extends Container {
     this.addChild(home);
 
     this.bank.position.set(x0 + 24, 4);
+    // Coins from the juice kit fly to the bank readout.
+    const juice = (game as { juice?: { coinTarget: { x: number; y: number } | null } }).juice;
+    if (juice) juice.coinTarget = { x: x0 + 34, y: L.safe.t + 7 };
     this.rate.position.set(x0 + 24, 13);
     this.addChild(this.bank, this.rate);
 
@@ -69,9 +78,12 @@ export class DeptHud extends Container {
     this.addChild(this.bars, this.infText, this.tribute, this.dread);
     // Tapping the Infamy bar explains both gates.
     this.infHit.eventMode = 'static';
-    this.infHit.hitArea = new Rectangle(x0 + w - 62, 0, 62, HUD_H);
+    this.infHit.hitArea = new Rectangle(x0 + w - 62, 0, 62, HUD_ROWS_H);
     this.infHit.on('pointertap', () => (this.d.cycle.legendWaiting ? game.startFall(def.id) : this.explainInfamy()));
     this.addChild(this.infHit);
+    this.ribbon = new Ribbon(game, def.id, w - 4);
+    this.ribbon.position.set(x0 + 2, HUD_ROWS_H - 1);
+    this.addChild(this.ribbon);
     this.update();
   }
 
@@ -86,6 +98,9 @@ export class DeptHud extends Container {
   }
 
   update(): void {
+    const pn = performance.now();
+    this.ribbon.update(Math.min(0.1, Math.max(0, (pn - this.lastT) / 1000)));
+    this.lastT = pn;
     const L = this.game.layout;
     const x0 = L.safe.l;
     const w = L.w - L.safe.l - L.safe.r;
@@ -134,6 +149,6 @@ export class DeptHud extends Container {
     this.infText.set(`INF ${Math.floor(inf.value)}%`);
     this.infText.position.set(bx - this.infText.width - 3, 13);
     // Generous target: the whole right half of row 2 (Infamy, or the Legend when one waits).
-    this.infHit.hitArea = new Rectangle(x0 + w - 72, 11, 72, HUD_H - 11);
+    this.infHit.hitArea = new Rectangle(x0 + w - 72, 11, 72, HUD_ROWS_H - 11);
   }
 }

@@ -7,6 +7,7 @@
 //   checkProgress, completeFall, buySeal -> the same rules, same order.
 // Departments plug in through sim/types.ts adapters; nothing here knows any department's mechanics.
 import {
+  ACTIVE_GATE_MULT,
   coreMult,
   commendationReward,
   dreadPayout,
@@ -79,6 +80,7 @@ import {
   type EdictId,
 } from '../src/core/perks';
 import { DEPT_ORDER, newSave, type DeptId, type DeptSave, type SaveRoot } from '../src/core/types';
+import { botOrder, creditOffline, effectOf, ordersFor, standingOrder } from '../src/core/orders';
 import { childSeed } from './rng';
 import type { ActiveSession, AdapterFactory, BotGoals, DeptAdapter, SessionEnv } from './types';
 
@@ -300,6 +302,8 @@ export interface PerkTrack {
 export interface SimResult {
   config: { days: number; seed: number; profile: string; fallAt: number; crush: number; depts: DeptId[]; phantomSeals: boolean; floorGrowth: number; noGoods: boolean };
   goods: GoodsTrack;
+  /** Night Orders left by the bot, by core kind (absences x departments). */
+  orders: Record<string, number>;
   steward: StewardTrack;
   perks: PerkTrack;
   tracks: Record<string, DeptTrack>;
@@ -377,6 +381,8 @@ export function simulate(cfg: SimConfig): SimResult {
   const useGoods = !cfg.noGoods;
   const stewardTrack: StewardTrack = { passes: 0, buys: 0, spent: {}, bought: {}, violations: [] };
   const perkTrack: PerkTrack = { edicts: {}, edictSecs: {}, rituals: 0, firstBuy: {}, dreadNew: 0, dreadOld: 0 };
+  /** Night Orders the bot left, by core kind (absences x departments). */
+  const orderTrack: Record<string, number> = {};
   const off = new Set(cfg.off ?? []);
   const ritualScore = off.has('rituals') ? 0 : (cfg.profile.ritualScore ?? 0);
   let stewardAcc = 0;
@@ -478,14 +484,27 @@ export function simulate(cfg: SimConfig): SimResult {
     const tt = Math.min(elapsed, cap);
     const tcap = Math.min(elapsed, tributeCapSeconds(s));
     const now = nowMs();
+    const goodsBoost: [DeptId, number][] = [];
     for (const id of unlocked()) {
       const d = s.depts[id]!;
       // game.ts applyOffline: per-department factor (Iron Discipline adds 0.1 in its target, <= 0.9)
       // for local income and that department's Tribute.
       const factor = offlineFactor(s, id);
       const rate = defs[id].idleRate(d) * coreMult(s, id, defs, now);
-      const amount = rate * factor * tt;
-      credit(d, amount, id);
+      // game.ts applyOffline: the standing Night Order (core/orders.ts) shapes a real absence; the
+      // bot leaves "bait the Legend" where the skill gate is met, else the income order. Any offline
+      // credit fills the economy gate only to 90% unless a gate order lifts it.
+      let order = null;
+      if (elapsed >= 60) {
+        const pick = botOrder(ordersFor(id, defs[id], d), infamy(defs[id], d).skill >= 1);
+        if (pick) s.meta.orders[id] = pick;
+        order = standingOrder(s, id, defs[id]);
+        if (order) orderTrack[order.kind ?? 'none'] = (orderTrack[order.kind ?? 'none'] ?? 0) + 1;
+      }
+      const outcome = creditOffline(id, defs[id], d, order, rate * factor * tt, econGateMult(s, id));
+      const amount = outcome.amount;
+      if (order && effectOf(order).goods > 1) goodsBoost.push([id, effectOf(order).goods]);
+      if (order && defs[id].applyNightOrder && tt > 0) defs[id].applyNightOrder!(d, order.id, tt, factor);
       tracks[id].aeCycleS += (factor * tt) / ratioEst(id);
       addTribute(tributeRate(s, id, defs, false) * factor * tcap, id);
       // Return ritual: the haul waits for the first entry after this absence.
@@ -495,6 +514,11 @@ export function simulate(cfg: SimConfig): SimResult {
     if (useGoods) {
       // game.ts applyOffline: passive Goods under the offline cap.
       const got = offlineGoods(s, defs, elapsed);
+      // A Goods order multiplies that department's own export for the absence.
+      for (const [id, k] of goodsBoost) {
+        const g = EXPORT_OF[id];
+        if (got[g]) got[g] = got[g]! * k;
+      }
       for (const [g, amt] of Object.entries(got)) {
         addGoods(s, g as GoodId, amt);
         const ex = GOODS[g as GoodId].exporter;
@@ -926,7 +950,11 @@ export function simulate(cfg: SimConfig): SimResult {
         }
         baseThisStep += base;
         const amount = base * coreMult(s, id, defs, nowMs());
-        credit(d(), amount, id);
+        // game.ts ctx.earn (A5): on-screen play counts x2 toward the economy gate.
+        if (amount > 0) {
+          d().run.bank += amount;
+          d().cycle.earnings += amount * econGateMult(s, id) * ACTIVE_GATE_MULT;
+        }
         return amount;
       },
       raiseSkill(level: number) {
@@ -1136,6 +1164,7 @@ export function simulate(cfg: SimConfig): SimResult {
   return {
     config: { days: cfg.days, seed: cfg.seed, profile: cfg.profile.name, fallAt: cfg.fallAt, crush: cfg.crush, depts: built, phantomSeals: !!cfg.phantomSeals, floorGrowth: cfg.floorGrowth ?? FLOOR_GROWTH, noGoods: !!cfg.noGoods },
     goods: goodsTrack,
+    orders: orderTrack,
     steward: stewardTrack,
     perks: perkTrack,
     tracks,

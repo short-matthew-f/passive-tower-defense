@@ -18,6 +18,12 @@
 //    more Scouting level.
 // Time model: shop 8 s + 3 s per action (novice x1.5); battles at 1x for rounds 1-3, then 2x,
 // plus the 1.5 s result card; 6 s on the Run summary and 3 s at home before the next Run.
+// Wave 1 (params version 4) needs no port: rivals drafted from the record, the TOUGH bout, the
+// rotating Huntmaster hunts and banked Chow all live in run.ts fight() / nextRival(), which the
+// bot plays (its scouting guess sees the hunt like a player does). The scene's Skirmish purse holds
+// on-screen Skirmish pay until tapped (or full, or the Pit is left); the bot taps it at once, so
+// home pay is still credited each second below. The optional Encore after a Triumph is skipped
+// (no bot takes it), so its pot is not in these numbers.
 // Stakes: the bot plays at the highest level bought (Snarl's "Drop Stakes by 2?" after 3 Retreats
 // under 3 wins, back up one after 2 Triumphs), and at the Infamy target while it still needs Crowns.
 import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';

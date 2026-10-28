@@ -6,6 +6,7 @@ import { Container, Graphics, Rectangle, Sprite, type FederatedPointerEvent } fr
 import type { DeptCtx, DeptScene, Rect, SayOpts, UpgradeEntry, UpgradeGroup } from '../../core/dept';
 import type { Layout } from '../../core/layout';
 import { formatNum } from '../../core/format';
+import { sfx as kit } from '../../core/audio';
 import { PixelText } from '../../ui/font';
 import { Button, C, drawSprite } from '../../ui/widgets';
 import { ICON_PAL, ICON_QUICK, ICON_TREMOR, ICON_VENT, ORB_COL, orbColor, orbLight, orbTexture, PAL, SORC_IDLE_FRAME, SORC_PAL, type SorcMood } from './art';
@@ -24,6 +25,7 @@ import {
   orbR,
   QUICK,
   QUICK_CD,
+  studyMultOf,
   TIERS,
   TREMOR_CD,
   VENT_NOW_CD,
@@ -137,6 +139,11 @@ export class SpireScene implements DeptScene {
   private zzz = new PixelText('Z', '#9c8aa8');
   private pagesText = new PixelText('', '#e8c04a');
   private warnText = new PixelText('BRIM!', '#e05050');
+  /** Flask score line above the dropper ("FLASK 4.2K  BEST 6.0K") and the vent tally. */
+  private scoreText = new PixelText('', '#c8b8d8');
+  private tallyText = new PixelText('', '#fff2a0');
+  private tallySub = new PixelText('', '#e8c04a');
+  private studyText = new PixelText('', '#e8c04a');
   private upBtn!: Button;
   private volUp!: Button;
   private volDown!: Button;
@@ -203,6 +210,8 @@ export class SpireScene implements DeptScene {
   private stateKey = '';
   private sayCooldown = 0;
   private recentVents: number[] = [];
+  /** The vent tally (R1 groundwork): the finished flask's score counts up, then NEW BEST or the gap. */
+  private tally: { score: number; prev: number; t: number; ticks: number; done: boolean } | null = null;
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -221,6 +230,8 @@ export class SpireScene implements DeptScene {
       devour: (v, o, amount) => this.onDevour(v, o, amount),
       fizz: (o) => this.onFizz(o),
       tremor: () => this.onTremor(),
+      flaskEnd: (score, prev) => this.onFlaskEnd(score, prev),
+      rescue: (kind) => this.onRescue(kind),
       volApplied: (v) => this.ctx.float(`VOLATILITY ${v}`, this.cx, this.mouthY + 16, '#e05050'),
       imports: ctx.save.imports,
     });
@@ -256,6 +267,10 @@ export class SpireScene implements DeptScene {
       this.pagesText,
       this.warnText,
       this.chainText,
+      this.scoreText,
+      this.studyText,
+      this.tallyText,
+      this.tallySub,
     );
 
     // Aim: drag anywhere in the flask column; release drops.
@@ -480,7 +495,6 @@ export class SpireScene implements DeptScene {
   private afterBuy(id: string): void {
     this.ctx.saveSoon();
     this.syncState();
-    if (id === 'wider') this.say('firstWider', { type: 'first_upgrade', key: 'wider' }, 'relieved');
     if (id === 'hire') {
       this.say('firstHelper', { type: 'first_helper' }, 'lecture');
       this.ctx.lesson('apprentices');
@@ -497,7 +511,7 @@ export class SpireScene implements DeptScene {
 
   /** Re-read upgrade state: rebuild geometry when the flask or brim changed. */
   private syncState(): void {
-    const key = `${lvOf(this.run, 'wider')}|${this.run.vol}|${lvOf(this.run, 'neck')}`;
+    const key = `${this.run.vol}`;
     if (key === this.stateKey) return;
     this.stateKey = key;
     this.core.refresh();
@@ -631,35 +645,41 @@ export class SpireScene implements DeptScene {
     }
     if (this.floatBudget >= 1 || t >= 6) {
       this.floatBudget -= 1;
-      this.ctx.float(`+${formatNum(amount)}`, x, y - r - 8, t >= 6 ? '#fff2a0' : ORB_COL[t][1]);
+      // Shared juice kit: the pop's size follows the amount (relative to ~5 s of idle).
+      this.ctx.game.juice.popValue(amount, x, y - r - 8, { color: t >= 6 ? undefined : ORB_COL[t][1] });
     }
     if (depth >= 2) {
-      this.chainText.set(`CHAIN X${depth}  X${res.toFixed(2)}`, depth >= 5 ? '#fff2a0' : '#c070ff');
+      // R5: geometric chains, shown Balatro-style (the multiplier punches up each step).
+      this.chainText.set(`CHAIN ${depth}  X${Math.round(res)}`, depth >= 4 ? '#fff2a0' : '#c070ff');
+      this.chainText.scale.set(res >= 4 ? 2 : 1);
       this.chainShow = 1.4;
       this.resPulse = 1;
-      if (depth === 5 && this.sayCooldown <= 0) {
+      if (depth === 4 && this.sayCooldown <= 0) {
         this.say('bigChain', {}, 'happy');
         this.sayCooldown = 8;
       }
     }
     sfx.bloop(this.vol(), t, depth - 1);
     if (t >= 5) this.ctx.haptic(10);
-    if (t >= 8) this.shake = Math.max(this.shake, 0.08);
+    if (t >= 10) {
+      this.ctx.game.juice.shake(2);
+      this.ctx.game.juice.hitStop(50);
+    } else if (t >= 8) this.ctx.game.juice.shake(1);
   }
 
   private onSingularity(x: number, y: number, amount: number): void {
     const X = this.sx(x);
     const Y = this.sy(y);
-    this.freeze = 0.3;
     this.whiteout = 0.35;
-    this.shake = 0.4;
+    this.ctx.game.juice.shake(3);
+    this.ctx.game.juice.hitStop(100);
     for (let i = 0; i < 3; i++) this.addRing(X, Y, 4 + i * 8, 70 + i * 10, i % 2 ? 0xffffff : PAL.rune);
     for (let i = 0; i < 40; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = 30 + Math.random() * 30;
       this.addParticle(X + Math.cos(a) * d, Y + Math.sin(a) * d, -Math.cos(a) * 60, -Math.sin(a) * 60, 0.6, i % 2 ? 0xffffff : PAL.rune, 1, 0);
     }
-    this.ctx.float(`SINGULARITY! +${formatNum(amount)}`, X, Y - 20, '#ffffff');
+    this.ctx.game.juice.popValue(amount, X, Y - 20, { tier: 3, prefix: 'SINGULARITY! +', color: '#ffffff' });
     this.ctx.haptic(30);
     sfx.chord(this.vol());
     if (this.ritual?.dropped && !this.core.flask.orbs.some((o) => o.sealed)) this.endRitual(1);
@@ -704,6 +724,64 @@ export class SpireScene implements DeptScene {
       // Struggle (04 §18): 3 vents in 5 min; the one-tap offer turns the knob down one step.
       this.say('struggle', { type: 'struggle', offer: () => this.stepVol(-1) }, 'singed', 4);
       this.recentVents.length = 0;
+    }
+  }
+
+  /** A real overflow finished the flask: count its score up in the emptied top of the flask. */
+  private onFlaskEnd(score: number, prev: number): void {
+    if (!(score > 0)) return;
+    this.tally = { score, prev, t: 0, ticks: 0, done: false };
+    if (!this.ctx.seen('sp.study')) {
+      this.ctx.markSeen('sp.study');
+      this.say('study', { milestone: true }, 'lecture');
+    }
+  }
+
+  private updateTally(dt: number): void {
+    const k = this.tally;
+    this.tallyText.visible = this.tallySub.visible = !!k;
+    if (!k) return;
+    k.t += dt;
+    const COUNT_S = 1.2;
+    const f = Math.min(1, k.t / COUNT_S);
+    const shown = Math.round(k.score * (1 - (1 - f) ** 2));
+    // A rising tick per step of the count (the shared kit's count-up tick).
+    if (!k.done && k.t >= k.ticks * 0.08) {
+      kit.tick(k.ticks++);
+    }
+    this.tallyText.set(`FLASK ${formatNum(shown)}`, '#fff2a0');
+    this.tallyText.scale.set(2);
+    if (f >= 1 && !k.done) {
+      k.done = true;
+      if (k.score > k.prev) {
+        this.tallySub.set(k.prev > 0 ? 'NEW BEST!' : 'FIRST FLASK!', '#e8c04a');
+        kit.bigWin();
+        this.ctx.game.juice.shake(1);
+        this.mood('happy', 3);
+        if (k.prev > 0 && this.sayCooldown <= 0) {
+          this.say('newBest', {}, 'happy');
+          this.sayCooldown = 8;
+        }
+      } else this.tallySub.set(`${formatNum(k.prev - k.score)} SHORT OF BEST`, '#c8b8d8');
+    }
+    if (!k.done) this.tallySub.set('', '#e8c04a');
+    const y = this.sy(this.core.brimY) + 16;
+    this.tallyText.position.set(Math.round(this.cx - this.tallyText.width / 2), y);
+    this.tallySub.position.set(Math.round(this.cx - this.tallySub.width / 2), y + 13);
+    const a = k.t > 3 ? Math.max(0, 1 - (k.t - 3) * 2) : 1;
+    this.tallyText.alpha = this.tallySub.alpha = a;
+    if (a <= 0) this.tally = null;
+  }
+
+  /** R9 rescues: a chain earned a Catalyst, or the brim handed over a Quicksilver bead. */
+  private onRescue(kind: 'catalyst' | 'quick'): void {
+    if (kind === 'catalyst') {
+      this.ctx.float('CHAIN! CATALYST NEXT', this.cx, this.mouthY + 40, '#f0f0ff');
+      sfx.page(this.vol());
+    } else {
+      this.ctx.float('QUICKSILVER! NUDGE IT', this.cx, this.mouthY + 40, '#c8d0dc');
+      sfx.page(this.vol());
+      this.ctx.haptic(15);
     }
   }
 
@@ -827,6 +905,7 @@ export class SpireScene implements DeptScene {
       if (this.sorcMood !== 'singed') this.mood('scared', 0.5);
     } else this.heartT = 0;
     this.updateRitual(dt);
+    this.updateTally(dt);
     this.updateTools();
     this.moodT -= dt;
     if (this.moodT <= 0) this.sorcMood = 'calm';
@@ -1244,13 +1323,13 @@ export class SpireScene implements DeptScene {
     const W = this.core.flask.w;
     const left = this.cx - W / 2;
     const res = this.core.res;
-    const resCol = res >= 2 ? '#fff2a0' : res > 1 ? '#c070ff' : '#6a5a7a';
+    const resCol = res >= 4 ? '#fff2a0' : res > 1 ? '#c070ff' : '#6a5a7a';
     const lift = this.resPulse > 0.5 ? 1 : 0;
     if (this.queueSide) {
-      this.resText.set(`RES\nX${res.toFixed(this.rgW >= 20 ? 2 : 1)}`, resCol);
+      this.resText.set(`CHAIN\nX${Math.round(res)}`, resCol);
       this.resText.position.set(this.rgX + Math.floor((this.rgW - this.resText.width) / 2), this.mouthY + 46 - lift);
     } else {
-      this.resText.set(`RES X${res.toFixed(2)}`, resCol);
+      this.resText.set(`CHAIN X${Math.round(res)}`, resCol);
       this.resText.position.set(left + W - this.resText.width, this.queueY + 2 - lift);
     }
     this.chainText.visible = this.chainShow > 0;
@@ -1268,6 +1347,18 @@ export class SpireScene implements DeptScene {
     this.apprText.position.set(this.rgX + Math.floor((this.rgW - this.apprText.width) / 2), this.apY - 20);
     this.ceilText.set(ceil >= 2 ? `T${ceil}` : '');
     this.ceilText.position.set(this.rgX + Math.floor((this.rgW - this.ceilText.width) / 2), this.apY + this.apH + 6);
+    // R6: the apprentices copy your best flask: their output modifier over the little flask.
+    const study = studyMultOf(run, this.per);
+    const pctTxt = `${study >= 1 ? '+' : '-'}${Math.round(Math.abs(study - 1) * 100)}%`;
+    this.studyText.set(n > 0 ? pctTxt : '', study >= 1 ? '#e8c04a' : '#9c8aa8');
+    this.studyText.position.set(this.rgX + Math.floor((this.rgW - this.studyText.width) / 2), this.apY - 28);
+    // The flask score: above the dropper on tall screens, else tucked into the flask's neck.
+    const best = run.flaskBest ?? 0;
+    this.scoreText.set(best > 0 ? `FLASK ${formatNum(run.flaskScore)}  BEST ${formatNum(best)}` : `FLASK ${formatNum(run.flaskScore)}`, '#c8b8d8');
+    const top = this.ctx.content().y + 36;
+    const sy = this.queueSide || this.queueY - 9 < top ? this.mouthY + 3 : this.queueY - 9;
+    this.scoreText.position.set(Math.round(this.cx - this.scoreText.width / 2), sy);
+    this.scoreText.visible = !this.tally;
     this.pagesText.set(`${formatNum(this.per.pages)} PAGES`);
     const c = this.ctx.content();
     this.pagesText.position.set(c.x + c.w - 11 - this.pagesText.width, this.barY + 5);

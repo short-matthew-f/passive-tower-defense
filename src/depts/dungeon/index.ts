@@ -27,14 +27,14 @@ const LINES: Record<string, string[]> = {
   floor1: ['The Ossuary! So much filing.', 'Floor 2. Bounties up 20%.'],
   floor2: ['Drowned Halls. Damp ledgers.', 'Floor 3. Rogues swim. Fast.'],
   dialRaised: ['Lure %n%. Richer customers.', 'Lure %n%. Bounties up. Risk too.'],
-  chestPlaced: ['Chest placed. Watch them turn.', 'Bait set. Exposure up.'],
-  gongTip: ['No leaks keeps it climbing.', 'Perfect waves stack the Gong.'],
+  chestPlaced: ['Chest set. Fatten, then feast.', 'Bait set. Looters pay +60%.'],
+  gongTip: ['Ring early. Bigger bonus.', 'Early calls pay. If they hold.'],
   thief: ['Unbudgeted withdrawal! Chase!', 'A thief! Kill him by the door.'],
   recovered: ['Sack recovered. Plus 25%.', 'Interest collected, My Liege.'],
   champion: ['A Champion. Glare him.', 'Champion inbound. Ballistas.'],
   champSlain: ['Champion slain. Two for Infamy.', 'One Champion, fully audited.'],
   dispel: ['A Wizard voided a rune. Rude.', 'Rune dispelled. 6 seconds.'],
-  perfect: ['Perfect waves. Profit +40%.', 'Full Gong stack. Exquisite.'],
+  perfect: ['Five clean calls. Stacked.', 'Full Gong stack. Exquisite.'],
   struggle: ['Losses at %n%. Lower Lure?', 'Leaks at %n%. Ease the Lure?'],
   goodsLink: ['%good% arrived. Itemizing.', 'Imports logged. GOODS tab.'],
   infamy50: ['Body count: up 50%, My Liege.', 'Infamy at 50%. Ledger glows.'],
@@ -45,16 +45,16 @@ const LINES: Record<string, string[]> = {
   returnLong: ['While you were away: profit.', 'Itemized absence, My Liege.'],
   returnLong3d: ['Three days. I counted each.', 'Welcome back. Interest accrued.'],
   report: ['Bodies up. Leaks down. Mostly.', 'The Hoard grew. I measured.', 'Customers served. Coins kept.', 'A fine quarter, My Liege.', 'Two thieves. One got far.', 'Rounding errors: mine.'],
-  ambient: ['Rounding error detected. Mine.', 'Squires: 3 coin each. Cheap.', 'I audited the Hoard. Twice.', 'Tap coins early. +10%.', 'Moves cost 3 seconds. Not coin.', 'A leak takes 2% at most.'],
+  ambient: ['Rounding error detected. Mine.', 'Squires: 3 coin each. Cheap.', 'I audited the Hoard. Twice.', 'An early Gong pays. Mostly.', 'Moves cost 3 seconds. Not coin.', 'Looters steal more. Kill them.'],
   flavor: [
     'Rounding error detected. Mine.',
     'Squires: 3 coin each. Cheap.',
-    'Ring the Gong when it is clear.',
+    'Ring early. Greed is a budget.',
     'Flame ignores armor. Arrows: no.',
     'Hold a piece to drag it.',
     'I audited the Hoard. Twice.',
-    'Tap coins early. +10%.',
-    'A leak takes 2% at most. Rude.',
+    'Chest by a killbox: rich. Risky.',
+    'An escaped looter: a write-off.',
     'Greed runes: +50% on kills near.',
     'Eyes of Gloom stop Rogue dodges.',
   ],
@@ -62,11 +62,11 @@ const LINES: Record<string, string[]> = {
 
 // Onboarding (01 §18): five beats, first purchase at beat 2, each a player action.
 const onboarding: OnboardingStep[] = [
-  { id: 'coin', line: 'Collect promptly. +10%.', target: 'coin', gesture: 'tap', done: (s) => st(s).grabs >= 1, waitFor: () => live.coins > 0 },
+  { id: 'coin', line: 'Coins! Tap them in, My Liege.', target: 'coin', gesture: 'tap', done: (s) => st(s).grabs >= 1, waitFor: () => live.coins > 0 },
   { id: 'place', line: 'One more slit, My Liege.', target: 'slot.arrow', gesture: 'drag', dragTo: 'tile.suggested', done: (s) => st(s).placed >= 1 },
   { id: 'glare', line: 'Your Gaze. Near the visitor.', target: 'glare', gesture: 'tap', done: (s) => st(s).glares >= 1, waitFor: () => live.heroes > 0 && live.glareReady },
   { id: 'trap', line: 'Trapdoor. Directly beneath.', target: 'trap', gesture: 'tap', done: (s) => st(s).traps >= 1, waitFor: () => live.heroes > 0 && live.trapReady },
-  { id: 'gong', line: 'Ring for the next customer.', target: 'btn.gong', gesture: 'tap', done: (s) => st(s).gongs >= 1, waitFor: () => live.gongReady },
+  { id: 'gong', line: 'Ring early. Sooner is richer.', target: 'btn.gong', gesture: 'tap', done: (s) => st(s).gongs >= 1, waitFor: () => live.gongReady },
 ];
 
 const kinds = (s: DeptSave, k: M.PieceKind) => M.countKind(run(s), k);
@@ -75,7 +75,7 @@ const kinds = (s: DeptSave, k: M.PieceKind) => M.countKind(run(s), k);
 const lessons: Record<string, OnboardingStep[]> = {
   chests: [
     { id: 'place', line: 'Chests. Visitors love chests.', target: 'chest.flow', gesture: 'tap', done: (s) => run(s).bait.length >= 1 },
-    { id: 'detour', line: 'Re-routed. +40% exposure.', target: 'chest.placed', done: (s) => st(s).detours >= 1 },
+    { id: 'detour', line: 'Looters pay +60%. If caught.', target: 'chest.placed', done: (s) => st(s).detours >= 1 },
   ],
   lure: [
     { id: 'buy', line: 'Rumors bring richer visitors.', target: 'lure.up', gesture: 'tap', done: (s) => run(s).lureMax >= 1 },

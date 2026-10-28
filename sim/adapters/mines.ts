@@ -7,8 +7,11 @@
 // minimal headless DeptCtx, so costs, caps and locks match the game.
 //
 // Reference bot (02 §13, 00 §8.1): 6 taps/s; lights kegs next to >= 3 rocks, breaks Veins and
-// Geodes first, then finishes the most-cracked rock; with the drum, one judged tap per beat lands
-// in the window 85% of the time (follow-ups are normal taps), and Frenzy fires whenever earned.
+// Geodes first, then finishes the rock with the least HP left (crumbly and cracked rocks: that is
+// how a player keeps the Break Chain going); with the drum, one judged tap per beat lands in the
+// (Good) window 85% of the time and 55% of those are Perfect (follow-ups are normal taps), and
+// Frenzy fires whenever earned. Wave 1: its taps fill the Fury meter like a player's (6/s fills
+// it in ~9 s), and it taps a Gold Goblin 85% of the time, 1.5 s after he appears.
 import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';
 import type { DeptSave } from '../../src/core/types';
 import { minesEcon } from '../../src/depts/mines/def';
@@ -19,12 +22,15 @@ import { childSeed, makeRng, type Rng } from '../rng';
 import type { ActiveSession, AdapterFactory, BotGoals, SessionEnv } from '../types';
 
 export type Skill = 'novice' | 'reference' | 'expert';
-/** 02 §13: reference 6 taps/s and 85% on-beat; novice 50%, expert 95%. */
-const SKILL: Record<Skill, { taps: number; acc: number }> = {
-  novice: { taps: 4, acc: 0.5 },
-  reference: { taps: 6, acc: 0.85 },
-  expert: { taps: 7.5, acc: 0.95 },
+/** 02 §13: reference 6 taps/s and 85% on-beat; novice 50%, expert 95%. Wave 1: the share of
+ * on-beat taps inside the Perfect window, and the share of Gold Goblins caught. */
+const SKILL: Record<Skill, { taps: number; acc: number; perfect: number; gold: number }> = {
+  novice: { taps: 4, acc: 0.5, perfect: 0.3, gold: 0.6 },
+  reference: { taps: 6, acc: 0.85, perfect: 0.55, gold: 0.85 },
+  expert: { taps: 7.5, acc: 0.95, perfect: 0.75, gold: 0.95 },
 };
+/** Seconds before the bot taps a Gold Goblin. */
+const GOLD_REACT_S = 1.5;
 
 export interface MinesOpts {
   skill?: Skill;
@@ -97,11 +103,17 @@ function tapExtras(r: M.MinesRun, p: M.MinesPersistent): number {
   return m;
 }
 
+/** Share of the time a steady `taps`/s tapper spends in Fury. */
+function furyUptime(taps: number): number {
+  const fill = taps * M.FURY_PER_TAP - M.FURY_DRAIN;
+  return fill > 0 ? M.FURY_DUR / (M.FURY_DUR + 1 / fill) : 0;
+}
+
 function estimateAt(r: M.MinesRun, p: M.MinesPersistent, depth: number, taps: number, drum: boolean): number {
   const rr = { ...r, depth };
   const f = M.avgFactors(depth, r.prospectors);
   const hp = M.H(depth) * f.hp;
-  let tap = taps * M.tapExpected(rr) * tapExtras(r, p);
+  let tap = taps * M.tapExpected(rr) * tapExtras(r, p) * (1 + furyUptime(taps) * (M.FURY_MULT - 1));
   if (drum) {
     const beats = 1 / M.beatPeriod(depth);
     tap *= 1 + ((0.85 * beats) / taps) * (M.beatMult(rr.drumhead) * 1.2 - 1);
@@ -134,6 +146,8 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
   const sk = SKILL[opts.skill ?? 'reference'];
   const taps = opts.tapsPerSec ?? sk.taps;
   const acc = opts.beatAccuracy ?? sk.acc;
+  const perfectShare = sk.perfect;
+  const goldShare = sk.gold;
   let sessions = 0;
   const counters = { liveS: 0 };
 
@@ -161,6 +175,10 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
       p.gemFrac = g - whole;
     }
     const wall = new Wall(save, { earn: (b) => env.earn(b), raiseSkill: (l) => env.raiseSkill(l), rnd });
+    // A return after an absence finds a Gold Goblin waiting (scene.ts does the same on entry).
+    if (p.gemAt > 0 && (env.now() - p.gemAt) / 1000 >= M.GOLD_AWAY_S && r.stats.rocks >= M.GOLD_ROCKS) wall.queueGold(3);
+    let goldSeen: object | null = null;
+    let goldTry = false;
     let tapAcc = 0;
     let gateMode = false;
     const tiles = wall.tiles;
@@ -180,7 +198,7 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
         } else if (t.kind === 'vein' || t.kind === 'geode' || t.kind === 'mother') {
           if (!shiny || t.hp < shiny.hp) shiny = t;
         } else if (t.kind !== null && t.kind !== 'bedrock') {
-          if (!low || t.hp / t.maxHp < low.hp / low.maxHp) low = t;
+          if (!low || t.hp < low.hp) low = t;
         }
       }
       return keg ?? shiny ?? low;
@@ -191,7 +209,8 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
       if (drumActive(p)) {
         const k = Math.round((wall.clock - p.latency) / wall.period);
         // The bot aims its first tap of each beat at the boom and lands it acc of the time.
-        beat = { k, inWindow: k !== wall.lastJudged && rnd() < acc };
+        const inWindow = k !== wall.lastJudged && rnd() < acc;
+        beat = { k, inWindow, perfect: inWindow && rnd() < perfectShare };
       }
       if (!t) {
         r.stats.taps++;
@@ -202,6 +221,14 @@ export const createMines = (opts: MinesOpts = {}): AdapterFactory => (seed) => {
 
     function stepH(h: number): void {
       wall.step(h);
+      // Gold Goblin: decide once per goblin whether this player catches him, then tap him after
+      // the reaction time.
+      const g = wall.gold;
+      if (g !== goldSeen) {
+        goldSeen = g;
+        goldTry = !!g && !opts.passive && rnd() < goldShare;
+      }
+      if (g && goldTry && M.GOLD_LIFE - g.life >= GOLD_REACT_S) wall.catchGold();
       // Passive probe: tap only until the first goblin is hired, then leave the crew alone.
       tapAcc += opts.passive && M.goblins(r) > 0 ? 0 : taps * h;
       while (tapAcc >= 1) {

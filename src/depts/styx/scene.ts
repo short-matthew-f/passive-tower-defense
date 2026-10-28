@@ -16,6 +16,8 @@ import { BAIT_COLOR, EEL, EEL_PAL, IMP, IMP_PAL, JAR, OVERLORD, OVERLORD_PAL, PI
 import { sfx } from './sfx';
 import { anyAffordable, buildGroups } from './upgrades';
 import { destroyTree } from '../../ui/destroy';
+import type { Juice } from '../../ui/juice';
+import { sfx as coreSfx } from '../../core/audio';
 
 const SURF = 48;
 const CTRL = 90;
@@ -28,6 +30,7 @@ const RED = M.RED;
 const START_TENSION = 25;
 const KEEP_S = 5; // the KEEP / SELL offer for a trophy-worthy catch
 const TRAIL_S = 60; // an escaped rare's glowing trail (03 §4)
+const SCOUT_S = 240; // Night Order SCOUT A RARE: the spotted soul's trail
 const RITUAL_S = 6;
 const RITUAL_SOULS = 6;
 
@@ -111,6 +114,11 @@ interface Reel {
   beat: number; // the Choirmaster's rhythm
   dived: boolean;
   rip: Ripper | null;
+  zt: number; // seconds into the reel (the gold band's clock)
+  zseed: number;
+  zc: number; // the gold band's centre now (tension %)
+  inZ: boolean; // holding with the tension inside it
+  goldT: number; // seconds reeled in the gold
 }
 
 interface Fly {
@@ -121,7 +129,23 @@ interface Fly {
   value: number;
   first: boolean;
   clean: boolean;
+  heft: number;
+  stars: number;
+  record: boolean;
 }
+
+/** The reveal card (Wave 1, research R3): name, stars, heft, NEW RECORD. */
+interface Card {
+  t: number;
+  max: number;
+  blink: boolean;
+}
+
+const STAR = ['..x..', 'xxxxx', '.xxx.', '.x.x.'];
+const CARD_W = 120;
+const CARD_H = 28;
+const TIER_COL = [0, 0xb07040, 0xc8d0dc, 0xffd040];
+const gaussRnd = () => Math.sqrt(-2 * Math.log(Math.max(1e-9, Math.random()))) * Math.cos(2 * Math.PI * Math.random());
 
 interface Pending {
   sp: M.Species;
@@ -204,6 +228,14 @@ export class StyxScene implements DeptScene {
   private aimText = new PixelText('', '#f4e8c1');
   private bannerText = new PixelText('', C.goldText);
   private ripG = new Graphics(soulArt('ripper', 0));
+  // the reveal card (positioned on layout)
+  private cardBox = new Container();
+  private cardG = new Graphics();
+  private cardIcon = new Graphics(soulArt('clerk', 0));
+  private cardName = new PixelText('', C.ink);
+  private cardSub = new PixelText('', C.inkDim);
+  private cardStamp = new PixelText('', '#ff6050');
+  private card: Card | null = null;
 
   // ui (rebuilt on layout)
   private status = new PixelText('', C.ink);
@@ -311,7 +343,11 @@ export class StyxScene implements DeptScene {
     this.world.addChild(this.bg, this.skiff, this.raft, this.soulLayer, this.ripG, this.fog, this.lineG, this.fx, this.ritualLayer, this.aimText);
     this.world.mask = this.worldMask;
     this.world.eventMode = 'none';
-    this.root.addChild(this.world, this.worldMask, this.riverHit, this.over, this.bannerText, this.ui, this.modal);
+    this.cardBox.addChild(this.cardG, this.cardIcon, this.cardName, this.cardSub, this.cardStamp);
+    this.cardBox.eventMode = 'none';
+    this.cardBox.visible = false;
+    this.ownedG.push(this.cardG);
+    this.root.addChild(this.world, this.worldMask, this.riverHit, this.over, this.bannerText, this.cardBox, this.ui, this.modal);
     this.root.eventMode = 'static';
 
     this.riverHit.eventMode = 'static';
@@ -322,10 +358,41 @@ export class StyxScene implements DeptScene {
 
     this.buildLayout();
     for (let b = 0; b < this.run.bands; b++) for (let i = 0; i < PER_BAND; i++) this.spawnSoul(b, false);
+    this.takeScout();
+  }
+
+  /** Night Order SCOUT A RARE: the soul Pilk spotted waits as a glowing trail (an escaped rare's
+   * wake, 03 §4) for a few minutes; cast into it and it is keen to bite. */
+  private takeScout(): void {
+    const sc = this.per.scout;
+    if (!sc) return;
+    delete this.per.scout;
+    const sp = M.SPECIES_BY_ID[sc.id];
+    if (!sp || sc.band >= this.run.bands || this.tutorial) return;
+    const x = this.riverL + (0.3 + 0.5 * Math.random()) * (this.riverR - this.riverL);
+    this.trail = { sp, band: sc.band, x, d: sc.band * M.BAND_PX + M.BAND_PX / 2, t: SCOUT_S };
+    this.showFlash(`PILK: ${sp.name.toUpperCase()} THERE! CAST!`);
+    this.ctx.saveSoon();
   }
 
   private get W(): number {
     return this.run.wrath;
+  }
+
+  /** The shared juice kit (ui/juice.ts): shake, hit-stop, sized pops, coins to the bank. */
+  private get juice(): Juice | undefined {
+    return (this.ctx.game as { juice?: Juice }).juice;
+  }
+
+  /** A sized "+N" pop (the juice kit), or the plain float without it. */
+  private popValue(amount: number, x: number, y: number, color: string, coins = 0): void {
+    const j = this.juice;
+    if (!j) {
+      this.ctx.float(`+${formatNum(amount, this.notation)}`, x, y, color);
+      return;
+    }
+    const tier = j.popValue(amount, x, y, { color: color === C.goldText ? undefined : color });
+    if (coins > 0) j.coinFly(x, y + 6, coins + tier * 2);
   }
 
   private get vol(): number {
@@ -705,9 +772,8 @@ export class StyxScene implements DeptScene {
   }
 
   private sampleBite(): number {
-    const mean = M.biteWait(this.run.lv.lantern);
     if (this.tutorial) return 1.2;
-    return Math.max(0.6, -Math.log(1 - Math.random() * 0.95) * mean);
+    return M.biteSample(M.biteWait(this.run.lv.lantern), Math.random());
   }
 
   private twitch(): void {
@@ -771,13 +837,9 @@ export class StyxScene implements DeptScene {
 
   private beginNibble(s: Soul): void {
     s.state = 'nibble';
-    let fakes = 0;
-    if (!this.tutorial) {
-      const p = M.fakeChance(this.W);
-      while (fakes < 2 && Math.random() < p) fakes++;
-      if (s.sp.behavior === 'singer') fakes++;
-    }
-    this.nib = { soul: s, fakes, step: 'nib', t: 0.5 + Math.random() * 0.4, twin: s.sp.behavior === 'twin' ? 1 : 0 };
+    // A COUNT of fake dips (Wave 1): the real plunge comes by the 5th nibble at the latest.
+    const fakes = this.tutorial ? 0 : M.fakeCount(this.W, s.sp.behavior === 'singer', Math.random());
+    this.nib = { soul: s, fakes, step: 'nib', t: M.NIB_S[0] + Math.random() * M.NIB_S[1], twin: s.sp.behavior === 'twin' ? 1 : 0 };
     this.phase = 'nibble';
     this.addRipple(this.hook.x, this.waterY, 0xd8e0f8);
   }
@@ -809,7 +871,7 @@ export class StyxScene implements DeptScene {
       }
     } else if (n.step === 'dip') {
       n.step = 'nib';
-      n.t = 0.4 + Math.random() * 0.5;
+      n.t = M.NIB_AFTER_S[0] + Math.random() * M.NIB_AFTER_S[1];
     } else {
       // Missed the window: the soul steals the nibble (the tutorial Clerk simply bites again).
       if (this.tutorial) {
@@ -867,8 +929,17 @@ export class StyxScene implements DeptScene {
     const dist0 = this.hook.d + 24;
     const thrN = this.tutorial ? 1 : s.sp.thrashes + M.wrathThrashes(this.W);
     const rip: Ripper | null = !this.tutorial && Math.random() < M.ripperChance(this.W) ? { at: 0.25 + Math.random() * 0.45, warn: -1, dir: Math.random() < 0.5 ? 1 : -1, after: 0 } : null;
-    this.reel = { soul: s, dist0, dist: dist0, tension: START_TENSION, over: 0, zero: 0, thrIdx: 0, thrN, tele: 0, thr: 0, teleported: false, sway: Math.random() * 6, red: false, pair: false, beat: 1.4, dived: false, rip };
+    this.reel = { soul: s, dist0, dist: dist0, tension: START_TENSION, over: 0, zero: 0, thrIdx: 0, thrN, tele: 0, thr: 0, teleported: false, sway: Math.random() * 6, red: false, pair: false, beat: 1.4, dived: false, rip, zt: 0, zseed: Math.random(), zc: 45, inZ: false, goldT: 0 };
+    // The gold band's micro-lesson on the first reel after the tutorial catch.
+    if (!this.tutorial && !this.ctx.seen('styx.goldLesson')) {
+      this.ctx.markSeen('styx.goldLesson');
+      this.ctx.lesson('gold');
+    }
     this.showFlash(s.sp.rarity === 'legendary' ? "HERO'S ECHO!!" : 'HOOKED!');
+    // HOOKED! (fun plan A2): a small shake and a beat of hit-stop; more for the big ones.
+    const big = M.RARE_PLUS(s.sp.rarity);
+    this.juice?.shake(big ? 2 : 1, { dur: big ? 0.25 : 0.12 });
+    this.juice?.hitStop(big ? 80 : 40);
     sfx.thunk(this.vol);
     this.ctx.haptic(15);
     this.burst(this.hook.x, this.depthY(this.hook.d), 8, 0xfff0a0, 30, 0);
@@ -906,12 +977,22 @@ export class StyxScene implements DeptScene {
     const thrashing = R.thr > 0;
     const pullK = this.tutorial ? 0.5 : (sp.pull / 30) * M.wrathPull(this.W);
     const cap = M.lineCap(this.run.lv.line);
+    // The gold band (Wave 1): the soul's comfort zone moves on the tension track.
+    R.zt += dt;
+    R.zc = this.tutorial ? 45 : M.zoneCenter(sp.behavior, R.zt, R.zseed, thrashing);
+    R.inZ = false;
     if (this.holding) {
       const rise = M.REEL_RISE + (thrashing ? 2 * M.REEL_RISE * pullK : 0);
       R.tension += (rise / cap) * dt;
       if (R.tension < RED) {
         const slow = (sp.behavior === 'heavy' || sp.behavior === 'leviathan') && thrashing ? 0.6 : 1;
-        R.dist -= M.reelSpeed(this.run.lv.reel) * slow * dt;
+        R.inZ = M.inZone(R.tension, R.zc);
+        const zk = this.tutorial ? 1 : R.inZ ? M.ZONE_IN : M.ZONE_OUT;
+        if (R.inZ) {
+          R.goldT += dt;
+          if (R.goldT > 1.5 && !this.ctx.seen('styx.gold')) this.ctx.markSeen('styx.gold');
+        }
+        R.dist -= M.reelSpeed(this.run.lv.reel) * slow * zk * dt;
         this.clickT -= dt;
         if (this.clickT <= 0) {
           this.clickT = 0.09;
@@ -1064,7 +1145,12 @@ export class StyxScene implements DeptScene {
     const r = this.run;
     const gilded = r.bait === 'gilded';
     const clean = !R.red && !this.tutorial;
+    // The catch roll (Wave 1): Heft and stars (CLEAN +1 star), and the Codex records.
+    const heft = M.rollHeft(gaussRnd());
+    const stars = M.rollStars(Math.random(), clean, r.bait);
+    const rec = M.recordCatch(this.per, s.sp.id, heft, stars);
     const value =
+      M.catchMult(heft, stars) *
       M.soulBase(s.sp, band) *
       M.comboMult(r.combo) *
       M.wrathActive(this.W) *
@@ -1074,7 +1160,10 @@ export class StyxScene implements DeptScene {
       (gilded ? M.gildedMult(this.ctx.save.imports?.potions ?? 0) : 1);
     const first = !(this.per.codex[s.sp.id] > 0);
     s.state = 'fly';
-    this.fly = { soul: s, x0: s.x, y0: this.depthY(s.d), t: 0, value, first, clean };
+    this.fly = { soul: s, x0: s.x, y0: this.depthY(s.d), t: 0, value, first, clean, heft, stars, record: rec.heft || rec.stars };
+    // A beat of hit-stop on the land (the juice kit), bigger for rares.
+    this.juice?.hitStop(M.RARE_PLUS(s.sp.rarity) ? 90 : 40);
+    this.nudge = 1;
     this.phase = 'land';
     this.addRipple(s.x, this.waterY, 0xc8d8f0);
     this.burst(s.x, this.waterY, 10, 0xa8c0e0, 50, 80);
@@ -1114,7 +1203,9 @@ export class StyxScene implements DeptScene {
       this.ctx.markSeen('styx.cleanRare');
       this.ctx.say('clean');
     }
-    if (first) this.ctx.saveSoon();
+    if (first || rec.heft || rec.stars) this.ctx.saveSoon();
+    // Pilk's quips (research R3): a one-liner about a quarter of the time (Full chattiness).
+    if (!first && !M.RARE_PLUS(s.sp.rarity) && Math.random() < 0.25) this.ctx.say(`quip.${s.sp.id}`);
   }
 
   private finishFly(): void {
@@ -1128,6 +1219,16 @@ export class StyxScene implements DeptScene {
     sfx.land(this.vol, this.run.combo);
     this.ctx.haptic(10);
     if (f.clean) sfx.clean(this.vol);
+    this.showCard(s.sp, f.heft, f.stars, f.record ? 'NEW RECORD!' : f.first ? 'NEW!' : '', f.record ? 3.2 : 2.4);
+    if (s.sp.rarity === 'legendary' || f.stars >= 3) coreSfx.bigWin();
+    if (f.record) {
+      sfx.fanfare(this.vol);
+      this.juice?.shake(2, { dur: 0.25 });
+      this.juice?.flash(this.cardX(), this.cardY(), CARD_W, CARD_H, 0xffe070, 0.3, 0.5);
+      this.ctx.haptic(20);
+      this.burst(this.cardX() + CARD_W - 18, this.cardY() + 8, 14, 0xff6050, 40, 0);
+      if (!f.first && Math.random() < 0.5) this.ctx.say('record');
+    }
     // A trophy-worthy catch waits on the dock: KEEP it for the Wall, or SELL it (03 §6.4).
     const tr = { id: s.sp.id, band: s.band };
     if (!this.tutorial && M.trophyWorthy(this.per, tr)) {
@@ -1140,7 +1241,7 @@ export class StyxScene implements DeptScene {
       }
     } else {
       const credited = this.ctx.earn(f.value);
-      this.ctx.float(`+${formatNum(credited, this.notation)}`, this.jar.x + 3, this.jar.y - 8, C.goldText);
+      this.popValue(credited, this.jar.x + 3, this.jar.y - 8, C.goldText, 2);
       for (let i = 0; i < 4; i++) sfx.coin(this.vol, i);
       if (f.clean) this.showFlash(`CLEAN! X${M.CLEAN_MULT[s.sp.rarity].toFixed(2)}`);
     }
@@ -1186,7 +1287,7 @@ export class StyxScene implements DeptScene {
     if (!p) return;
     this.pending = null;
     const credited = this.ctx.earn(p.value);
-    this.ctx.float(`+${formatNum(credited, this.notation)}`, this.jar.x + 3, this.jar.y - 8, C.goldText);
+    this.popValue(credited, this.jar.x + 3, this.jar.y - 8, C.goldText, 2);
     for (let i = 0; i < 4; i++) sfx.coin(this.vol, i);
     this.ctx.markSeen('styx.sold');
   }
@@ -1398,7 +1499,7 @@ export class StyxScene implements DeptScene {
     const value = (M.COMMON_BASE[band] / 5) * M.wispMult(this.run.lv.wispnet) * M.wrathActive(this.W) * M.legendMult(this.run);
     const got = this.ctx.earn(value);
     this.run.stats.wisps++;
-    this.ctx.float(`+${formatNum(got, this.notation)}`, w.x, w.y - 8, '#a0f0f0');
+    this.popValue(got, w.x, w.y - 8, '#a0f0f0');
     this.burst(w.x, w.y, 10, 0xa0f0f0, 50, 0);
     sfx.chime(this.vol);
     this.ctx.haptic(8);
@@ -1521,6 +1622,7 @@ export class StyxScene implements DeptScene {
     this.updateParts(dt);
     this.updateRitual(dt);
     this.updateZoom(dt);
+    this.updateCard(dt);
     this.skiffX += this.skiffDir * dt * 0.012;
     if (this.skiffX > 0.82 || this.skiffX < 0.42) this.skiffDir = -this.skiffDir;
     this.skiff.position.set(Math.round(this.cx + this.cw * this.skiffX), this.waterY - 2 + Math.round(Math.sin(this.t * 1.5) * 0.6));
@@ -1614,7 +1716,8 @@ export class StyxScene implements DeptScene {
       const n = this.nib;
       let by = this.waterY - 1;
       if (this.hook.jig > 0) by -= 1;
-      if (n?.step === 'dip') by += 2;
+      // Wrath makes a fake dip look more like the plunge (M.fakeTell): 1 px bob -> 2 px dip.
+      if (n?.step === 'dip') by += M.fakeTell(this.W) >= 0.5 ? 2 : 1;
       if (n?.step === 'plunge') by += 3;
       bobY = by;
       const pale = this.phase === 'nibble';
@@ -1633,7 +1736,8 @@ export class StyxScene implements DeptScene {
       g.rect(hx - 1, by - 1, 3, 2).fill(0xe04040);
       g.rect(hx - 1, by + 1, 3, 1).fill(0xf4f4f4);
       if (n) {
-        const ringC = n.step === 'plunge' ? (Math.floor(this.t * 16) % 2 ? 0xfff070 : 0xffffff) : 0xb8c8f0;
+        const lie = n.step === 'dip' && M.fakeTell(this.W) > 0.3 && Math.floor(this.t * 16) % 2 === 0;
+        const ringC = n.step === 'plunge' ? (Math.floor(this.t * 16) % 2 ? 0xfff070 : 0xffffff) : lie ? 0xd8c080 : n.step === 'dip' ? 0x9aa0b4 : 0xb8c8f0;
         const rr = n.step === 'plunge' ? 6 : 4;
         this.ring(g, hx, by, rr, ringC, n.step === 'plunge' ? 1 : 0.6);
       }
@@ -1650,7 +1754,7 @@ export class StyxScene implements DeptScene {
     } else if (R) {
       const sx = Math.round(R.soul.x);
       const sy = Math.round(this.depthY(R.soul.d)) - 3;
-      const col = this.tensionColor(tension);
+      const col = R.inZ && Math.floor(this.t * 8) % 2 ? 0xffe070 : this.tensionColor(tension);
       const sag = Math.max(0, (60 - tension) / 6);
       const wob = tension > 50 ? ((tension - 50) / 50) * 1.8 : 0;
       this.plotLine(g, tipX, tipY, sx, sy, sag, wob, col);
@@ -1904,10 +2008,31 @@ export class StyxScene implements DeptScene {
         [a.y, b.y] = [b.y, a.y];
       }
       this.ritual = { souls, t: 0, keepers, kept: 0, wrong: 0, done: resolve };
+      this.netHighlight(haul);
       sfx.splash(this.vol);
       this.say('ritual', {});
       this.burst(this.cx + this.cw * this.skiffX, this.waterY, 12, 0xa8c0e0, 40, 60);
     });
+  }
+
+  /** Pilk's pick of the night (Wave 1, research R9): the haul opens with one highlighted soul,
+   * rolled as the best of the netted catch (cosmetic: the haul itself is already credited). */
+  private netHighlight(haul: number): void {
+    const per = M.idleObols(this.run, this.per) / Math.max(1e-9, M.netRate(this.run)); // Obols per netted soul
+    const n = Math.max(1, Math.min(60, Math.round(haul / Math.max(1e-9, per * this.ctx.mult()))));
+    const { top, depth } = M.netWindow(this.run.bands, this.run.lv.poles);
+    let pick: { sp: M.Species; band: number } | null = null;
+    const rank: Record<M.Rarity, number> = { common: 0, uncommon: 1, rare: 2, legendary: 3 };
+    for (let i = 0; i < n; i++) {
+      const band = Math.max(0, Math.min(this.run.bands - 1, Math.floor((top + Math.random() * Math.max(1, depth)) / M.BAND_PX)));
+      const sp = M.speciesFor(band, M.rollRarity(M.RARITY_W, Math.random()));
+      if (!M.netKnows(this.per, sp)) continue;
+      if (!pick || rank[sp.rarity] > rank[pick.sp.rarity]) pick = { sp, band };
+    }
+    if (!pick) pick = { sp: M.speciesFor(0, 'common'), band: 0 };
+    const heft = Math.max(M.rollHeft(gaussRnd()), M.rollHeft(gaussRnd()), M.rollHeft(gaussRnd()));
+    const stars = Math.max(M.rollStars(Math.random(), false), M.rollStars(Math.random(), false));
+    this.showCard(pick.sp, heft, stars, '', 3.4, `PILK'S PICK TONIGHT`);
   }
 
   private ritualTap(x: number, y: number): void {
@@ -1985,6 +2110,79 @@ export class StyxScene implements DeptScene {
     rt.done(score);
   }
 
+  // ---------- the reveal card (Wave 1) ----------
+
+  private cardX(): number {
+    const w = this.riverR - this.riverL;
+    return Math.round(this.riverL + Math.max(0, (w - CARD_W) / 2));
+  }
+
+  private cardY(): number {
+    // In the dusk sky above the river: never over the hook or the reel.
+    return Math.max(this.top + 4, this.waterY - CARD_H - 16);
+  }
+
+  /** Pops the reveal card: soul, name, stars, heft and a stamp ('NEW RECORD!', 'NEW!', a tag). */
+  private showCard(sp: M.Species, heft: number, stars: number, stamp: string, dur: number, tag = ''): void {
+    const g = this.cardG.clear();
+    const w = Math.min(CARD_W, this.riverR - this.riverL + 20);
+    const rcol = sp.rarity === 'legendary' ? 0xffe070 : sp.rarity === 'rare' ? 0xc0a0ff : sp.rarity === 'uncommon' ? 0x8fd14f : 0x8a9cb0;
+    g.rect(0, 0, w, CARD_H).fill(0x0a0410);
+    g.rect(1, 1, w - 2, CARD_H - 2).fill(0x1c2030);
+    g.rect(1, 1, w - 2, 1).fill(rcol);
+    g.rect(1, CARD_H - 2, w - 2, 1).fill({ color: rcol, alpha: 0.5 });
+    // the soul on a little plinth
+    g.rect(3, 4, 18, 20).fill(0x262e42);
+    const tier = M.codexTier(this.per.codex[sp.id] ?? 0);
+    if (tier > 0) {
+      g.rect(3, 4, 18, 1).fill(TIER_COL[tier]);
+      g.rect(3, 23, 18, 1).fill(TIER_COL[tier]);
+      g.rect(3, 4, 1, 20).fill(TIER_COL[tier]);
+      g.rect(20, 4, 1, 20).fill(TIER_COL[tier]);
+    }
+    this.cardIcon.context = soulArt(sp.id, 0);
+    const sz = soulSize(sp.id);
+    this.cardIcon.scale.set(sz.w > 14 || sz.h > 14 ? 1 : 1.5);
+    this.cardIcon.position.set(12, 14);
+    // stars: gold for earned, dim for the rest
+    for (let i = 0; i < 3; i++) drawSprite(g, STAR, { x: i < stars ? 0xffd040 : 0x3a3448 }, w - 20 + i * 6 - 1, 5);
+    this.cardName.set(sp.name.toUpperCase(), sp.rarity === 'legendary' ? '#ffe070' : sp.rarity === 'rare' ? '#c0a0ff' : sp.rarity === 'uncommon' ? '#8fd14f' : C.ink);
+    this.cardName.position.set(24, 5);
+    if (this.cardName.width > w - 46) this.cardName.set(sp.name.split(' ').slice(-1)[0].toUpperCase());
+    const best = this.per.best?.[sp.id];
+    const st = M.heftSt(sp, heft);
+    this.cardSub.set(tag || `${st} ST ${M.STAR_NAMES[stars]}`, tag ? C.inkDim : C.ink);
+    this.cardSub.position.set(24, 13);
+    if (stamp) this.cardStamp.set(stamp, stamp === 'NEW RECORD!' ? '#ff6050' : '#8fd14f');
+    else this.cardStamp.set(best ? `BEST ${M.heftSt(sp, best.h)} ST` : '', C.inkDim);
+    this.cardStamp.position.set(24, 20);
+    if (tag) {
+      // a tagged card (Pilk's pick of the night) shows the heft on the third line
+      this.cardStamp.set(`${st} ST ${M.STAR_NAMES[stars]}`, C.goldText);
+    }
+    this.cardBox.position.set(this.cardX(), this.cardY());
+    this.card = { t: 0, max: dur, blink: !!stamp };
+    this.cardBox.visible = true;
+  }
+
+  private updateCard(dt: number): void {
+    const c = this.card;
+    if (!c) return;
+    c.t += dt;
+    if (c.t >= c.max) {
+      this.card = null;
+      this.cardBox.visible = false;
+      return;
+    }
+    // punch in, hold, fade out; the stamp blinks
+    const k = c.t < 0.12 ? 1.25 - (c.t / 0.12) * 0.25 : 1;
+    const w = this.cardG.width;
+    this.cardBox.scale.set(k);
+    this.cardBox.position.set(Math.round(this.cardX() - ((k - 1) * w) / 2), Math.round(this.cardY() - ((k - 1) * CARD_H) / 2));
+    this.cardBox.alpha = Math.min(1, (c.max - c.t) / 0.35);
+    this.cardStamp.visible = !c.blink || c.t < 0.5 || Math.floor(c.t * 5) % 3 !== 0;
+  }
+
   // ---------- ui ----------
 
   private showFlash(text: string): void {
@@ -2013,7 +2211,9 @@ export class StyxScene implements DeptScene {
         if (R.rip && R.rip.warn >= 0) return R.tension > M.RIPPER_TAUT ? 'RIPPER! LET GO!' : 'SLACK... LET IT PASS';
         if (R.tension >= RED) return 'RED! EASE OFF!';
         if (R.tele > 0 || R.thr > 0) return 'THRASH! LET GO!';
-        return this.holding ? (R.red ? 'REELING...' : 'REELING CLEAN...') : 'HOLD TO REEL';
+        if (!this.holding) return R.tension < R.zc - M.ZONE_W / 2 ? 'HOLD! INTO THE GOLD' : 'HOLD TO REEL';
+        if (R.inZ) return R.red ? 'IN THE GOLD!' : 'IN THE GOLD! CLEAN...';
+        return R.tension > R.zc ? 'EASE OFF INTO THE GOLD' : 'MORE! INTO THE GOLD';
       case 'land':
         return 'LANDED!';
       case 'rerig':
@@ -2027,7 +2227,7 @@ export class StyxScene implements DeptScene {
     const shown = measure(line).w > maxW ? line.slice(0, Math.floor((maxW + 1) / 4)) : line;
     const hot = this.phase === 'nibble' && this.nib?.step === 'plunge';
     const red = this.reel && (this.reel.tension >= RED || this.reel.tele > 0 || this.reel.thr > 0 || (this.reel.rip && this.reel.rip.warn >= 0));
-    this.status.set(shown, hot || this.ritual ? '#fff070' : red ? '#e05050' : this.pending ? C.goldText : C.ink);
+    this.status.set(shown, hot || this.ritual ? '#fff070' : red ? '#e05050' : this.pending || (this.phase === 'reel' && this.reel?.inZ) ? C.goldText : C.ink);
     this.status.x = this.cx + Math.floor((this.cw - this.status.width) / 2);
 
     // REEL disk with the tension arc around it
@@ -2065,10 +2265,17 @@ export class StyxScene implements DeptScene {
     const ten = this.reel ? this.reel.tension : 0;
     const segs = 48;
     const lit = Math.round((Math.min(100, ten) / 100) * segs);
+    // The gold band on the arc (Wave 1): dim gold where it sits, bright where the line is in it.
+    const zc = this.reel ? this.reel.zc : -100;
+    const inZ = !!this.reel?.inZ;
     for (let i = 0; i < segs; i++) {
       const a = -Math.PI / 2 + (i / segs) * Math.PI * 2;
-      const col = i < lit ? this.tensionColor((i / segs) * 100) : 0x2a2030;
+      const pct = ((i + 0.5) / segs) * 100;
+      const gold = Math.abs(pct - zc) <= M.ZONE_W / 2;
+      const col = i < lit ? (gold ? (inZ && pulse ? 0xfff4a0 : 0xffd040) : this.tensionColor((i / segs) * 100)) : gold ? 0x7a6020 : 0x2a2030;
       for (const rr of [r + 3, r + 4]) d.rect(Math.round(dcx + Math.cos(a) * rr), Math.round(dcy + Math.sin(a) * rr), 1, 1).fill(col);
+      // an outer gold rim marks where the band sits, lit or not
+      if (gold) d.rect(Math.round(dcx + Math.cos(a) * (r + 6)), Math.round(dcy + Math.sin(a) * (r + 6)), 1, 1).fill(inZ ? 0xfff4a0 : 0xd0a030);
     }
     // the red line on the arc
     const ra = -Math.PI / 2 + (RED / 100) * Math.PI * 2;
@@ -2238,6 +2445,11 @@ export class StyxScene implements DeptScene {
 
   // ---------- manager hooks ----------
 
+  /** Toasts dodge the reveal card while it is up. */
+  avoidRects(): Rect[] {
+    return this.card ? [{ x: this.cardX(), y: this.cardY(), w: CARD_W, h: CARD_H }] : [];
+  }
+
   isIntense(): boolean {
     return this.phase === 'nibble' || this.phase === 'reel' || !!this.ritual || (this.phase === 'land' && this.zoom > 0);
   }
@@ -2330,13 +2542,24 @@ export class StyxScene implements DeptScene {
     m.addChild(...tabs);
     const ty = y + 22;
     if (page < wallPage) {
-      const title = new PixelText(`SOUL CODEX  ${M.codexCount(this.per)}/${M.SPECIES.length}`, C.goldText);
+      // The Codex as a map (Wave 1, research R4): silhouettes with rumoured hints for the gaps,
+      // bests and bronze / silver / gold frames (1 / 10 / 50) for the souls you know, and which
+      // ones the netters can bag (only souls landed by hand, plus the commons).
+      const title = new PixelText(`SOUL CODEX ${M.codexCount(this.per)}/${M.SPECIES.length}  NETS KNOW ${M.netKnownCount(this.per)}`, C.goldText);
       title.position.set(x + 6, ty);
       m.addChild(title);
+      const fit = (t: string, maxW: number) => (measure(t).w > maxW ? t.slice(0, Math.max(1, Math.floor((maxW + 1) / 4))) : t);
       M.SPECIES.slice(page * rows, page * rows + rows).forEach((sp, i) => {
         const ry = ty + 10 + i * rowH;
         const n = this.per.codex[sp.id] ?? 0;
         const bgr = new Graphics().rect(x + 3, ry, w - 6, rowH - 1).fill(i % 2 ? 0x22283a : 0x262e42);
+        const tier = M.codexTier(n);
+        if (tier > 0) {
+          const fc = TIER_COL[tier];
+          bgr.rect(x + 4, ry + 1, 14, 1).fill(fc).rect(x + 4, ry + rowH - 3, 14, 1).fill(fc).rect(x + 4, ry + 1, 1, rowH - 3).fill(fc).rect(x + 17, ry + 1, 1, rowH - 3).fill(fc);
+        }
+        const best = this.per.best?.[sp.id];
+        if (n > 0 && best) for (let k = 0; k < 3; k++) drawSprite(bgr, STAR, { x: k < best.s ? 0xffd040 : 0x3a3448 }, x + w - 22 + k * 6, ry + 3);
         m.addChild(bgr);
         const sz = soulSize(sp.id);
         const icon = new Graphics(soulArt(sp.id, 0));
@@ -2344,16 +2567,15 @@ export class StyxScene implements DeptScene {
         if (sz.h > 11 || sz.w > 11) icon.scale.set(0.7);
         if (n <= 0) {
           icon.tint = 0x000000;
-          icon.alpha = 0.6;
+          icon.alpha = 0.75;
         }
         m.addChild(icon);
-        const rar = sp.rarity.toUpperCase();
-        const band = sp.band < 0 ? 'ANY' : M.BANDS[sp.band].name;
-        const val = sp.band < 0 ? '50X' : formatNum(sp.base, this.notation);
         const col = sp.rarity === 'legendary' ? '#ffe070' : sp.rarity === 'rare' ? '#c0a0ff' : sp.rarity === 'uncommon' ? '#8fd14f' : C.ink;
-        const t1 = new PixelText(n > 0 ? `${sp.name.toUpperCase()} X${n}` : '???', n > 0 ? col : '#7a6e80');
+        const tw = w - 30 - (n > 0 && best ? 20 : 0);
+        const t1 = new PixelText(fit(n > 0 ? `${sp.name.toUpperCase()} X${n}` : `??? ${sp.rarity.toUpperCase()}`, tw), n > 0 ? col : '#7a6e80');
         t1.position.set(x + 22, ry + 2);
-        const t2 = new PixelText(n > 0 ? wrap(`${sp.note}`, w - 30).split('\n')[0] : `${rar}, ${band}  {coin}${val}`, C.inkDim);
+        const line2 = n > 0 ? (best ? `BEST ${M.heftSt(sp, best.h)}ST ${sp.note}` : sp.note) : M.HINTS[sp.id] ?? '';
+        const t2 = new PixelText(fit(line2, w - 30), n > 0 ? C.inkDim : '#8a7ea0');
         t2.position.set(x + 22, ry + 9);
         m.addChild(t1, t2);
       });
@@ -2424,7 +2646,7 @@ export class StyxScene implements DeptScene {
     this.bandLabels = [];
     // Pooled soul graphics share cached contexts: detach them before destroying.
     for (const s of this.souls) this.pool.push(s.g);
-    for (const g of [...this.pool, this.ripG]) {
+    for (const g of [...this.pool, this.ripG, this.cardIcon]) {
       g.parent?.removeChild(g);
       g.destroy({ context: false });
     }

@@ -64,12 +64,20 @@ export const granny: ManagerDef = {
     goldTriple: ['Three gold clinks! Show-off.', 'Golden triple, dearie!'],
     batch: ['Another batch for you!', 'Bottle it, toadlings!', 'Smells like victory. And feet.'],
     hopper: ['Tip the hopper, dearie!', 'Backlog! Tip it in!'],
+    // Bubble Reach / Bubble Fever (Wave 1).
+    feverFirst: ['Three alike! BUBBLE FEVER!', 'Fever! Every bucket pays up!'],
+    fever: ['Fever! Stir, stir, stir!', 'Bubbles! The pot is giddy.', 'Hot pot! Toss, dearie!'],
+    reach: ['Two alike... come on!', 'Ooh, a REACH! Hold breath.', 'One more bubble, dearie...'],
   },
 };
 
 const hireCost = () => upCost(UP.hire, 0);
 
+// Wave 1 "first minute": the Toss leads. The save's first spin is a sure Bubble Fever (logic.ts),
+// so the first tap sends a glowing ingredient down the middle, the Fever Cam zooms in, three bubbles
+// line up and the whole board goes FEVER within ~6 s of the first tap.
 export const onboarding: OnboardingStep[] = [
+  { id: 'toss', line: 'Toss it down the middle!', target: 'chute5', gesture: 'tap', done: (s) => (stats(s).tossLands ?? 0) >= 1 },
   {
     id: 'curse',
     line: 'Tap a nail, dearie. Curse it!',
@@ -87,7 +95,6 @@ export const onboarding: OnboardingStep[] = [
     waitFor: (s) => lvOf(run(s), 'hire') > 0 || (run(s).bank ?? 0) >= hireCost(),
     done: (s) => lvOf(run(s), 'hire') > 0,
   },
-  { id: 'toss', line: 'Straight down the middle!', target: 'chute5', gesture: 'tap', done: (s) => (stats(s).tossLands ?? 0) >= 1 },
   { id: 'ticket', line: "Granny's order. Fill it.", target: 'ticket', done: (s) => (stats(s).ticks ?? 0) >= 1 },
   { id: 'gold', line: 'Clip the shiny one. x1.5!', target: 'gold', done: (s) => (stats(s).goldHits ?? 0) >= 1 },
   { id: 'farewell', line: "Kitchen's yours. Stir often!", target: 'hud.home', done: (s) => seen(s, 'cl.bye') },

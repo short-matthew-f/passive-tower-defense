@@ -8,10 +8,9 @@
 //  - Lure price growth 1.45 -> 1.75 and hero HP growth 1.15 -> 1.16 per tier: with the raw seeds the
 //    bot held Lure 14 after 30 min and Lure 17 on day 1 (first skill target is 15, first Fall ~day 4).
 //    Now: Lure 5 ~12 min, Lure 8 at 30 min, 13 at end of day 1, 16 on day 2.
-//  - Gong: at least 8 s between launches and the perfect-wave stack capped at +40% (spec +100%):
-//    five rings of +8%. Unlimited ringing made active play 5-13x idle. SIM-TUNED (sim/README.md):
-//    +10% steps (+50%) measured 2.27-2.38x on-screen idle on the balance sim's reference bot,
-//    above 01 §3's 1.8-2.2x; +8% steps measure ~2.1x (~3.3x offline).
+//  - Gong: Wave 1 made it Kingdom Rush's early call (see GONG_* below): at least 7 s between
+//    launches, a bonus that shrinks as the timer runs down, and a small perfect-wave stack.
+//    Unlimited ringing made active play 5-13x idle. (Pre-Wave 1: 8 s gap, five +8% rings.)
 //  - Glare: 40 dmg x the hero HP scale (so it stays a real verb at high Lure) x Gaze, and a 12 s
 //    base cooldown (spec 20 s) so the primary active verb comes round often on a phone.
 //  - The idle sim measures 10 consecutive parties (always one Champion party) on 2 seeds, run
@@ -184,8 +183,22 @@ export const isChampParty = (n: number, T: number) => T >= CHAMP_LURE && n % 10 
 export const lureCost = (T: number) => 40 * LURE_GROWTH ** T; // price of tier T (TUNED 1.45 -> 1.75)
 export const LURE_GROWTH = 1.75;
 
-/** Steal on reaching the Hoard: min(4 x bounty (x5 Champions), 2% of unspent Plunder). */
-export const stealBase = (t: HeroType, bounty: number) => 4 * bounty * (t === 'champ' ? 5 : 1);
+/** Steal on reaching the Hoard: min(4 x bounty (x5 Champions), 2% of unspent Plunder). A looter
+ * (Bait Chest purse pips, LOOT_*) wants more and may take a bigger share of the bank. */
+export const stealBase = (t: HeroType, bounty: number, loot = 0) => 4 * bounty * (t === 'champ' ? 5 : 1) * (1 + LOOT_STEAL * loot);
+/** The bank share a thief can carry: 2%, +1% per loot pip. */
+export const stealCap = (bank: number, loot = 0) => (0.02 + 0.01 * loot) * Math.max(0, bank);
+
+// ---------- Bait Chests: fatten, then feast (Wave 1, research R7) ----------
+// Each Bait Chest holds one purse per party: the first hero who walks past it (Rogues ignore
+// chests) grabs it and carries a gold-bag pip. A looter is worth more dead (bounty x(1 + LOOT_BONUS)
+// per pip), but if he reaches the Hoard he wants LOOT_STEAL more per pip and can carry a bigger
+// share of the bank, and an escape takes it all. So a chest right before the killbox is the high
+// yield, high risk spot, and one deep in a safe loop is the cautious one.
+// SIM-TUNED: +60% per pip keeps the Dungeon's first Fall on day 4 and active : idle in band (the idle
+// sim and Cautious Mode play it too: it is a floor rule, not an active verb).
+export const LOOT_BONUS = 0.6;
+export const LOOT_STEAL = 1;
 
 // ---------- placeables (01 §5.2, §6A) ----------
 
@@ -307,13 +320,36 @@ export const glareDamage = (w: Workshop, T: number) => 40 * hpScale(T) * (1 + 0.
 export const glareCooldown = (w: Workshop) => Math.max(4, 12 - 0.5 * w.gaze); // TUNED
 export const GLARE_SNAP = 14; // logical px around the touch
 export const TRAP_OPEN = 2;
-export const GRAB_BONUS = 0.1;
+/** Coin taps no longer pay extra (Wave 1: the +10% tap was a chore, research R5 / fun review P7).
+ * Tapping a coin still banks it at once; untouched coins walk in by themselves. */
+export const GRAB_BONUS = 0;
 export const RECOVER_BONUS = 0.25;
 export const COIN_LIFE = 1.5;
-export const GONG_STEP = 0.08; // SIM-TUNED 0.1 -> 0.08 (see header)
-export const GONG_MAX = 5; // TUNED +100% -> +40% (5 steps of GONG_STEP)
-/** Minimum seconds between party launches when ringing early (throughput at most 12/8 = 1.5x). */
-export const GONG_GAP = 8;
+// The Gong is Kingdom Rush's early call (Wave 1, research R5): it pulls the next party in now, on
+// top of whatever is still walking. The earlier you ring (the more of the party timer is left) the
+// bigger the called party's bonus, and the more of Glare's cooldown it skips; a really early call
+// also banks the unused Trapdoor charge instead of resetting it. Unbroken (leak-free) calls still
+// stack a smaller perfect-wave bonus, drawn as gong rings. The greed is real: an overlapping party
+// that leaks steals, breaks the stack and (with a looter) takes a bigger bite.
+// SIM-TUNED (balance sim, reference bot ringing as soon as the Gong lights): gap 7 s, +20% early,
+// +2% per ring keeps active : on-screen idle at 2.13x (01 §3 band 1.8-2.2x), as before Wave 1. Gap
+// 6 s measured 2.3-2.8x; gap 8 s leaves only a 4 s window for "how early".
+export const GONG_STEP = 0.02; // was +8% per ring; the early part now carries most of the bonus
+export const GONG_MAX = 5; // five rings: +10% from the stack
+/** The early-call bonus at the very first moment the Gong lights (scales down to 0 at the bell). */
+export const GONG_EARLY = 0.2;
+/** Minimum seconds after a launch before the Gong lights (the party must also have filed in).
+ * Throughput is at most 12/7 = 1.7x at the earliest call (was a flat 8 s gap). */
+export const GONG_GAP = 7;
+/** Share of Glare's remaining cooldown an earliest call skips (scaled by earliness). */
+export const GONG_CD_CUT = 0.5;
+/** Earliness at or above which an unused Trapdoor charge is banked (max TRAP_MAX). */
+export const GONG_TRAP_F = 0.5;
+export const TRAP_MAX = 2;
+/** Earliness of a call right now: 1 at the moment the Gong lights, 0 at the natural bell. */
+export const gongEarly = (partyTimer: number) => Math.max(0, Math.min(1, partyTimer / (PARTY_EVERY - GONG_GAP)));
+/** The called party's bonus for a given stack (after this ring) and earliness. */
+export const gongBonus = (stack: number, f: number) => GONG_STEP * Math.min(GONG_MAX, stack) + GONG_EARLY * f;
 /** Ledger-Bones throws bones from the Hoard: 1 dps, range 3 (starter kit). */
 export const CLERK = { dmg: 1, rate: 1, range: 3 };
 

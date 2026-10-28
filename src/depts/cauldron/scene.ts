@@ -11,6 +11,7 @@ import {
   bucketMults,
   chuteStats,
   boardConfig,
+  feverTiers,
   heldMalice,
   HOPPER_DROPS,
   inZone,
@@ -34,10 +35,11 @@ import {
   type Ticket,
   type UpDef,
 } from './econ';
-import { CauldronCore, CHARGE_S, MAX_LIVE } from './logic';
+import { CauldronCore, CHARGE_S, FEVER_MULT, MAX_LIVE, type Spin } from './logic';
 import { sfx } from './sfx';
-import { BOARD_W, BUCKETS, COL_W, LAYOUTS, ROW_H, ROW_SLOTS, SPECIALS, type Ball, type IngId } from './sim';
+import { BOARD_W, BUCKETS, COL_W, LAYOUTS, ROW_H, ROW_SLOTS, SPECIALS, type Ball, type IngId, type Peg } from './sim';
 import { destroyTree } from '../../ui/destroy';
+import type { Juice } from '../../ui/juice';
 
 const RAIL_H = 12;
 const BOARD_H = 10 + (ROW_SLOTS - 1) * ROW_H + 12; // rail bottom -> landing line
@@ -50,6 +52,16 @@ const MAL_W = 34;
 const SCRY_HOLD = 0.4;
 const SHIFT_HOLD = 0.45;
 const MAX_PARTICLES = 160;
+/** Bubble Reach symbols (ingredient sprites). */
+const SPIN_ING: IngId[] = ['newt', 'toad', 'bat', 'mandrake'];
+/** Fever Cam (Peggle): slow motion and a 2x zoom on your Toss over the last rows. */
+const CAM_S = 0.75;
+const CAM_PHYS = 0.3;
+const CAM_ZOOM = 2;
+const CAM_CD = 6;
+/** Music-box rain voice limit: notes per second for the toadling rain (Idle Breakout lesson). */
+const RAIN_NPS = 9;
+const FEVER_COLS = [0x9ad43a, 0xe8c04a, 0xb070f0, 0x4ac0c0, 0xf08a30];
 
 interface Particle {
   x: number;
@@ -113,6 +125,10 @@ export class CauldronScene implements DeptScene {
   private tokenText = new PixelText('', '#e8c04a');
   private overflowText = new PixelText('', '#9ad43a');
   private hopperText = new PixelText('', '#fff2a0');
+  private bigText = new PixelText('', '#fff2a0');
+  private feverText = new PixelText('', '#fff2a0');
+  private reachText = new PixelText('REACH!', '#ff6a5a');
+  private spinSpr: Sprite[] = [];
   private chutes: Button[] = [];
   private upBtn!: Button;
   private malDown!: Button;
@@ -166,6 +182,22 @@ export class CauldronScene implements DeptScene {
   private sndPeg = 0;
   private sndGold = 0;
   private sndPlop = 0;
+  private sndRain = 0;
+  private sndChime = 0;
+  private rainTokens = RAIN_NPS;
+  // Bubble Reach display: the spin rolling (or lingering after it stopped) and its stopped bubbles.
+  private shownSpin: Spin | null = null;
+  private spinStops = 0;
+  private spinLinger = 0;
+  private rollT = 0;
+  private bannerT = 0;
+  // Fever Cam.
+  private camT = 0;
+  private camCd = 0;
+  private camBall: Ball | null = null;
+  private camX = 0;
+  private camY = 0;
+  private zoom = 1;
 
   constructor(ctx: DeptCtx) {
     this.ctx = ctx;
@@ -175,7 +207,10 @@ export class CauldronScene implements DeptScene {
       earn: (b) => ctx.earn(b),
       raiseSkill: (l) => ctx.raiseSkill(l),
       land: (b, k, amount, mult) => this.onLand(b, k, amount, mult),
-      peg: (b) => this.onPeg(b),
+      peg: (b, p) => this.onPeg(b, p),
+      spin: (sp) => this.onSpin(sp),
+      spinEnd: (sp) => this.onSpinEnd(sp),
+      fever: (on, chain) => this.onFever(on, chain),
       gold: (b, g) => this.onGold(b, g.x, g.y),
       ladle: (b) => this.spark(b.x, b.y, PAL.ladleHi, 3),
       bump: (b) => this.spark(b.x, b.y, PAL.bumperHi, 3),
@@ -229,6 +264,16 @@ export class CauldronScene implements DeptScene {
       this.hopperText,
     );
     this.hopperText.visible = false;
+    for (let i = 0; i < 3; i++) {
+      const sp = new Sprite();
+      sp.visible = false;
+      sp.roundPixels = true;
+      this.spinSpr.push(sp);
+    }
+    this.bigText.scale.set(2);
+    this.bigText.visible = false;
+    this.feverText.visible = false;
+    this.reachText.visible = false;
 
     // Input: tap a peg to curse it.
     this.boardHit.eventMode = 'static';
@@ -283,10 +328,17 @@ export class CauldronScene implements DeptScene {
       const s = new Sprite(tex);
       s.visible = false;
       s.roundPixels = true;
+      s.anchor.set(0.5);
       this.pool.push(s);
       this.balls.addChild(s);
     }
+    this.root.addChild(...this.spinSpr, this.reachText, this.feverText, this.bigText);
     this.resize(ctx.layout);
+  }
+
+  /** The suite's shared juice kit (ui/juice.ts), when the Game has one. */
+  private get juice(): Juice | undefined {
+    return (this.ctx.game as { juice?: Juice }).juice;
   }
 
   private get vol(): number {
@@ -382,9 +434,10 @@ export class CauldronScene implements DeptScene {
     g.rect(bx + 10, potBot, 8, 2).fill(PAL.copperLo);
     g.rect(bx + BOARD_W - 18, potBot, 8, 2).fill(PAL.copperLo);
 
-    // Buckets.
-    const mults = bucketMults(this.run);
-    const tiers = tiersOf(this.run);
+    // Buckets (Bubble Fever shows its raised floor).
+    const tiers = this.payTiers();
+    const tm = tierMults(this.run);
+    const mults = this.core.fever ? tiers.map((t) => tm[t] * FEVER_MULT) : bucketMults(this.run);
     for (let k = 0; k < BUCKETS; k++) {
       const x = bx + k * COL_W;
       const tier = tiers[k];
@@ -477,6 +530,13 @@ export class CauldronScene implements DeptScene {
       level,
       max: u.max,
       cost: () => upCost(u, level()),
+      // Exact x10 / MAX prices for the sheet's bulk modes (the per-level ceil included).
+      costFor: (n) => {
+        const l = level();
+        let c = 0;
+        for (let i = 0; i < Math.min(n, u.max - l); i++) c += upCost(u, l + i);
+        return c;
+      },
       // U-13: the token glyph, never a bare "T" (T reads as Tribute in the Throne sheets).
       currency: u.tokens ? '{coin}Tokens' : undefined,
       locked: () => upLocked(u, this.ctx.save.cycle.n),
@@ -710,10 +770,27 @@ export class CauldronScene implements DeptScene {
 
   // ---------- sim hooks (juice) ----------
 
-  private onPeg(b: Ball): void {
-    if (!(b.tossed || b.ladled) || b.hopper || this.sndPeg > 0) return;
-    this.sndPeg = 0.05;
-    sfx.tink(this.vol, b.hits);
+  /** The bucket tiers paying right now (Bubble Fever raises them all one tier). */
+  private payTiers(): number[] {
+    const t = tiersOf(this.run);
+    return this.core.fever ? feverTiers(t) : t;
+  }
+
+  private onPeg(b: Ball, p: Peg): void {
+    if (b.hopper) return;
+    if (b.tossed || b.ladled) {
+      // Your own ingredient climbs the pentatonic ladder, one step per peg (Peggle).
+      if (this.sndPeg > 0) return;
+      this.sndPeg = 0.03;
+      sfx.ladder(this.vol, b.hits);
+      return;
+    }
+    // The music-box rain: a soft note per peg, pitch by row, voice-limited.
+    if (this.sndRain > 0 || this.rainTokens < 1) return;
+    this.rainTokens -= 1;
+    this.sndRain = 0.04;
+    const R = rows(this.run);
+    sfx.rain(this.vol, 2 + Math.round((R - 1 - p.row) * 0.9), this.core.fever);
   }
 
   private onLand(b: Ball, k: number, amount: number, mult: number): void {
@@ -724,21 +801,33 @@ export class CauldronScene implements DeptScene {
     for (let i = 0; i < 3; i++) this.particle(this.bx + b.x, this.landY, (Math.random() - 0.5) * 40, -20 - Math.random() * 30, 0.4, color);
     const player = b.tossed || b.ladled;
     const big = mult >= 5;
-    const tier = tiersOf(this.run)[k];
+    const tier = this.payTiers()[k];
     if (player && this.sndPlop <= 0) {
       this.sndPlop = 0.08;
-      sfx.plop(this.vol, tier);
+      sfx.plop(this.vol * 0.6, tier);
+      sfx.chime(this.vol, tier, true);
+    } else if (!player && !b.hopper && this.sndChime <= 0) {
+      this.sndChime = 0.18;
+      sfx.chime(this.vol, tier, false);
     }
-    if ((player || big) && this.floatBudget >= 1) {
+    // Heavy toadling ingredients (the thinned rain) show their haul too.
+    if ((player || big || b.drops >= 2) && this.floatBudget >= 1) {
       this.floatBudget -= 1;
-      this.ctx.float(`+${formatNum(amount)}`, sx, this.landY - 8, big ? '#fff2a0' : ING_COLOR[b.ing]);
+      // Shared juice kit: the pop's size follows the amount (vs ~5 s of idle income), so "+3" and
+      // "+81K" no longer look alike; small ones keep the ingredient's colour.
+      const j = this.juice;
+      if (j) {
+        j.popValue(amount, sx, this.landY - 6, { color: big || this.core.fever ? undefined : ING_COLOR[b.ing], shake: false });
+      } else this.ctx.float(`+${formatNum(amount)}`, sx, this.landY - 8, big ? '#fff2a0' : ING_COLOR[b.ing]);
     }
     if (player && big) {
       this.shake = 0.06;
+      this.juice?.shake(1);
       for (let i = 0; i < 8; i++) this.particle(sx, this.landY, (Math.random() - 0.5) * 30, -40 - Math.random() * 40, 0.7, PAL.bileHi);
       sfx.cackle(this.vol);
       if (mult >= 10) {
         this.slowmo = 0.12;
+        this.juice?.hitStop(50);
         this.ctx.haptic(25);
         if (!this.ctx.seen('m.bigWin')) {
           this.ctx.markSeen('m.bigWin');
@@ -805,7 +894,12 @@ export class CauldronScene implements DeptScene {
 
   private onBatch(payout: number, tokens: number, sock: boolean): void {
     const cx = this.bx + MAL_W + 3 + Math.floor((BOARD_W - MAL_W - TICKET_W - 6) / 2);
-    this.ctx.float(`${sock ? 'SOCK ' : ''}BATCH! +${formatNum(payout)}`, cx, this.potY - 14, '#fff2a0');
+    const j = this.juice;
+    if (j) {
+      j.popValue(payout, cx, this.potY - 10, { prefix: `${sock ? 'SOCK ' : ''}BATCH +`, tier: sock ? 3 : 2, shake: false });
+      j.coinFly(cx, this.potY + 4, sock ? 10 : 6);
+      j.shake(1);
+    } else this.ctx.float(`${sock ? 'SOCK ' : ''}BATCH! +${formatNum(payout)}`, cx, this.potY - 14, '#fff2a0');
     this.ctx.float(`+${tokens} TOKEN`, cx, this.potY - 4, C.goldText);
     this.ctx.haptic(30);
     sfx.batch(this.vol);
@@ -819,6 +913,146 @@ export class CauldronScene implements DeptScene {
     if (batches >= 3) this.ctx.lesson('swap');
     if (batches > 1) this.ctx.say('batch');
     this.ctx.saveSoon();
+  }
+
+  // ---------- Bubble Reach, Bubble Fever, Fever Cam ----------
+
+  private onSpin(sp: Spin): void {
+    this.shownSpin = sp;
+    this.spinStops = 0;
+    this.spinLinger = 0;
+    this.intenseUntil = Math.max(this.intenseUntil, this.time + sp.dur + 0.5);
+  }
+
+  private onSpinEnd(sp: Spin): void {
+    this.spinLinger = sp.win ? 0.9 : 0.6;
+    if (sp.reach && !sp.win) sfx.miss(this.vol);
+  }
+
+  /** Bubble stop times as fractions of the spin (a REACH holds the third bubble back). */
+  private stopsOf(sp: Spin): number[] {
+    return sp.reach ? [0.16, 0.32, 0.96] : [0.3, 0.6, 0.92];
+  }
+
+  private onFever(on: boolean, chain: boolean): void {
+    this.drawStatic();
+    if (!on) {
+      sfx.feverEnd(this.vol);
+      this.ctx.float('FEVER OVER', this.bx + BOARD_W / 2, this.boardTop + 24, '#9c8aa8');
+      return;
+    }
+    this.bannerT = 1.6;
+    this.bigText.set(chain ? 'FEVER CHAIN!' : 'BUBBLE FEVER!', '#fff2a0');
+    sfx.fever(this.vol);
+    this.ctx.haptic(40);
+    this.juice?.shake(2);
+    this.juice?.hitStop(70);
+    this.intenseUntil = Math.max(this.intenseUntil, this.time + 2);
+    for (let k = 0; k < BUCKETS; k++) {
+      const x = this.bx + k * COL_W + COL_W / 2;
+      for (let i = 0; i < 4; i++) this.particle(x, this.landY, (Math.random() - 0.5) * 40, -60 - Math.random() * 70, 0.9, FEVER_COLS[(k + i) % FEVER_COLS.length]);
+    }
+    if (!this.ctx.seen('m.fever')) {
+      this.ctx.markSeen('m.fever');
+      this.ctx.say('feverFirst', { type: 'mechanic_unlocked', key: 'fever' });
+    } else this.ctx.say('fever');
+  }
+
+  /** Fever Cam: a Tossed ingredient over the last rows, falling toward a jackpot bucket. */
+  private updateCam(dt: number): number {
+    this.camCd -= dt;
+    const board = this.core.board;
+    if (this.camT <= 0 && this.camCd <= 0) {
+      const tiers = this.payTiers();
+      const first = !!this.run.feverPrimed || (!(this.per.fevers ?? 0) && !this.run.stats.fevers);
+      const low = board.bucketY - 1.6 * ROW_H;
+      for (const b of board.balls) {
+        if (!b.alive || !b.tossed || b.hopper || b.y < low || b.vy <= 0) continue;
+        const k = Math.max(0, Math.min(BUCKETS - 1, Math.floor(b.x / COL_W)));
+        if (tiers[k] !== 4 && !first) continue;
+        this.camT = CAM_S;
+        this.camCd = CAM_CD;
+        this.camBall = b;
+        sfx.drumroll(this.vol);
+        this.intenseUntil = Math.max(this.intenseUntil, this.time + 1.5);
+        break;
+      }
+    }
+    let phys = 1;
+    if (this.camT > 0) {
+      this.camT -= dt;
+      phys = CAM_PHYS;
+      const b = this.camBall;
+      if (b?.alive) {
+        this.camX = this.bx + b.x;
+        this.camY = this.pegTop + b.y;
+      } else this.camT = Math.min(this.camT, 0.12);
+      if (this.camT <= 0) this.camBall = null;
+    } else if (this.slowmo > 0) {
+      this.slowmo -= dt;
+      phys = 0.25;
+    }
+    const target = this.camT > 0 ? CAM_ZOOM : 1;
+    this.zoom += (target - this.zoom) * Math.min(1, dt * (target > this.zoom ? 12 : 8));
+    if (Math.abs(this.zoom - target) < 0.01) this.zoom = target;
+    return phys;
+  }
+
+  /** The three bubbles over the jackpot while a spin rolls (and a moment after it stops). */
+  private updateSpinUi(dt: number): void {
+    const live = this.core.spin;
+    const sp = live ?? this.shownSpin;
+    if (!live && this.shownSpin) {
+      this.spinLinger -= dt;
+      if (this.spinLinger <= 0) this.shownSpin = null;
+    }
+    const show = !!sp && (!!live || this.spinLinger > 0);
+    for (const s of this.spinSpr) s.visible = show;
+    this.reachText.visible = false;
+    if (!sp || !show) return;
+    const renderer = this.ctx.game.app.renderer;
+    const frac = live ? live.t / live.dur : 1;
+    const stops = this.stopsOf(sp);
+    let stopped = 0;
+    while (stopped < 3 && frac >= stops[stopped]) stopped++;
+    if (live && stopped > this.spinStops) {
+      for (let i = this.spinStops; i < stopped; i++) {
+        sfx.bubble(this.vol, i);
+        if (i === 1 && sp.reach) {
+          sfx.reach(this.vol);
+          this.ctx.haptic(15);
+          this.shake = Math.max(this.shake, 0.08);
+          if (!this.ctx.seen('m.reach')) this.ctx.markSeen('m.reach');
+          else this.ctx.say('reach');
+        }
+      }
+      this.spinStops = stopped;
+    }
+    this.rollT -= dt;
+    // The rolling bubbles tick faster early, slower as the REACH bubble creeps in.
+    const rollEvery = sp.reach && stopped === 2 ? 0.06 + 0.2 * frac : 0.05;
+    const roll = live && this.rollT <= 0;
+    if (roll) {
+      this.rollT = rollEvery;
+      sfx.roll(this.vol);
+    }
+    const cx = this.bx + BOARD_W / 2;
+    const y = this.landY - 15;
+    for (let i = 0; i < 3; i++) {
+      const s = this.spinSpr[i];
+      const sym = i < stopped ? sp.sym[i] : roll ? Math.floor(Math.random() * SPIN_ING.length) : -1;
+      if (sym >= 0) {
+        const tex = ingTexture(renderer, SPIN_ING[sym]);
+        if (s.texture !== tex) s.texture = tex;
+      }
+      s.position.set(cx - 16 + i * 11, y - 2 + (i >= stopped ? Math.round(Math.sin(this.time * 30 + i) * 1) : 0));
+      s.alpha = i < stopped || live ? 1 : 0.6;
+    }
+    if (sp.reach && stopped >= 2 && (live || !sp.win)) {
+      this.reachText.visible = Math.floor(this.time * 6) % 2 === 0 || !live;
+      this.reachText.set(live ? 'REACH!' : 'SO CLOSE', live ? '#ff6a5a' : '#9c8aa8');
+      this.reachText.position.set(cx - Math.floor(this.reachText.width / 2), y - 9);
+    }
   }
 
   private particle(x: number, y: number, vx: number, vy: number, life: number, color: number): void {
@@ -959,12 +1193,13 @@ export class CauldronScene implements DeptScene {
     this.sndPeg -= dt;
     this.sndGold -= dt;
     this.sndPlop -= dt;
-    let simDt = dt;
-    if (this.slowmo > 0) {
-      this.slowmo -= dt;
-      simDt = dt * 0.25;
-    }
-    this.core.update(simDt);
+    this.sndRain -= dt;
+    this.sndChime -= dt;
+    this.rainTokens = Math.min(4, this.rainTokens + dt * RAIN_NPS);
+    // Slow motion (Fever Cam, big wins) slows the ball physics only: the pour keeps wall time.
+    this.core.update(dt, this.updateCam(dt));
+    this.updateSpinUi(dt);
+    this.updateFeverUi(dt);
     this.updateHopper(dt);
     this.updateHolds(dt);
 
@@ -1005,10 +1240,37 @@ export class CauldronScene implements DeptScene {
     this.drawBalls();
     this.updatePotUi();
 
+    let sx = 0;
+    let sy = 0;
     if (this.shake > 0) {
       this.shake -= dt;
-      this.root.position.set(Math.random() < 0.5 ? -1 : 1, 0);
-    } else this.root.position.set(0, 0);
+      // Bigger moments shake harder (2 px for a Fever, 1 px otherwise).
+      const amp = this.shake > 0.12 ? 2 : 1;
+      sx = Math.random() < 0.5 ? -amp : amp;
+      sy = this.shake > 0.12 ? (Math.random() < 0.5 ? -1 : 1) : 0;
+    }
+    const z = this.zoom;
+    this.root.scale.set(z);
+    this.root.position.set(Math.round(this.camX * (1 - z)) + sx, Math.round(this.camY * (1 - z)) + sy);
+  }
+
+  private updateFeverUi(dt: number): void {
+    this.bannerT = Math.max(0, this.bannerT - dt);
+    const b = this.bigText;
+    b.visible = this.bannerT > 0;
+    if (b.visible) {
+      const col = ['#fff2a0', '#d2f27a', '#e0b0ff', '#8ae8e8'][Math.floor(this.time * 10) % 4];
+      b.set(b.text, col);
+      const pop = this.bannerT > 1.45 ? 3 : 2;
+      b.scale.set(pop);
+      b.position.set(this.bx + Math.floor((BOARD_W - b.width) / 2), this.boardTop + Math.floor(BOARD_H * 0.38));
+    }
+    const ft = this.core.feverT;
+    this.feverText.visible = ft > 0;
+    if (ft > 0) {
+      this.feverText.set(`FEVER ${Math.ceil(ft)}`, ft < 2 && Math.floor(this.time * 6) % 2 ? '#9c8aa8' : '#fff2a0');
+      this.feverText.position.set(this.bx + Math.floor((BOARD_W - this.feverText.width) / 2), this.boardTop + 3);
+    }
   }
 
   private updateHolds(dt: number): void {
@@ -1250,6 +1512,48 @@ export class CauldronScene implements DeptScene {
       g.rect(tx + 3, this.potY + 12, TICKET_W - 6, 1).fill(0xc8b890);
     }
 
+    // Bubble Fever: the board frame runs with colour and the raised buckets glow.
+    if (this.core.fever) {
+      const seg = 6;
+      const off = Math.floor(this.time * 20);
+      const top = this.boardTop - 1;
+      const per = 2 * (BOARD_W + 8) + 2 * (BOARD_H + 2);
+      for (let d = 0; d < per; d += seg) {
+        const col = FEVER_COLS[Math.floor((d + off) / seg) % FEVER_COLS.length];
+        let x = 0;
+        let y = 0;
+        let w = seg;
+        let hh = 1;
+        if (d < BOARD_W + 8) [x, y] = [bx - 4 + d, top];
+        else if (d < BOARD_W + 8 + BOARD_H + 2) [x, y, w, hh] = [bx + BOARD_W + 3, top + d - (BOARD_W + 8), 1, seg];
+        else if (d < 2 * (BOARD_W + 8) + BOARD_H + 2) [x, y] = [bx + BOARD_W + 4 - (d - (BOARD_W + 8 + BOARD_H + 2)) - seg, top + BOARD_H + 1];
+        else [x, y, w, hh] = [bx - 4, top + BOARD_H + 2 - (d - (2 * (BOARD_W + 8) + BOARD_H + 2)) - seg, 1, seg];
+        g.rect(x, y, w, hh).fill(col);
+      }
+      const a = 0.15 + 0.1 * Math.sin(this.time * 12);
+      g.rect(bx + 1, this.landY, BOARD_W - 2, BUCKET_H - 1).fill({ color: PAL.goldHi, alpha: a });
+    }
+    // Your Tossed ingredients glow, so the one ball you care about reads through the rain.
+    for (const b of board.balls) {
+      if (!b.alive || !b.tossed || b.hopper) continue;
+      const x = Math.round(bx + b.x);
+      const y = Math.round(this.pegTop + b.y);
+      g.rect(x - 4, y - 4, 9, 9).fill({ color: PAL.goldHi, alpha: pulse ? 0.35 : 0.2 });
+    }
+    // Bubble Reach backing: three bubbles over the jackpot.
+    if (this.spinSpr[0].visible) {
+      const cx = bx + BOARD_W / 2;
+      const y = this.landY - 15;
+      const sp = this.core.spin ?? this.shownSpin;
+      const win = !!sp && !this.core.spin && sp.win;
+      f.rect(cx - 19, y - 5, 37, 12).fill({ color: PAL.ink, alpha: 0.75 });
+      for (let i = 0; i < 3; i++) {
+        const x = cx - 18 + i * 11;
+        const col = win && pulse ? PAL.goldHi : i < this.spinStops || win ? PAL.bileHi : PAL.bileLo;
+        f.rect(x, y - 4, 11, 1).rect(x, y + 6, 11, 1).rect(x, y - 4, 1, 11).rect(x + 10, y - 4, 1, 11).fill(col);
+      }
+      for (let q = 0; q < this.core.spinQ; q++) f.rect(cx + 20, y - 3 + q * 3, 2, 2).fill(PAL.bileHi);
+    }
     // Particles.
     for (const p of this.particles) f.rect(Math.round(p.x), Math.round(p.y), 1, 1).fill(p.color);
   }
@@ -1263,11 +1567,12 @@ export class CauldronScene implements DeptScene {
       const s = this.pool[i++];
       const tex = ingTexture(renderer, b.ing);
       if (s.texture !== tex) s.texture = tex;
-      s.position.set(Math.round(this.bx + b.x) - 3, Math.round(this.pegTop + b.y) - 3);
+      s.position.set(Math.round(this.bx + b.x), Math.round(this.pegTop + b.y));
       s.visible = true;
       s.tint = b.ladled ? 0xd8ffb0 : b.rune ? 0xe8c8ff : 0xffffff;
       s.alpha = b.hopper ? 0.85 : 1;
-      s.scale.set(b.scale < 1 ? 0.72 : 1);
+      // Heavy (bundled) ingredients look heavier; physics radius is unchanged.
+      s.scale.set(b.scale < 0.99 ? 0.72 : b.scale < 1.9 ? 1 : b.scale < 3.5 ? 1.3 : 1.6);
     }
     for (; i < this.pool.length; i++) this.pool[i].visible = false;
   }

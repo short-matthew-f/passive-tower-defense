@@ -16,8 +16,12 @@
 // spot and a low landing, and punishing landings near the Brim Line and burying a smaller orb.
 // The expert also looks one merge ahead (the merged orb's neighbours). Skill sets the cadence
 // (22 / 30 / 34 drops/min), the aim noise and how often the bot settles for a worse spot.
+// Wave 1 (genre research R2/R5/R6/R9): the flask is 112x160 with ~x1.3 radii, Wider Flask and
+// Taller Neck are gone, chains pay x1/x2/x4/x6..., idle copies the bot's best flask score (the
+// core's studyMult, so the bot's own play sets its idle), Catalysts are earned by x4 chains and the
+// first brim warning of a flask hands over a Quicksilver bead (dropped like any special).
 // Special orbs and tools (04 §3, §5, §6 B; all in the shared SpireCore): Catalysts and Volatility's
-// Hex Stones come out of the real bag. The reference and expert bots aim a Catalyst at the biggest
+// Hex Stones come out of the real core. The reference and expert bots aim a Catalyst at the biggest
 // orb it can reach (the expert prefers one whose upgrade touches a twin) and herd Hex Stones onto
 // other Hex Stones; the novice drops them like any orb. With `tremor`, the bot buys the Tremor and
 // jolts the flask when two same-tier orbs sit a hair apart, and the expert also buys the Settle
@@ -43,7 +47,6 @@ import {
   MAX_TIER,
   normalize,
   potentMult,
-  resCap,
   spawnTable,
   spireEcon,
   TIERS,
@@ -100,9 +103,8 @@ function activeEst(r: SpireRun, p: SpirePersistent, dpm: number, sk?: { tremor: 
   const ev = evDropTable(spawnTable(r), ceil) * potentMult(r) * arcanaMult(r.vol);
   // Geometry and cascade nodes: proxies for fewer vents and longer chains.
   const proxy =
-    (1 + 0.04 * lvOf(r, 'wider') + 0.03 * lvOf(r, 'neck')) *
     (1 + 0.02 * lvOf(r, 'echo')) *
-    (Math.min(resCap(r), 1.6 + 0.03 * lvOf(r, 'glass')) / 1.6) *
+    (1 + 0.02 * lvOf(r, 'glass')) *
     (1 + 0.01 * lvOf(r, 'coil')) *
     (sk?.tremor ? 1 + 0.03 * lvOf(r, 'tremor') : 1) *
     (sk?.ventNow ? 1 + 0.02 * lvOf(r, 'settle') : 1);
@@ -110,7 +112,7 @@ function activeEst(r: SpireRun, p: SpirePersistent, dpm: number, sk?: { tremor: 
 }
 
 function coarseKey(r: SpireRun): string {
-  return [lvOf(r, 'richer'), lvOf(r, 'seed'), lvOf(r, 'wider'), lvOf(r, 'neck'), lvOf(r, 'valve'), Math.floor(lvOf(r, 'echo') / 3), Math.floor(lvOf(r, 'glass') / 4), Math.floor(lvOf(r, 'coil') / 3), lvOf(r, 'tremor'), lvOf(r, 'settle'), r.vol].join('|');
+  return [lvOf(r, 'richer'), lvOf(r, 'seed'), lvOf(r, 'valve'), Math.floor(lvOf(r, 'echo') / 3), Math.floor(lvOf(r, 'glass') / 4), Math.floor(lvOf(r, 'coil') / 3), lvOf(r, 'tremor'), lvOf(r, 'settle'), r.vol].join('|');
 }
 
 interface TableRow {

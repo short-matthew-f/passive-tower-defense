@@ -919,3 +919,49 @@ Discipline ~3%.
   Tribute in week 1; the Trophy Hall and Dark Tithe make that ~10% larger.
 - **Goods Caravan** is never bought by the reference bot (its +10% trickle is worth less than Iron
   Fist or Ruinborn at any price the bot meets); a cheaper curve would make it a real choice.
+
+## Pass 7 (Wave 1 of the fun plan: pacing reset, Night Orders, active play moves the meter)
+
+Intentional design changes. Each one is mirrored in `sim/meta.ts`, which uses the same pure helpers.
+
+- **24 h offline cap** (`economy.ts OFFLINE_CAP_BASE_H`, was 8 h): local income, Goods and Tribute.
+  Curfew Bells, Long Reach and Treasury stack on top. Fun plan A4 / research R10.
+- **Offline time fills the economy gate to 90% of the floor** (`OFFLINE_GATE_CAP`, linear; ~99% on
+  the log Infamy bar). The last push is on screen, or comes from a "gate" Night Order. Background
+  departments count in full while the player is present. The skill gate still never moves offline:
+  `idleOnlyFalls` stays 0.
+- **Night Orders** (`core/orders.ts`). Each department holds a standing order for every absence of
+  60 s or more. The core pair is "income" (+25% bank) vs "bait the Legend" (gate x1.5, no 90%
+  limit), and departments can supply their own orders. The sim bot baits once the skill gate is met
+  and takes the income order otherwise (`botOrder`). Its run tallies are in `SimResult.orders`.
+- **A5: on-screen earnings count x2 on the economy gate** (`ACTIVE_GATE_MULT`; the bank is
+  unchanged, and present-but-idle play doesn't count). A skill-gate "chunk" bonus was tried and
+  dropped: with the current Cauldron it moved the first Fall into session 2 (1.5 h AE, hard band 2-5).
+- **Seals and Dread gates** (`meta.ts`):
+
+  | | Before (Pass 6) | Pass 7 |
+  |---|---|---|
+  | Dungeon | 2,500 | 600 |
+  | Bridge | 60,000 | 1,500 |
+  | Styx | 120,000 / 10 Dread | 6,000 / 10 Dread |
+  | Spire | 1,200,000 / 60 Dread | 100,000 / 30 Dread |
+  | War Pit | 3,000,000 / 150 Dread | 400,000 / 75 Dread |
+
+  Reference profile, seed 1 (live tree):
+
+  | | Before | Pass 7 |
+  |---|---|---|
+  | Unlocks | Mines 5 min, Dungeon 45 min, Bridge day 2 08:00, Styx day 2 12:30, Spire day 4 18:00, Pit day 6 21:00 | Mines 5 min, Dungeon 10 min, Bridge 30 active min (session 1), Styx day 1 ~19:15 (right after the first Fall), Spire day 2 21:00, Pit day 3 21:00 |
+  | First Falls | Cauldron 0.80, Mines 2.33, Dungeon 3.33, Bridge 4.34, Styx 4.75, Spire 6.52, Pit after day 7 | Cauldron 0.79, Mines 1.88, Dungeon 2.52, Bridge 2.88, Styx 3.5-4.8, Spire 4.75-5.75, Pit 5.3-6.5 |
+
+  Day-7 lifetime Dread is ~470. The derived band follows the new arcs.
+- **Bands re-baselined** (`metrics.ts`):
+  - `ARC_UNLOCK_ACTIVE_MIN`: Dungeon 15, Bridge 40 (± 30).
+  - `ARC_UNLOCK_DAY`: Styx 0.5-1, Spire 1-2, Pit 2-3 (± 1 day).
+  - `ARC_FIRST_FALL_DAY`: Cauldron 0.75-1.5, Mines 1.75-3, Dungeon 2.25-3.25, Bridge 2.5-3.5, Styx
+    3-4.5, Spire 4.5-5.5, Pit 5.5-6.5.
+  - `tests/balance.test.ts` drops `cycleAvg|mines`: week-1 Mines cycles now run ~1.5 d, at the floor
+    of the weeks 2-4 band.
+- **Known.** Multi-seed runs: one seed of three reads the Cauldron at 2.9x active:offline. The
+  ratio metric doesn't count the income order's +25%. HEAD already failed one Pit seed the same way.
+  Department agents' partial edits move the Styx / Mines / Bridge numbers, so re-run after they land.

@@ -6,7 +6,10 @@ import {
   brimDepth,
   canMerge,
   CATALYST,
+  CATALYST_CHAIN,
   catalystEvery,
+  chainMultL,
+  STUDY_FLASKS,
   cascadeWindow,
   cooldown,
   HEX,
@@ -73,6 +76,11 @@ export interface CoreHooks {
   /** A Quicksilver bead dissolved. */
   fizz?(o: Orb): void;
   tremor?(): void;
+  /** A finished flask (a real overflow vent): its score, the best before it. */
+  flaskEnd?(score: number, prevBest: number): void;
+  /** R9 rescues: a chain earned a Catalyst, or the first brim warning of a flask handed a
+   * Quicksilver bead. */
+  rescue?(kind: 'catalyst' | 'quick'): void;
   /** A lowered Volatility took effect. */
   volApplied?(v: number): void;
   /** DeptSave.imports (Goods, 00 §4): Tempered Glass widens the flask. */
@@ -179,11 +187,7 @@ export class SpireCore {
 
   private draw(): number {
     const run = this.run;
-    // The Catalyst is scheduled (04 §3): one per catalystEvery drops.
-    if (run.catT >= catalystEvery(run) && !run.queue.includes(CATALYST)) {
-      run.catT = 0;
-      return CATALYST;
-    }
+    // Catalysts are earned by chains now (R9, onMerge), never dealt by the bag.
     // Volatility junk (04 §7): Hex Stones; never two in a row in the preview.
     const hx = this.rnd();
     if (!this.noHex && hx < hexChance(run.vol) && run.queue[run.queue.length - 1] !== HEX) return HEX;
@@ -422,7 +426,15 @@ export class SpireCore {
     // A flask packed to the body cap with small orbs and Hex Stones can stay under the Brim Line
     // and still refuse every drop: treat a full flask as an overflow too (never a softlock).
     if (!over && this.flask.count >= MAX_ORBS) over = true;
+    const was = this.brimT;
     this.brimT = over ? this.brimT + STEP : 0;
+    // R9: the first brim warning of a flask hands over one free Quicksilver bead (a nudge to
+    // save it), whether or not the Phial is owned.
+    if (was < WARN_S && this.brimT >= WARN_S && !this.run.qsGiven && this.current !== QUICK && !this.noHex) {
+      this.run.qsGiven = true;
+      this.pushFront(QUICK);
+      this.hooks.rescue?.('quick');
+    }
     if (this.brimT >= VENT_S) this.vent();
   }
 
@@ -522,16 +534,38 @@ export class SpireCore {
       run.stats.vents++;
       run.stats.dropsSinceVent = 0;
       run.minSinceVent = run.vol;
+      this.endFlask();
     }
     this.applyPendingVol();
     this.hooks.vent?.(out, refund, manual);
+  }
+
+  /** A real overflow ends the flask (R1 groundwork): its score goes to the apprentices' study
+   * list and the BEST, and a fresh flask score starts. */
+  private endFlask(): void {
+    const run = this.run;
+    const score = Math.round(run.flaskScore);
+    const prev = run.flaskBest;
+    run.recent.push(score);
+    if (run.recent.length > STUDY_FLASKS) run.recent.splice(0, run.recent.length - STUDY_FLASKS);
+    if (score > run.flaskBest) run.flaskBest = score;
+    run.flaskScore = 0;
+    run.qsGiven = false;
+    this.hooks.flaskEnd?.(score, prev);
   }
 
   private onMerge(e: MergeEvent): void {
     const run = this.run;
     this.depth++;
     this.sinceMerge = 0;
-    this.res = Math.min(resCap(run), 1 + 0.25 * (this.depth - 1));
+    this.res = chainMultL(this.depth, resCap(run));
+    // R9: a x4+ chain earns a Catalyst (next in line, behind the orb in hand), on a recharge.
+    if (this.depth >= CATALYST_CHAIN && run.catT >= catalystEvery(run) && !run.queue.includes(CATALYST)) {
+      run.catT = 0;
+      run.queue.splice(1, 0, CATALYST);
+      if (run.queue.length > 5) run.queue.length = 5;
+      this.hooks.rescue?.('catalyst');
+    }
     run.stats.merges++;
     run.stats.bestChain = Math.max(run.stats.bestChain, this.depth);
     const mult = potentMult(run) * arcanaMult(run.vol) * this.res;
@@ -544,6 +578,7 @@ export class SpireCore {
     run.stats.essence = (run.stats.essence ?? 0) + essenceFor(created);
     if (!e.into) {
       const amount = this.hooks.earn(SINGULARITY_VALUE * mult);
+      run.flaskScore += SINGULARITY_VALUE * this.res;
       run.stats.singularities++;
       this.per.singularitiesEver++;
       this.grantPage(1, 'SINGULARITY');
@@ -558,6 +593,7 @@ export class SpireCore {
       return;
     }
     const amount = this.hooks.earn(TIERS[created].value * mult);
+    run.flaskScore += TIERS[created].value * this.res;
     if (created > run.ceiling) run.ceiling = created;
     if (created > run.stats.maxTier) {
       run.stats.maxTier = created;

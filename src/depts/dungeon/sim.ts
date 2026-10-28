@@ -61,6 +61,11 @@ export interface SimHero {
   confT: number;
   /** Wizard: seconds to the next dispel. */
   castT: number;
+  /** Bait Chest purses carried (gold-bag pips, M.LOOT_*). */
+  loot: number;
+  /** Last damage source (receipts: what killed whom) and the source of the current bleed. */
+  src: string;
+  bleedSrc: string;
 }
 
 export interface SimTower {
@@ -134,17 +139,36 @@ export interface SimRune {
 
 export type SimEvent =
   | { t: 'shot'; kind: 'arrow' | 'ballista' | 'clerk'; x1: number; y1: number; x2: number; y2: number; miss: boolean }
-  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; recover: number; by: 'glare' | 'other'; greed: boolean }
+  | { t: 'kill'; x: number; y: number; amount: number; hero: M.HeroType; sack: number; recover: number; by: 'glare' | 'other'; greed: boolean; src: string; loot: number }
   | { t: 'leak'; x: number; y: number; hero: M.HeroType; sack: number }
-  | { t: 'escape'; hero: M.HeroType; sack: number }
+  | { t: 'escape'; hero: M.HeroType; sack: number; loot: number }
   | { t: 'rune'; x: number; y: number; kind: M.RuneKind }
   | { t: 'trapped'; x: number; y: number }
   | { t: 'sunk'; x: number; y: number }
   | { t: 'dispel'; x: number; y: number; rx: number; ry: number }
-  | { t: 'party'; n: number; champ: boolean; bonus: number }
-  | { t: 'partyDone'; size: number; leaked: number }
+  | { t: 'party'; n: number; champ: boolean; bonus: number; gong: number }
+  | { t: 'partyDone'; size: number; leaked: number; rc?: Receipt }
   | { t: 'minionDown'; x: number; y: number; split: boolean }
-  | { t: 'loot'; x: number; y: number };
+  | { t: 'loot'; x: number; y: number; hero: M.HeroType };
+
+/** Live only: one party's tally for Ledger-Bones' receipt (what killed whom, what leaked). */
+export interface Receipt {
+  n: number;
+  size: number;
+  /** Kills by source (piece kind, 'glare', 'clerk'). */
+  kills: Record<string, number>;
+  /** Kill pay plus recovery bonuses (before core multipliers, like the floats). */
+  earned: number;
+  /** Plunder carried off (sacks taken minus sacks recovered). */
+  stolen: number;
+  leakers: M.HeroType[];
+  /** Looters (gold-bag pips) killed, and looters that escaped with their purse. */
+  looters: number;
+  lootEsc: number;
+  /** Earliness of the Gong that called this party (-1: it came on the bell). */
+  gong: number;
+  champ: boolean;
+}
 
 export interface SimSetup {
   pieces: M.PieceSave[];
@@ -167,6 +191,9 @@ interface PartyRec {
   leaked: number;
   bonus: number;
   looted: boolean;
+  /** Bait Chest purses taken by this party (bit per chest on the route). */
+  chests: number;
+  rc: Receipt | null;
 }
 
 export class Sim {
@@ -188,6 +215,8 @@ export class Sim {
   partyN: number;
   partyTimer = 3;
   gongStack = 0;
+  /** Earliness of the last Gong (scene: Glare cooldown cut, juice). */
+  lastGongF = 0;
   trapCharges = 1;
   trap: { x: number; y: number; t: number } | null = null;
   parties = new Map<number, PartyRec>();
@@ -444,11 +473,16 @@ export class Sim {
 
   // ---------- active verbs ----------
 
-  /** Gong: call the next party now. Refused while the previous party is still filing in. */
+  /** Gong (Kingdom Rush's early call): the next party now, with a bonus that grows with how much
+   * of the timer is left. Refused while the previous party is still filing in. */
   gong(): boolean {
     if (!this.gongReady) return false;
+    const f = M.gongEarly(this.partyTimer);
     this.gongStack = Math.min(M.GONG_MAX, this.gongStack + 1);
-    this.launch(M.GONG_STEP * this.gongStack);
+    const trap = f >= M.GONG_TRAP_F ? Math.min(M.TRAP_MAX, this.trapCharges + 1) : 1;
+    this.launch(M.gongBonus(this.gongStack, f), f);
+    this.trapCharges = trap;
+    this.lastGongF = f;
     return true;
   }
 
@@ -461,7 +495,7 @@ export class Sim {
 
   /** Direct damage (Glare). Ignores armor. */
   smite(h: SimHero, dmg: number): void {
-    this.hurt(h, dmg, true, true);
+    this.hurt(h, dmg, true, 'glare', true);
     if (!h.dead) h.flash = 0.15;
   }
 
@@ -521,16 +555,20 @@ export class Sim {
     this.hasCleric = cl;
   }
 
-  private launch(bonus: number): void {
+  private launch(bonus: number, gongF = -1): void {
     const spec = this.queue.shift() ?? this.genParty(this.partyN);
     const id = this.partyN++;
     this.queue.push(this.genParty(this.partyN + 1));
-    this.parties.set(id, { size: spec.length, done: 0, leaked: 0, bonus, looted: false });
+    const champ = spec.includes('champ');
+    const rc: Receipt | null = this.live
+      ? { n: id, size: spec.length, kills: {}, earned: 0, stolen: 0, leakers: [], looters: 0, lootEsc: 0, gong: gongF, champ }
+      : null;
+    this.parties.set(id, { size: spec.length, done: 0, leaked: 0, bonus, looted: false, chests: 0, rc });
     if (!this.spawnQ.length) this.spawnT = 0;
     for (const type of spec) this.spawnQ.push({ type, party: id });
     this.partyTimer = M.PARTY_EVERY;
     this.trapCharges = 1;
-    this.emit({ t: 'party', n: id, champ: spec.includes('champ'), bonus });
+    this.emit({ t: 'party', n: id, champ, bonus, gong: gongF });
   }
 
   private spawnHero(type: M.HeroType, party: number): void {
@@ -544,6 +582,7 @@ export class Sim {
       px: route.xs[0], py: route.ys[0], dir: 1, slowT: 0, slowF: 0, bleedT: 0, bleedDps: 0, stunT: 0, blocked: null,
       tile: -1, party, sack: 0, leaked: false, flash: 0, dead: false, gone: false, chestI: 0, baitI: 0, glanceT: 0,
       gloomF: 0, vuln: 0, revealed: false, confT: 0, castT: type === 'wizard' ? M.WIZ_EVERY / 2 : 0,
+      loot: 0, src: '', bleedSrc: '',
     });
     if (type === 'cleric') this.hasCleric = true;
     this.spawned++;
@@ -592,7 +631,7 @@ export class Sim {
       if (h.flash > 0) h.flash -= dt;
       if (h.bleedT > 0) {
         h.bleedT -= dt;
-        this.hurt(h, h.bleedDps * dt, true);
+        this.hurt(h, h.bleedDps * dt, true, h.bleedSrc);
         if (h.dead) continue;
       }
       if (h.type === 'wizard' && h.dir > 0) this.cast(h, dt);
@@ -641,11 +680,15 @@ export class Sim {
         h.glanceT = 1;
       }
       if (h.dir > 0 && h.chestI < h.route.chestAt.length && h.dist >= h.route.chestAt[h.chestI]) {
+        // Fatten, then feast: the first of each party to reach a chest takes its purse.
+        const bit = 1 << Math.min(30, h.chestI);
         h.chestI++;
         const p = this.parties.get(h.party);
-        if (p && !p.looted) {
+        if (p && !(p.chests & bit) && h.type !== 'champ') {
+          p.chests |= bit;
           p.looted = true;
-          this.emit({ t: 'loot', x: h.x, y: h.y });
+          h.loot++;
+          this.emit({ t: 'loot', x: h.x, y: h.y, hero: h.type });
         }
       }
       const tile = idx(Math.floor(h.x), Math.floor(h.y));
@@ -733,7 +776,7 @@ export class Sim {
       const hits = m.cleave ? m.blocked.length : 1;
       for (let i = 0; i < hits && i < m.blocked.length; i++) {
         const h = m.blocked[i];
-        this.hurt(h, m.dps * dt * (h.type === 'champ' ? 0.5 : 1), true);
+        this.hurt(h, m.dps * dt * (h.type === 'champ' ? 0.5 : 1), true, m.kind);
       }
       if (m.swing <= 0) m.swing = 0.5;
       m.hp -= incoming * dt;
@@ -777,7 +820,7 @@ export class Sim {
           const dy = h.y - tw.y;
           if (dx * dx + dy * dy <= tw.range2) {
             tw.active = true;
-            this.hurt(h, d, true);
+            this.hurt(h, d, true, 'brazier');
           }
         }
         continue;
@@ -808,10 +851,11 @@ export class Sim {
         const miss = best.dodge > 0 && !best.revealed && this.rng() < best.dodge;
         this.emit({ t: 'shot', kind: tw.kind as 'arrow' | 'clerk', x1: tw.x, y1: tw.y, x2: best.x, y2: best.y, miss });
         if (!miss) {
-          this.hurt(best, tw.dmg, tw.pierceArmor);
+          this.hurt(best, tw.dmg, tw.pierceArmor, tw.kind);
           if (tw.bleed > 0 && !best.dead) {
             best.bleedT = 3;
             best.bleedDps = Math.max(best.bleedDps, tw.bleed);
+            best.bleedSrc = tw.kind;
           }
         }
       }
@@ -831,7 +875,7 @@ export class Sim {
     let hits = 0;
     const tryHit = (h: SimHero) => {
       if (h.dodge > 0 && !h.revealed && this.rng() < h.dodge) return;
-      this.hurt(h, tw.dmg, false);
+      this.hurt(h, tw.dmg, false, 'ballista');
       hits++;
     };
     tryHit(target);
@@ -862,10 +906,11 @@ export class Sim {
       if (r.charges < 1) return;
       r.charges--;
       r.flash = 0.3;
-      this.hurt(h, r.dmg, false);
+      this.hurt(h, r.dmg, false, 'spikes');
       if (r.bleed > 0 && !h.dead) {
         h.bleedT = 3;
         h.bleedDps = Math.max(h.bleedDps, r.bleed);
+        h.bleedSrc = 'spikes';
       }
       this.emit({ t: 'rune', x: r.x, y: r.y, kind: 'spikes' });
     } else if (r.kind === 'confusion') {
@@ -926,8 +971,9 @@ export class Sim {
     if (i >= 0) m.blocked.splice(i, 1);
   }
 
-  private hurt(h: SimHero, raw: number, ignoreArmor: boolean, glare = false): void {
+  private hurt(h: SimHero, raw: number, ignoreArmor: boolean, src: string, glare = false): void {
     if (h.dead || h.gone) return;
+    h.src = src;
     let d = ignoreArmor ? raw : Math.max(1, raw - Math.max(0, h.armor - this.ap));
     if (h.vuln > 0) d *= 1 + h.vuln;
     h.hp -= d;
@@ -953,7 +999,7 @@ export class Sim {
     const bonus = p?.bonus ?? 0;
     const purse = p?.looted && this.caged > 1 ? 1 + 0.1 * (this.caged - 1) : 1;
     const greed = this.hasGreed && !(h.leaked && h.type === 'champ') ? this.greedAt(h.x, h.y) : 0;
-    const full = h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse * (1 + greed);
+    const full = h.bounty * (1 + bonus) * M.plunderMult(this.ws) * purse * (1 + greed) * (1 + M.LOOT_BONUS * h.loot);
     // D-dungeon-01: a thief caught on the way out pays the sack back plus a recovery bonus on its
     // *bounty* (RECOVER_BONUS of the kill), carved out of that kill's pay (a Champion that reached
     // the Hoard pays only the bonus). Letting a hero in and killing it later never beats killing it
@@ -967,7 +1013,15 @@ export class Sim {
       net += h.sack + recover;
     }
     if (!this.live) this.partyNet.set(h.party, (this.partyNet.get(h.party) ?? 0) + net);
-    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, recover, by: glare ? 'glare' : 'other', greed: greed > 0 });
+    const rc = p?.rc;
+    if (rc) {
+      const src = h.src || 'other';
+      rc.kills[src] = (rc.kills[src] ?? 0) + 1;
+      rc.earned += amount + recover;
+      rc.stolen -= h.sack;
+      if (h.loot > 0) rc.looters++;
+    }
+    this.emit({ t: 'kill', x: h.x, y: h.y, amount, hero: h.type, sack: h.sack, recover, by: glare ? 'glare' : 'other', greed: greed > 0, src: h.src, loot: h.loot });
     this.resolve(h);
   }
 
@@ -976,8 +1030,8 @@ export class Sim {
     h.dir = -1;
     h.confT = 0;
     this.release(h);
-    const want = M.stealBase(h.type, h.bounty);
-    const sack = this.stealFn ? this.stealFn(h) : Math.min(want, 0.02 * Math.max(200, this.earned * 0.25));
+    const want = M.stealBase(h.type, h.bounty, h.loot);
+    const sack = this.stealFn ? this.stealFn(h) : Math.min(want, M.stealCap(Math.max(200, this.earned * 0.25), h.loot));
     h.sack = sack;
     if (!this.stealFn) {
       this.stolen += sack;
@@ -985,7 +1039,13 @@ export class Sim {
     }
     this.leaks++;
     const p = this.parties.get(h.party);
-    if (p) p.leaked++;
+    if (p) {
+      p.leaked++;
+      if (p.rc) {
+        p.rc.leakers.push(h.type);
+        p.rc.stolen += sack;
+      }
+    }
     this.gongStack = 0;
     this.emit({ t: 'leak', x: h.x, y: h.y, hero: h.type, sack });
   }
@@ -993,7 +1053,9 @@ export class Sim {
   private escape(h: SimHero): void {
     h.gone = true;
     this.release(h);
-    this.emit({ t: 'escape', hero: h.type, sack: h.sack });
+    const rc = this.parties.get(h.party)?.rc;
+    if (rc && h.loot > 0) rc.lootEsc++;
+    this.emit({ t: 'escape', hero: h.type, sack: h.sack, loot: h.loot });
     this.resolve(h);
   }
 
@@ -1007,7 +1069,7 @@ export class Sim {
       this.history.push({ size: p.size, leaked: p.leaked });
       if (!this.live) this.partyStats.set(h.party, { size: p.size, leaked: p.leaked });
       if (this.history.length > 20) this.history.shift();
-      this.emit({ t: 'partyDone', size: p.size, leaked: p.leaked });
+      this.emit({ t: 'partyDone', size: p.size, leaked: p.leaked, rc: p.rc ?? undefined });
     }
   }
 
@@ -1165,7 +1227,7 @@ let lastVal: IdleResult = { pps: 0, leak: 0, tier: 0 };
  * sim) compute synchronously and stay deterministic.
  */
 /** Bump when the idle sim's rules change, so a saved `idleMemo` from an older build is ignored. */
-const IDLE_MEMO_V = 1;
+const IDLE_MEMO_V = 2; // 2: Bait Chest purses (Wave 1)
 let idleAsync = typeof window !== 'undefined' && typeof document !== 'undefined';
 const IDLE_SLICE_MS = 6;
 const idleQueue = new Map<string, Generator<void, IdleResult>>();

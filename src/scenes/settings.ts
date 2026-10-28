@@ -4,6 +4,9 @@ import { exportSave, importSave, wipeSave } from '../core/save';
 import { deptSetting, deptSettingValues, setDeptSetting } from '../core/settings';
 import type { DeptId } from '../core/types';
 import { checkForUpdate } from '../pwa';
+import { refreshSilentSwitch, silentSwitchSupport } from '../core/audio';
+import { hapticsSupport } from '../core/haptics';
+import { exportPlaytest, playtestOf } from '../core/playtest';
 
 declare const __APP_VERSION__: string;
 
@@ -48,7 +51,16 @@ export function openSettings(game: Game): void {
       return rows ? `<h3 style="margin:8px 0 4px">${esc(def.name.toUpperCase())}</h3>${rows}` : '';
     })
     .join('');
-  const hasLog = game.built.some((id) => Array.isArray((game.save.depts[id]?.persistent as any)?.log));
+  const hapticHint =
+    hapticsSupport() === 'vibrate'
+      ? 'Vibration on this device.'
+      : hapticsSupport() === 'ios-switch'
+        ? 'iPhone (iOS 18+): a light tick on taps only. Apple allows no buzz from timers.'
+        : 'This browser offers no haptics.';
+  const silentHint =
+    silentSwitchSupport() === 'audioSession'
+      ? 'Uses the audio session: like any app with sound, it pauses your music.'
+      : 'Uses a silent audio track: it may pause your music and show on the lock screen.';
   el.innerHTML = `
     <div class="box" style="text-align:left;max-height:80vh;overflow:auto">
       <h2>SETTINGS</h2>
@@ -61,13 +73,14 @@ export function openSettings(game: Game): void {
       <p><label>Numbers<br><select data-k="notation">
         ${opt('suffix', s.notation, '1.23K / 4.56M')}${opt('sci', s.notation, '1.23e3')}
       </select></label></p>
-      <p><label><input type="checkbox" data-k="haptics"${s.haptics ? ' checked' : ''}> Vibration (Android)</label></p>
+      <p><label><input type="checkbox" data-k="haptics"${s.haptics ? ' checked' : ''}> Haptics</label><br><span style="opacity:.6;font-size:12px">${hapticHint}</span></p>
       <p><label>Sound<br><input type="range" data-k="sfx" min="0" max="1" step="0.1" value="${s.sfx ?? 0.6}" style="width:100%"></label></p>
+      <p><label><input type="checkbox" data-k="soundOnSilent"${s.soundOnSilent !== false ? ' checked' : ''}> Play sound when iPhone is on silent</label><br><span style="opacity:.6;font-size:12px">${silentHint}</span></p>
       <p><label><input type="checkbox" data-k="leftHanded"${s.leftHanded ? ' checked' : ''}> Left-handed (mirror controls)</label></p>
       ${deptRows}
       <p><button data-a="update" class="secondary">Check for updates</button></p>
       <p><button data-a="export" class="secondary">Export save</button> <button data-a="import" class="secondary">Import</button></p>
-      ${hasLog ? '<p><button data-a="log" class="secondary">Export playtest log</button></p>' : ''}
+      <p><button data-a="log" class="secondary">Export playtest log</button><br><span style="opacity:.6;font-size:12px">Sessions, departments, Falls, buys and your daily ratings. Stays on this phone until you share it.</span></p>
       <p><textarea data-k="io" rows="3" style="width:100%;font:12px monospace;display:none"></textarea></p>
       <p><button data-a="wipe" class="secondary" style="background:#7a2020">Erase everything</button></p>
       <p style="opacity:.6;font-size:12px">Overlord v${__APP_VERSION__}</p>
@@ -77,6 +90,10 @@ export function openSettings(game: Game): void {
   el.querySelector<HTMLSelectElement>('[data-k="chatter"]')!.onchange = (e) => (s.chatter = (e.target as HTMLSelectElement).value as typeof s.chatter);
   el.querySelector<HTMLSelectElement>('[data-k="notation"]')!.onchange = (e) => (s.notation = (e.target as HTMLSelectElement).value as typeof s.notation);
   el.querySelector<HTMLInputElement>('[data-k="haptics"]')!.onchange = (e) => (s.haptics = (e.target as HTMLInputElement).checked);
+  el.querySelector<HTMLInputElement>('[data-k="soundOnSilent"]')!.onchange = (e) => {
+    s.soundOnSilent = (e.target as HTMLInputElement).checked;
+    refreshSilentSwitch(); // inside the tap: iOS applies it now
+  };
   el.querySelector<HTMLInputElement>('[data-k="sfx"]')!.oninput = (e) => {
     const v = Number((e.target as HTMLInputElement).value);
     s.sfx = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.6;
@@ -107,6 +124,12 @@ export function openSettings(game: Game): void {
     } else if (a === 'log') {
       // Playtest logs (07 §19): every department that keeps a persistent `log` array.
       const out: Record<string, unknown> = { app: __APP_VERSION__, at: new Date().toISOString() };
+      // The suite playtest log (Wave 0): sessions, departments, Falls, buys, daily ratings.
+      try {
+        out.playtest = exportPlaytest(playtestOf(game.save), Date.now());
+      } catch {
+        /* a broken log never blocks the department logs */
+      }
       for (const id of game.built) {
         const log = (game.save.depts[id]?.persistent as any)?.log;
         if (Array.isArray(log)) out[id] = log;
@@ -115,11 +138,24 @@ export function openSettings(game: Game): void {
       io.style.display = 'block';
       io.value = text;
       io.select();
+      // iPhone: the share sheet (Save to Files, AirDrop, Mail) is the dependable route out of an
+      // installed PWA; elsewhere fall back to a download. Started inside the tap (no await before).
+      const name = `overlord-playtest-${Date.now()}.json`;
+      let shared = false;
       try {
+        const file = new File([text], name, { type: 'application/json' });
+        if (navigator.canShare?.({ files: [file] })) {
+          shared = true;
+          void navigator.share({ files: [file], title: 'Overlord playtest log' }).catch(() => {});
+        }
+      } catch {
+        shared = false;
+      }
+      if (!shared) try {
         const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
         const link = document.createElement('a');
         link.href = url;
-        link.download = `overlord-playtest-${Date.now()}.json`;
+        link.download = name;
         document.body.appendChild(link);
         link.click();
         link.remove();

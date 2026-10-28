@@ -7,6 +7,8 @@ import { formatNum } from '../core/format';
 import { PixelText, wrap } from './font';
 import { Button, C, drawPanel } from './widgets';
 import { destroyTree } from './destroy';
+import { sfx } from '../core/audio';
+import { playtestOf, ptCount } from '../core/playtest';
 
 const ROW_H = 28;
 const HEADER_H = 12;
@@ -318,6 +320,8 @@ export class UpgradeSheet extends Container {
         h: 21,
         label: 'BUY',
         repeat: rowRepeats(entry),
+        // The buy plays its own ka-ching (or the error buzz) instead of the plain tap.
+        feedback: 'none',
         onTap: () => {
           if (this.drag?.moved) return;
           this.buy(row);
@@ -336,14 +340,34 @@ export class UpgradeSheet extends Container {
   private buy(row: Row): void {
     const e = row.entry;
     try {
-      if (e.locked?.() || e.level() >= e.max) return;
+      if (e.locked?.() || e.level() >= e.max) return void sfx.error();
       const plan = this.planFor(row, true);
-      if (!plan.afford || !e.canAfford()) return;
-      if (buyLevels(e, plan.n) > 0) this.game.saveSoon();
+      if (!plan.afford || !e.canAfford()) return void sfx.error();
+      const got = buyLevels(e, plan.n);
+      if (got > 0) {
+        this.game.saveSoon();
+        this.celebrate(row, got);
+      }
     } catch (err) {
       console.error(err);
     }
     row.planKey = '';
+  }
+
+  /** Purchase feedback for every department for free (A2): row flash, a "+N LV" pop over the
+   * button, the rising ka-ching, a haptic (iOS too: this runs inside the tap) and the log. */
+  private celebrate(row: Row, levels: number): void {
+    const btn = row.btn;
+    if (!btn) return;
+    const x = row.root.x;
+    const y = row.root.y + this.list.y;
+    const w = this.box.w - 8;
+    if (y + ROW_H < this.box.listY || y > this.box.listY + this.box.listH) return;
+    const lvl = safe(() => row.entry.level(), 0);
+    const milestone = lvl > 0 && lvl % 25 === 0 && row.entry.max > 25;
+    const text = milestone ? `LV ${lvl}!` : levels > 1 ? `+${levels} LV` : row.entry.max === 1 || row.entry.buyLabel || row.entry.costText ? 'DONE!' : `LV ${lvl}`;
+    this.game.juice.kaChing(x, Math.max(this.box.listY, y), w, ROW_H - 2, text, milestone ? Math.max(levels, 25) : levels);
+    this.game.guard('playtest', () => ptCount(playtestOf(this.game.save), 'buys'));
   }
 
   private walletNow(e: UpgradeEntry): number | null {

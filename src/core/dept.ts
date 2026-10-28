@@ -6,6 +6,7 @@ import type { Layout } from './layout';
 import type { Game } from './game';
 import type { TriggerType } from './director';
 import type { StewardCandidate } from './perks';
+import type { LegendSpec } from './legends';
 
 export type { TriggerType } from './director';
 export type { StewardCandidate } from './perks';
@@ -180,6 +181,56 @@ export interface DeptEcon {
    * measure its own clock (e.g. "since the wall was last on screen"). Must not throw.
    */
   onOffline?(save: DeptSave, elapsedSeconds: number, factor: number, info: { now: number; capSeconds: number }): void;
+
+  // ----- Wave 1: Next Goal ribbon and Night Orders (core/goals.ts, core/orders.ts) -----
+
+  /**
+   * The single next enticing goal inside this department for the Next Goal ribbon (department HUD,
+   * and the Throne Room when it is the best goal of the suite), e.g. { label: 'HIRE 4TH TOADLING',
+   * progress: 230 / 400, detail: '230/400' }. `progress` is 0-1 (1 = ready now). Return null for
+   * "nothing special": the core falls back to the cheapest unaffordable Ready buy, then the Legend.
+   * Pure and cheap (called ~2x a second); a throw falls back silently.
+   */
+  nextGoal?(save: DeptSave): DeptGoal | null;
+  /**
+   * Night Orders: the 2 orders the manager offers for the player's absence (the first is the
+   * default until the player picks). Absent = the core's flavoured pair (core/orders.ts
+   * CORE_ORDERS), whose effects need no department code. An order with a `kind` also gets that core
+   * effect (income +25% / gate x1.5 that may fill the Legend gate offline / Goods x2).
+   */
+  nightOrders?(save: DeptSave): NightOrderDef[];
+  /**
+   * Applies the department's own effect of the standing order once per absence (>= 60 s), after the
+   * core credited the offline income (and the order's core `kind` effect, if any). Same arguments
+   * as onOffline. Return a short result for Gobbo's report and the manager's return line
+   * ("2 MOON OPALS FOUND", <= 28 characters), or nothing to use the core's text. Must not throw.
+   */
+  applyNightOrder?(save: DeptSave, orderId: string, elapsedSeconds: number, factor: number): string | void;
+}
+
+/** A department's next goal (DeptEcon.nextGoal). */
+export interface DeptGoal {
+  /** Upper case, <= 24 characters: 'HIRE 4TH TOADLING'. */
+  label: string;
+  /** 0-1; 1 = ready now. */
+  progress: number;
+  /** Optional progress text instead of a percentage: '230/400'. */
+  detail?: string;
+}
+
+/** Core effect kinds a Night Order can carry (core/orders.ts ORDER_EFFECTS). */
+export type NightOrderKind = 'income' | 'gate' | 'goods';
+
+/** One Night Order (DeptEcon.nightOrders). */
+export interface NightOrderDef {
+  /** Stable id, saved in meta.orders. */
+  id: string;
+  /** Upper case button text, <= 15 characters: 'DIG DEEPER'. */
+  label: string;
+  /** One short line, <= 34 characters: 'Rare finds, less ore'. */
+  desc: string;
+  /** Optional core effect applied before applyNightOrder. */
+  kind?: NightOrderKind;
 }
 
 /**
@@ -226,6 +277,12 @@ export interface DeptDef extends DeptEcon {
   manager: ManagerDef;
   onboarding: OnboardingStep[];
   legend: { name: string; line: string };
+  /**
+   * Legend roster override (A7, core/legends.ts): the escalating Legends met cycle after cycle,
+   * each with a title, a taunt and an optional look for its procedural portrait. Omit to use the
+   * default roster in core/legends.ts ROSTERS (whose first entry is `legend`).
+   */
+  legends?: LegendSpec[];
   createScene(ctx: DeptCtx): DeptScene;
   /** Micro-lessons (1-3 beats) keyed by id. Fired by ctx.lesson(id) or by a say(id, { type:
    * 'mechanic_unlocked' }) whose key has an entry here; replayable from Settings -> Managers. */

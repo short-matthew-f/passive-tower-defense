@@ -1,8 +1,12 @@
 // The Cauldron's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation (sim/) read this; index.ts spreads it into the full DeptDef.
-import type { Commendation, DeptEcon, StewardCandidate } from '../../core/dept';
+import type { Commendation, DeptEcon, DeptGoal, NightOrderDef, StewardCandidate } from '../../core/dept';
+import { ORDER_EFFECTS } from '../../core/orders';
 import type { DeptSave } from '../../core/types';
 import {
+  goldCount,
+  heldMalice,
+  JACKPOT,
   defaultPersistent,
   defaultRun,
   dropsPerSec,
@@ -17,6 +21,7 @@ import {
   type CPersistent,
   type CRun,
 } from './econ';
+import { INGREDIENTS, SPECIALS } from './sim';
 
 const run = (s: DeptSave) => s.run as CRun;
 const stats = (s: DeptSave) => run(s).stats ?? ({} as CRun['stats']);
@@ -41,6 +46,44 @@ function idleNodes(s: DeptSave) {
 }
 
 const exotic = (s: DeptSave) => s.imports?.contraband ?? 0;
+
+const ORD = ['1ST', '2ND', '3RD'];
+const ordinal = (n: number) => ORD[n - 1] ?? `${n}TH`;
+
+/** Next-goal candidates: buys that change what you see or do (not the +% rows). */
+function visibleGoals(s: DeptSave): { label: string; cost: number }[] {
+  const r = run(s);
+  const out: { label: string; cost: number }[] = [];
+  const add = (id: string, label: string) => {
+    const u = UPGRADES.find((x) => x.id === id);
+    if (!u || upLocked(u, s.cycle.n) || lvOf(r, id) >= u.max) return;
+    out.push({ label, cost: upCost(u, lvOf(r, id)) });
+  };
+  add('hire', `HIRE ${ordinal(lvOf(r, 'hire') + 2)} TOADLING`);
+  // Specials unlock one at a time (the next one appears once the one before is owned).
+  const nextSpecial = SPECIALS.find((id) => lvOf(r, id) <= 0);
+  if (nextSpecial) add(nextSpecial, `UNLOCK ${INGREDIENTS[nextSpecial].name.toUpperCase()}`);
+  add('jackpot', `JACKPOT X${JACKPOT[Math.min(JACKPOT.length - 1, lvOf(r, 'jackpot') + 1)]}`);
+  add('gold', `GOLD PEG ${goldCount(r) + 1}`);
+  add('row', 'EXTRA PEG ROW');
+  if (lvOf(r, 'bone') === 0) add('bone', 'BONE PEGS');
+  if (lvOf(r, 'rune') === 0) add('rune', 'RUNE PEGS');
+  if (lvOf(r, 'thorn') === 0) add('thorn', 'THORN PEGS');
+  if ((r.maliceBought ?? 0) < MALICE_MAX) out.push({ label: `MALICE ${(r.maliceBought ?? 0) + 1}`, cost: maliceCost(r.maliceBought ?? 0) });
+  return out;
+}
+
+/** The Cauldron's Night Orders (core/orders.ts): Granny simmers a Fever, or stinks up the realm. */
+function cauldronOrders(): NightOrderDef[] {
+  const inc = Math.round((ORDER_EFFECTS.income.bank - 1) * 100);
+  const gate = ORDER_EFFECTS.gate.gate;
+  return [
+    { id: 'simmer', label: 'SIMMER A FEVER', desc: inc > 0 ? `+${inc}% Bile, a Fever on return` : 'Brew Bile, a Fever on return', kind: 'income' },
+    { id: 'stink', label: 'STINK THE REALM', desc: `Legend gate x${gate}, order prepped`, kind: 'gate' },
+  ];
+}
+/** Absences shorter than this leave the order's own effect out (the core part still applies). */
+const ORDER_MIN_S = 600;
 
 export const cauldronEcon: DeptEcon = {
   id: 'cauldron',
@@ -85,6 +128,57 @@ export const cauldronEcon: DeptEcon = {
   rankRef: 8000,
   rankTarget: 350_000,
   commendations,
+
+  // ---------- Wave 1: Next Goal ribbon and Night Orders ----------
+
+  /** The Legend's skill gate when it is the blocker, else the cheapest visible buy (ready or not). */
+  nextGoal(save): DeptGoal | null {
+    const r = run(save);
+    if (!r?.lv) return null;
+    const target = cauldronEcon.skillTarget(save.cycle?.n ?? 0);
+    if ((r.maliceBought ?? 0) >= target && heldMalice(r) < target) {
+      let n = 0;
+      for (let m = target; m <= MALICE_MAX; m++) n += r.batchByMal?.[m] ?? 0;
+      return { label: `5 BATCHES AT MALICE ${target}`.slice(0, 24), progress: Math.min(1, n / 5), detail: `${Math.min(5, n)}/5` };
+    }
+    const bank = r.bank ?? 0;
+    const list = visibleGoals(save).sort((a, b) => a.cost - b.cost);
+    // A visible buy you can afford now first (READY), else the cheapest one you're saving for.
+    const next = list.find((g) => g.cost <= bank) ?? list[0];
+    if (!next) return null;
+    return { label: next.label.slice(0, 24), progress: next.cost > 0 ? Math.min(1, bank / next.cost) : 1 };
+  },
+
+  nightOrders: () => cauldronOrders(),
+
+  applyNightOrder(save, orderId, elapsedSeconds) {
+    try {
+      const r = run(save);
+      if (!r?.lv || !(elapsedSeconds >= ORDER_MIN_S)) return;
+      if (orderId === 'simmer') {
+        // The first decent landing on return spins a sure Bubble Fever (logic.ts).
+        r.feverPrimed = true;
+        return 'A FEVER IS BUBBLING!';
+      }
+      if (orderId === 'stink') {
+        // Granny preps the order: every line but the last item filled, so one shot finishes it.
+        let prepped = false;
+        for (const t of [r.ticket, r.ticket2]) {
+          if (!t?.items?.length) continue;
+          t.items.forEach((it, i) => {
+            const want = i === t.items.length - 1 ? Math.max(0, it.n - 1) : it.n;
+            if (it.got < want) {
+              it.got = want;
+              prepped = true;
+            }
+          });
+        }
+        return prepped ? 'ORDER READY: ONE MORE SHOT' : undefined;
+      }
+    } catch {
+      /* never throws */
+    }
+  },
 
   // ---------- advancement hooks (00 §2.5, §5.2) ----------
 

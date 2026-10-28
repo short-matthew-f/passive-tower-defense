@@ -1,7 +1,7 @@
 // The Goblin Mines' live wall, headless (02 §2-§6, §13 "Logic"): the 5x5 rocks, regrowth, the
 // goblin crew hopping between rocks, kegs, cave-ins, gas and bedrock, Chain Lightning, Magma Pick
-// burns, Echo Strike, Heavy Knuckles, the Doom Drum's judged beat, Frenzy and Encore, Motherlodes
-// and the 50-rock skill gate. No Pixi: scene.ts renders it and feeds it taps; the balance sim
+// burns, Echo Strike, Heavy Knuckles, the Doom Drum's graded beat, Frenzy and Encore, Motherlodes,
+// the 50-rock skill gate, and Wave 1's Fury meter, Break Chain and Gold Goblin. No Pixi: scene.ts renders it and feeds it taps; the balance sim
 // (sim/adapters/mines.ts) drives the very same class with its bot, so live play and the sim can't
 // drift apart. All numbers come from model.ts.
 import type { DeptSave } from '../../core/types';
@@ -69,6 +69,10 @@ export interface TapResult {
   hit: boolean;
   crit: boolean;
   beatHit: boolean;
+  /** The Beat Hit landed inside the inner Perfect window. */
+  perfect: boolean;
+  /** This tap filled the Fury meter and unleashed a burst. */
+  fury: boolean;
   /** This tap was the beat's judged tap (hit or miss). */
   judged: boolean;
   thunder: boolean;
@@ -79,6 +83,31 @@ export interface TapResult {
 export interface BeatJudge {
   k: number;
   inWindow: boolean;
+  /** Inside the inner Perfect window (absent = Perfect, the pre-Wave-1 single window). */
+  perfect?: boolean;
+}
+
+/** The Gold Goblin on the wall, in wall units (U per tile). */
+export interface Gold {
+  x: number;
+  y: number;
+  fx: number;
+  fy: number;
+  tx: number;
+  ty: number;
+  tile: number;
+  hopT: number;
+  life: number;
+  face: number;
+}
+
+export interface GoldCatch {
+  kind: M.GoldKind;
+  x: number;
+  y: number;
+  /** Nuggets paid (Lucky Sack), after the core's multipliers. */
+  got: number;
+  gems: number;
 }
 
 export interface WallHooks {
@@ -101,6 +130,10 @@ export interface WallHooks {
   onClink?(t: Tile): void;
   onFrenzy?(start: boolean): void;
   onEcho?(t: Tile): void;
+  onFury?(start: boolean): void;
+  onGold?(event: 'spawn' | 'escape', g: Gold): void;
+  /** A Gold Rush or Overlord's Fist window ran out. */
+  onGoldEnd?(kind: 'rush' | 'fist'): void;
 }
 
 export class Wall {
@@ -117,6 +150,18 @@ export class Wall {
   pipDecay = 0;
   frenzyT = 0;
   encoreT = 0;
+  /** Fury meter 0..1, and the seconds left of a Fury burst. */
+  fury = 0;
+  furyT = 0;
+  /** Break Chain steps (chainN), and seconds since the last tap break. */
+  chainN = 0;
+  chainT = 99;
+  private chainDecay = 0;
+  /** The Gold Goblin (null when none is out), seconds to the next one, and his windows. */
+  gold: Gold | null = null;
+  goldIn: number;
+  rushT = 0;
+  fistT = 0;
   private echoes: { t: number; tile: number }[] = [];
   private save: DeptSave;
   private h: WallHooks;
@@ -149,6 +194,21 @@ export class Wall {
     }
     this.reset(true);
     this.syncGobs(true);
+    this.goldIn = this.nextGold();
+    // Night Order "Dig Deeper": the crew left every rock cracked to 30% (a Break Chain opener).
+    if (this.per.precrack) {
+      this.per.precrack = false;
+      for (const t of this.tiles) if (this.mineable(t) && t.kind !== 'rubble') t.hp = t.maxHp * M.PRECRACK_HP;
+    }
+  }
+
+  private nextGold(): number {
+    return M.GOLD_MIN + this.h.rnd() * (M.GOLD_MAX - M.GOLD_MIN);
+  }
+
+  /** A Gold Goblin within `delay` s (a return after an absence finds one waiting). */
+  queueGold(delay: number): void {
+    if (!this.gold) this.goldIn = Math.min(this.goldIn, Math.max(0, delay));
   }
 
   get run(): M.MinesRun {
@@ -284,6 +344,7 @@ export class Wall {
     if (this.gobs.length !== M.crewSize(r, this.save.imports?.bones ?? 0)) this.syncGobs();
     if (this.drumActive) this.clock += dt;
     this.stepFrenzy(dt);
+    this.stepWave1(dt);
     this.stepTiles(dt);
     this.stepGobs(dt);
     if (this.echoes.length) {
@@ -318,6 +379,99 @@ export class Wall {
       }
     }
     if (this.encoreT > 0) this.encoreT = Math.max(0, this.encoreT - dt);
+  }
+
+  /** Fury, the Break Chain's decay, the Gold Goblin and his windows. */
+  private stepWave1(dt: number): void {
+    if (this.furyT > 0) {
+      this.furyT -= dt;
+      if (this.furyT <= 0) {
+        this.furyT = 0;
+        this.h.onFury?.(false);
+      }
+    } else if (this.fury > 0) this.fury = Math.max(0, this.fury - M.FURY_DRAIN * dt);
+    this.chainT += dt;
+    if (this.chainN > 0 && this.chainT > M.CHAIN_WINDOW) {
+      this.chainDecay += dt;
+      while (this.chainDecay >= M.CHAIN_DECAY && this.chainN > 0) {
+        this.chainDecay -= M.CHAIN_DECAY;
+        this.chainN--;
+      }
+    }
+    if (this.rushT > 0 && (this.rushT -= dt) <= 0) {
+      this.rushT = 0;
+      this.h.onGoldEnd?.('rush');
+    }
+    if (this.fistT > 0 && (this.fistT -= dt) <= 0) {
+      this.fistT = 0;
+      this.h.onGoldEnd?.('fist');
+    }
+    const g = this.gold;
+    if (g) {
+      g.life -= dt;
+      g.hopT += dt;
+      const k = Math.min(1, g.hopT / M.GOLD_HOP);
+      g.x = g.fx + (g.tx - g.fx) * k;
+      g.y = g.fy + (g.ty - g.fy) * k;
+      if (g.life <= 0) {
+        this.gold = null;
+        this.goldIn = this.nextGold();
+        this.run.stats.goldsMissed++;
+        this.h.onGold?.('escape', g);
+      } else if (k >= 1) this.goldHop(g);
+    } else if (this.run.stats.rocks >= M.GOLD_ROCKS && (this.goldIn -= dt) <= 0) {
+      // He climbs in at an edge socket and scampers from rock to rock.
+      const edge = this.tiles.filter((t) => t.col === 0 || t.col === M.GRID - 1);
+      const t = edge[Math.floor(this.h.rnd() * edge.length)];
+      const x = t.col * U + U / 2;
+      const y = t.row * U + U / 2;
+      const ng: Gold = { x, y, fx: x, fy: y, tx: x, ty: y, tile: t.i, hopT: 0, life: M.GOLD_LIFE, face: t.col === 0 ? 1 : -1 };
+      this.gold = ng;
+      this.goldHop(ng);
+      this.h.onGold?.('spawn', ng);
+    }
+  }
+
+  private goldHop(g: Gold): void {
+    const from = this.tiles[g.tile];
+    const ns = this.around(from, false, true);
+    const t = ns[Math.floor(this.h.rnd() * ns.length)] ?? from;
+    g.fx = g.x;
+    g.fy = g.y;
+    g.tile = t.i;
+    g.tx = t.col * U + U / 2;
+    g.ty = t.row * U + U / 2;
+    g.hopT = 0;
+    if (Math.abs(g.tx - g.fx) > 1) g.face = g.tx > g.fx ? 1 : -1;
+  }
+
+  /** Taps the Gold Goblin: rolls his sack (M.GOLD_TABLE) and opens its window. Windows stack. */
+  catchGold(): GoldCatch | null {
+    const g = this.gold;
+    if (!g) return null;
+    const r = this.run;
+    const p = this.per;
+    this.gold = null;
+    this.goldIn = this.nextGold();
+    r.stats.golds++;
+    // Night Order "Bait a Thief" sets the first sack after the absence.
+    const kind = p.goldNext || M.rollGold(this.h.rnd());
+    p.goldNext = '';
+    const out: GoldCatch = { kind, x: g.x, y: g.y, got: 0, gems: 0 };
+    if (kind === 'sack') out.got = this.h.earn(M.sackRate(r, p, this.save.imports?.bones ?? 0) * M.GOLD_SACK_S);
+    else if (kind === 'rush') this.rushT = Math.max(this.rushT, 0) + M.GOLD_RUSH_S;
+    else if (kind === 'fist') this.fistT = Math.max(this.fistT, 0) + M.GOLD_FIST_S;
+    else {
+      out.gems = 1 + (this.h.rnd() < 0.5 ? 1 : 0);
+      p.gems += out.gems;
+      p.gemsEver += out.gems;
+    }
+    return out;
+  }
+
+  /** Nuggets multiplier from an open Gold Rush window. */
+  rushMult(): number {
+    return this.rushT > 0 ? M.GOLD_RUSH_MULT : 1;
   }
 
   private stepTiles(dt: number): void {
@@ -413,15 +567,15 @@ export class Wall {
   // ---------- player input ----------
 
   /** Judges the beat for this tap (one judged tap per beat, from the previous beat's midpoint,
-   * 02 §6E R4-01). Returns 'hit', 'miss' or null for a free (not judged) tap. */
-  private judge(b: BeatJudge): 'hit' | 'miss' | null {
+   * 02 §6E R4-01). Returns 'perfect', 'good', 'miss' or null for a free (not judged) tap. */
+  private judge(b: BeatJudge): 'perfect' | 'good' | 'miss' | null {
     if (b.k === this.lastJudged) return null;
     this.lastJudged = b.k;
-    if (b.inWindow) return 'hit';
-    // Steady Hands forgives a few missed judged taps per streak.
+    if (b.inWindow) return b.perfect === false ? 'good' : 'perfect';
+    // Steady Hands forgives a few missed judged taps per streak; otherwise a miss halves it.
     if (this.streak > 0 && this.forgiven < this.run.steadyH) this.forgiven++;
     else {
-      this.streak = 0;
+      this.streak = M.streakAfterMiss(this.streak);
       this.forgiven = 0;
     }
     return 'miss';
@@ -429,13 +583,21 @@ export class Wall {
 
   /**
    * A tap on tile i. `beat` is the judgement input when the drum is active (null for hold
-   * auto-hits, echoes and drum-off taps); `soft` is the rapid-tap soft-cap multiplier.
+   * auto-hits, echoes and drum-off taps). `auto` marks a hold auto-hit, which never feeds Fury.
+   * There is no rapid-tap soft cap any more: fast real taps fill the Fury meter instead.
    */
-  tap(i: number, beat: BeatJudge | null, o: { soft?: number; echo?: boolean } = {}): TapResult {
+  tap(i: number, beat: BeatJudge | null, o: { echo?: boolean; auto?: boolean } = {}): TapResult {
     const r = this.run;
     const p = this.per;
-    const res: TapResult = { hit: false, crit: false, beatHit: false, judged: false, thunder: false, dmg: 0 };
+    const res: TapResult = { hit: false, crit: false, beatHit: false, perfect: false, fury: false, judged: false, thunder: false, dmg: 0 };
     if (!o.echo) r.stats.taps++;
+    if (!o.echo && !o.auto && this.furyT <= 0 && (this.fury += M.FURY_PER_TAP) >= 1 - 1e-9) {
+      this.fury = 0;
+      this.furyT = M.FURY_DUR;
+      r.stats.furies++;
+      res.fury = true;
+      this.h.onFury?.(true);
+    }
     const j = beat && this.drumActive ? this.judge(beat) : null;
     res.judged = j !== null;
     const t = this.tiles[i];
@@ -458,19 +620,22 @@ export class Wall {
       return res;
     }
     res.hit = true;
-    let dmg = M.fistDamage(r) * (o.soft ?? 1);
+    let dmg = M.fistDamage(r);
     const crit = this.h.rnd() < M.critChance(r.critC) || (!o.echo && M.stewCrit(this.save.imports?.potions ?? 0, r.stats.taps));
     if (crit) {
       dmg *= M.critMult(r.critP);
       r.stats.crits++;
       res.crit = true;
     }
-    if (j === 'hit') {
+    if (j === 'perfect' || j === 'good') {
       this.streak++;
       r.stats.beatHits++;
       r.stats.bestStreak = Math.max(r.stats.bestStreak, this.streak);
-      dmg *= M.beatMult(r.drumhead, this.tempo) * M.streakBonus(this.streak);
+      const bm = M.beatMult(r.drumhead, this.tempo);
+      dmg *= (j === 'perfect' ? bm : M.goodMult(bm)) * M.streakBonus(this.streak);
       res.beatHit = true;
+      res.perfect = j === 'perfect';
+      if (res.perfect) r.stats.perfects++;
       this.onBeatHit();
       if (p.thunder > 0 && beat && beat.k % M.THUNDER_EVERY === 0) {
         res.thunder = true;
@@ -478,6 +643,8 @@ export class Wall {
       }
     }
     if (this.frenzyT > 0) dmg *= M.frenzyTapMult(r.frenzy);
+    if (this.furyT > 0) dmg *= M.FURY_MULT;
+    if (this.fistT > 0) dmg *= M.GOLD_FIST_MULT;
     res.dmg = dmg;
     if (t.first === null) t.first = 'tap';
     this.h.onHit?.(t, dmg, 'tap');
@@ -574,7 +741,7 @@ export class Wall {
     if (kind === 'hollow' && t.shell > 1) {
       t.shell = 1;
       t.hp = t.maxHp;
-      const got = this.h.earn(M.R(r.depth) * M.HOLLOW_OUTER * M.oreMult(r));
+      const got = this.h.earn(M.R(r.depth) * M.HOLLOW_OUTER * M.oreMult(r) * this.rushMult());
       this.h.onShell?.(t, got);
       return;
     }
@@ -594,7 +761,15 @@ export class Wall {
     } else {
       let reward = M.R(r.depth) * M.KIND_REWARD[kind] * M.oreMult(r);
       if ((kind === 'vein' || kind === 'geode' || kind === 'mother') && t.first === 'tap') reward *= M.keenBonus(r.keen);
-      got = this.h.earn(reward);
+      // Break Chain: your own breaks step it up and pay its multiplier.
+      if (by === 'tap') {
+        this.chainN = Math.min(M.CHAIN_STEPS, this.chainN + 1);
+        this.chainT = 0;
+        this.chainDecay = 0;
+        r.stats.bestChain = Math.max(r.stats.bestChain, this.chainN);
+        reward *= M.chainMult(this.chainN);
+      }
+      got = this.h.earn(reward * this.rushMult());
       r.stats.rocks++;
       r.stats.sinceMother++;
       if (kind === 'vein') r.stats.veins++;

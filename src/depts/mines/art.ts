@@ -99,6 +99,7 @@ export type ArtKind =
   | 'geode'
   | 'keg'
   | 'rubble'
+  | 'soft'
   | 'sprout'
   | 'mother'
   | 'gas'
@@ -145,6 +146,7 @@ export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): G
       }
       return;
     }
+    if (kind === 'soft') return drawSoft(c, s, v, pal, p, r);
     const geode = kind === 'geode';
     const base = kind === 'gas' ? 0x5a7a3a : kind === 'hot' ? 0x6a2a1a : kind === 'mirror' ? pal.light : kind === 'hollowCore' ? pal.dark : pal.base;
     const light = kind === 'gas' ? 0x8ab05a : kind === 'hot' ? 0xa0402a : kind === 'mirror' ? 0xf4f0ff : pal.light;
@@ -229,6 +231,68 @@ export function rockArt(kind: ArtKind, stratum: number, v: number, s: number): G
       c.rect(cx + 2, cy - 1, 1, 3).fill(0xb070e0);
       c.rect(cx, cy - 3, 1, 1).fill(0xffffff);
     }
+  });
+}
+
+/** Crumbly rock (Wave 1): a pale, sandy, pre-fissured lump with loose gravel at its foot, so it
+ * reads as "this one breaks fast" from across the wall. */
+function drawSoft(c: GraphicsContext, s: number, v: number, pal: Stratum, p: [number, number][], r: () => number): void {
+  const mix = (a: number, b: number, k: number) => {
+    const ch = (sh: number) => Math.round(((a >> sh) & 255) * (1 - k) + ((b >> sh) & 255) * k);
+    return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+  };
+  const base = mix(pal.light, 0xe8d8b0, 0.35);
+  const light = mix(base, 0xffffff, 0.35);
+  const dark = mix(pal.base, 0x000000, 0.1);
+  // A slightly smaller, squatter blob: it is already falling apart.
+  const ss = s - 4;
+  blob(c, ss, v, base, light, dark, 2, 4);
+  // Fissures: two zigzags from the rim toward the middle.
+  for (const [x0, dir] of [[0.32, 1], [0.66, -1]] as [number, number][]) {
+    let x = Math.floor(s * x0);
+    for (let y = 7; y < Math.floor(s * 0.62); y++) {
+      if (inside(p, x, y, 3)) c.rect(x, y, 1, 1).fill(OUTLINE);
+      if (y % 3 === 0) x += dir;
+    }
+  }
+  // Sandy specks and loose gravel at the foot.
+  for (let i = 0; i < 10; i++) {
+    const x = Math.floor(r() * s);
+    const y = Math.floor(r() * s);
+    if (inside(p, x, y, 4)) c.rect(x, y, 1, 1).fill(dark);
+  }
+  for (const gx of [3, 8, s - 9, s - 5]) c.rect(gx, s - 2, 2, 1).fill(dark).rect(gx, s - 2, 1, 1).fill(light);
+}
+
+/** The Gold Goblin (Wave 1): a grinning thief with a gold sack, 12x12, origin at his centre.
+ * frame 0/1 = scamper; `glint` adds a sparkle on the sack. */
+export function goldGoblinArt(frame: number, glint: boolean): GraphicsContext {
+  return cached(`goldgob.${frame}.${glint}`, (c) => {
+    const P: Record<string, number> = {
+      k: OUTLINE,
+      g: 0xe8c04a,
+      G: 0xa07a20,
+      y: 0xfff0a0,
+      w: 0xffffff,
+      r: 0xc03a3a,
+      s: 0x8a5a30,
+      S: 0x5a3818,
+      o: 0xe8c04a,
+    };
+    const body = [
+      '..kkkk......',
+      '.kggggk..kk.',
+      'kggrrggk.kssk',
+      '.kgwgwk.ksSSk',
+      '..kgggk.ksoSk',
+      '.kGgggGkksSSk',
+      '.kgGGGgk.kkk.',
+      '..kgggk......',
+      frame ? '..kk.kk.....' : '.kk...kk....',
+      frame ? '..k...k.....' : 'kk.....kk...',
+    ];
+    sprite(c, body, P, -6, -5);
+    if (glint) c.rect(4, -6, 1, 3).fill(0xffffff).rect(3, -5, 3, 1).fill(0xffffff);
   });
 }
 

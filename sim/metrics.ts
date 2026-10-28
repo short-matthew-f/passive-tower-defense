@@ -31,32 +31,33 @@ const DAY = 86400;
 /** Baseline seconds below which the ratio rows are reported as INFO (too few payouts to judge). */
 const MIN_RATIO_S = 600;
 
-/** Spec arc (00 §6): first Fall of each department, in days since the start (0-based, fractional). */
+/** Spec arc (00 §6): first Fall of each department, in days since the start (0-based, fractional).
+ * Pass 7 (fun plan A4, "the best content arrives too late"): Seals and Dread gates were cut so the
+ * Bridge opens in session 1, the Styx on day 1 (the first Fall's Dread opens it), the Spire on day 2
+ * and the War Pit on day 3; with the 24 h offline cap, Night Orders and active play counting x2 on
+ * the economy gate, every first Fall moved earlier. The arcs below are the Pass 7 design (the
+ * reference profile's 3-seed spread with a margin), replacing the Pass 1-6 00 §6 arc. */
 export const ARC_FIRST_FALL_DAY: Partial<Record<DeptId, [number, number]>> = {
-  cauldron: [1.0, 1.5], // "typically early day 2"
-  mines: [2.0, 3.0], // "the Mines Fall second (day 3)"
-  dungeon: [3.0, 4.0], // "the Dungeon third (day 4)"
-  bridge: [4.0, 5.0], // not stated; next in line
-  // Not stated in 00 §6. Derived: the Dungeon and the Bridge Fall ~2.8 and ~3.0 days after their
-  // unlock in the reference profile, so departments 5-6 are held to 2.75-3.75 days after theirs
-  // (Styx opens day 2, ~1.5 d; Spire day 4-5, ~3.5 d). That staggers them after the Bridge and
-  // leaves the Spire's first Fall at the end of week 1, as 00 §6 implies (the full suite's
-  // 120-200 Dread has the Spire contributing almost nothing by day 7).
-  styx: [4.25, 5.25],
-  spire: [6.25, 7.25],
-  // The War Pit opens on day 6-8 (00 §6, ~6.0 d); the same 2.75-3.75 days after its unlock.
-  pit: [8.75, 9.75],
+  cauldron: [0.75, 1.5], // day 1 evening (was "typically early day 2")
+  mines: [1.75, 3.0], // day 2 evening - day 3 (was day 3)
+  dungeon: [2.25, 3.25], // day 3 (was day 4)
+  bridge: [2.5, 3.5], // day 3 evening - day 4 (was day 5)
+  styx: [3.0, 4.5], // ~3-3.5 days after its day-1 unlock (was 4.25-5.25)
+  spire: [4.5, 5.5], // ~3 days after its day-2 unlock (was 6.25-7.25)
+  pit: [5.5, 6.5], // ~3 days after its day-3 unlock (was 8.75-9.75)
 };
 
-/** 00 §6 reference unlock day for departments 5-7 (0-based days), tolerance ± 1 day (00 §8.1). */
+/** Reference unlock day for departments 5-7 (0-based days), tolerance ± 1 day (00 §8.1).
+ * Pass 7: Styx day 1 (was day 2), Spire day 2 (was day 4-5), War Pit day 3 (was day 6-8). */
 export const ARC_UNLOCK_DAY: Partial<Record<DeptId, [number, number]>> = {
-  styx: [1.0, 2.0], // "day 2"
-  spire: [3.0, 5.0], // "day 4-5"
-  pit: [5.0, 7.0], // "day 6-8"
+  styx: [0.5, 1.0],
+  spire: [1.0, 2.0],
+  pit: [2.0, 3.0],
 };
 
-/** Expected unlock time from 00 §6, in active minutes, with the ±30 min tolerance for departments 2-4. */
-export const ARC_UNLOCK_ACTIVE_MIN: Partial<Record<DeptId, number>> = { mines: 10, dungeon: 40, bridge: 105 };
+/** Expected unlock time in active minutes, ±30 min, for departments 2-4. Pass 7: the Dungeon at
+ * ~15 min (was 40) and the Bridge inside the 45-minute first session (was 105). */
+export const ARC_UNLOCK_ACTIVE_MIN: Partial<Record<DeptId, number>> = { mines: 10, dungeon: 15, bridge: 40 };
 
 /** Sim seconds -> "day 2 08:10" (1-based day, like the spec's "day 2"). */
 export function dayClock(t: number): string {

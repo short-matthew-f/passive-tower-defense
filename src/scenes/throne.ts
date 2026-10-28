@@ -33,17 +33,24 @@ import { DEPT_ORDER, type DeptId } from '../core/types';
 import { PixelText, wrap } from '../ui/font';
 import { Button, C, drawBar, drawPanel, drawSprite } from '../ui/widgets';
 import { openSettings } from './settings';
+import { legendNextBadge } from '../ui/legendui';
 import { openArmory } from '../ui/goods';
 import { destroyTree } from '../ui/destroy';
+import { DEPT_NAMES, sealRevealed, takeReveals } from '../core/goals';
+import { ordersFor, setOrder, standingOrder } from '../core/orders';
+import { Ribbon, RIBBON_H } from '../ui/ribbon';
 
-export const NAMES: Record<DeptId, string> = {
-  cauldron: 'CAULDRON',
-  mines: 'MINES',
-  dungeon: 'DUNGEON',
-  bridge: 'BRIDGE',
-  styx: 'STYX',
-  spire: 'SPIRE',
-  pit: 'WAR PIT',
+export const NAMES: Record<DeptId, string> = DEPT_NAMES;
+
+/** Progressive disclosure (research R5): what a sealed door out of reach whispers instead of a price. */
+const RUMOURS: Record<DeptId, [string, string]> = {
+  cauldron: ['BUBBLING', 'SOMETHING BUBBLES BEHIND THE BOARDS.'],
+  mines: ['TAP TAP TAP', 'SOMETHING TAPS BEHIND THE BOARDS. SMALL PICKS. SMALL CURSES.'],
+  dungeon: ['COINS CLINK', 'COINS CLINK IN THE DARK BELOW. AND SOMETHING ELSE, BREATHING.'],
+  bridge: ['TOLL BELLS', 'A TOLL BELL RINGS FAR AWAY. SOMEONE BIG WANTS PAYING.'],
+  styx: ['OARS SPLASH', 'WATER LAPS AT THE BOARDS. AN OAR KNOCKS, PATIENT.'],
+  spire: ['A LOW HUM', 'A HUM CLIMBS THE STAIRS. THE AIR SMELLS OF SPARKS.'],
+  pit: ['WAR DRUMS', 'DRUMS. ROARS. THE FLOOR SHAKES IN TIME.'],
 };
 
 const OVERLORD = [
@@ -94,6 +101,8 @@ interface Door {
   w: number;
   h: number;
   peekT: number; // seconds left of a manager cameo
+  /** Seconds left of the reveal moment (a sealed door comes within reach) or a GO flash. */
+  revealT: number;
 }
 
 export class ThroneScene {
@@ -111,6 +120,7 @@ export class ThroneScene {
   private decorKey = '';
   private cx: number;
   private ty: number;
+  private ribbon: Ribbon;
 
   constructor(game: Game) {
     this.game = game;
@@ -139,12 +149,19 @@ export class ThroneScene {
     menu.position.set(L.w - L.safe.r - 34, L.safe.t + 11);
     menu.hitArea = new Rectangle(-4, -2, 38, 14);
     this.root.addChild(menu);
+    // Night Orders (research R1): what each manager does while you're away; 2 taps to change one.
+    const orders = new Button({ w: 38, h: 9, label: 'ORDERS', color: 0x6e4a2e, shade: 0x3a2416, textColor: C.ink, onTap: () => openNightOrders(game) });
+    orders.position.set(L.w - L.safe.r - 34 - 42, L.safe.t + 11);
+    orders.hitArea = new Rectangle(-3, -2, 42, 14);
+    this.root.addChild(orders);
     this.drawDecor();
 
     // Department doors: 3 columns x 2 rows, then the War Pit gate.
     const ty = this.ty;
     const bottomBar = L.h - L.safe.b - 26;
-    const availH = bottomBar - (ty + 40) - 4;
+    // The Next Goal ribbon sits just above the tabs.
+    const ribbonY = bottomBar - RIBBON_H - 1;
+    const availH = ribbonY - (ty + 40) - 4;
     const cols = 3;
     const usableW = L.w - L.safe.l - L.safe.r - 8;
     const dw = Math.floor((usableW - (cols - 1) * 4) / cols);
@@ -179,8 +196,14 @@ export class ThroneScene {
       root.hitArea = new Rectangle(0, 0, w, h);
       root.on('pointertap', () => this.tapDoor(id));
       this.root.addChild(root);
-      this.doors.push({ id, root, g, peek, label, status, x, y, w, h, peekT: 0 });
+      this.doors.push({ id, root, g, peek, label, status, x, y, w, h, peekT: 0, revealT: 0 });
     });
+    this.ribbon = new Ribbon(game, 'throne', usableW);
+    this.ribbon.position.set(L.safe.l + 4, ribbonY);
+    this.root.addChild(this.ribbon);
+    // Doors that came within reach while away (or on an old save) reveal now, quietly if many.
+    const rev = takeReveals(game.save, game.built.filter((id) => !!game.defs[id]));
+    if (rev.length === 1) this.reveal(rev[0]);
 
     // Bottom tabs (00 §5: Throne · Altar · Armory · Trophies; Settings is the MENU button).
     const tabs: [string, () => void][] = [
@@ -270,6 +293,10 @@ export class ThroneScene {
     }
     const cost = g.sealCost(id);
     const dread = g.sealDread(id);
+    if (!sealRevealed(g.save, id)) {
+      g.toast(`${RUMOURS[id][1]} (GATHER TRIBUTE${g.save.meta.dreadLifetime < dread ? ' AND DREAD' : ''} TO LEARN MORE.)`);
+      return;
+    }
     if (g.save.meta.dreadLifetime < dread) {
       g.toast(`NEEDS ${dread} LIFETIME DREAD. LET A LEGEND SACK A DEPARTMENT FIRST.`);
       return;
@@ -609,6 +636,11 @@ export class ThroneScene {
       const name = new PixelText(nameText.length > maxC ? `${nameText.slice(0, maxC - 2)}..` : nameText, last ? '#c8b8d0' : '#7a6e80');
       name.position.set(x + 7, ry + 10);
       root.addChild(label, name);
+      // The next Legend (A7, ui/legendui.ts): silhouette + "NEXT ??? <TITLE> n/6" replaces the name.
+      if (def && s.depts[id]) {
+        name.visible = false;
+        root.addChild(legendNextBadge(g, id, x + 7, ry + 10, w - 16 - shown * 9));
+      }
       // Helms on the wall: one per Legend, up to 6, then "+N".
       const helmX = x + w - 8;
       for (let i = 0; i < shown; i++) drawHelm(wall, helmX - (i + 1) * 9, ry + 2, def?.doorColor ?? 0x7a6a7a);
@@ -664,14 +696,42 @@ export class ThroneScene {
     }
 
     for (const d of this.doors) if (d.peekT > 0) this.drawPeek(d, dt);
+    this.ribbon.update(dt);
+    let anim = false;
+    for (const d of this.doors) {
+      if (d.revealT <= 0) continue;
+      d.revealT = Math.max(0, d.revealT - dt);
+      // Reveal shake: the boards rattle, then settle.
+      d.root.x = d.x + (d.revealT > 0 ? Math.round(Math.sin(this.t * 40) * Math.min(1, d.revealT) * 1.5) : 0);
+      anim = true;
+    }
 
     this.redrawAcc += dt;
-    if (this.redrawAcc >= 0.5) {
-      this.redrawAcc = 0;
+    if (this.redrawAcc >= 0.5 || anim) {
+      if (this.redrawAcc >= 0.5) {
+        for (const id of takeReveals(s, g.built.filter((x) => !!g.defs[x]))) this.reveal(id);
+      }
+      this.redrawAcc = this.redrawAcc >= 0.5 ? 0 : this.redrawAcc;
       const key = COSMETICS.map((c) => (hasCosmetic(s, c.id) ? 1 : 0)).join('');
       if (key !== this.decorKey) this.drawDecor();
       for (const d of this.doors) this.drawDoor(d);
     }
+  }
+
+  /** The reveal moment: a sealed door's rumour turns into its name and price. */
+  private reveal(id: DeptId): void {
+    const door = this.doors.find((d) => d.id === id);
+    if (!door) return;
+    door.revealT = 1.6;
+    const g = this.game;
+    g.haptic(30);
+    g.toast(`THE BOARDS GIVE WAY... THE ${NAMES[id]}! BREAK ITS SEAL FOR ${formatNum(g.sealCost(id))} TRIBUTE.`);
+  }
+
+  /** Draws the eye to a door (the ribbon's or the report's GO for a Seal). */
+  flashDoor(id: DeptId): void {
+    const door = this.doors.find((d) => d.id === id);
+    if (door) door.revealT = Math.max(door.revealT, 1.2);
   }
 
   /** Manager cameo (00 §5.4.8): the manager's head peeks out of the door for 2 s, once per event. */
@@ -695,7 +755,9 @@ export class ThroneScene {
     const { w, h } = door;
     const gr = door.g.clear();
     const color = def?.doorColor ?? 0x3a3040;
-    drawPanel(gr, 0, 0, w, h, 0x1c1028, d ? color : 0x3a3040);
+    const hidden = !!def && !d && !sealRevealed(s, door.id);
+    const flash = door.revealT > 0 && Math.floor(door.revealT * 8) % 2 === 0;
+    drawPanel(gr, 0, 0, w, h, flash ? 0x5a4a2a : 0x1c1028, d ? color : flash ? C.gold : 0x3a3040);
     // The door itself: an arch.
     const dx = 6;
     const dy = 12;
@@ -712,18 +774,38 @@ export class ThroneScene {
         // Warm light spilling from an open department.
         gr.rect(dx + 3, dy + dH - 6, dW - 6, 4).fill({ color, alpha: 0.6 });
       } else {
+        // A silhouette behind the boards (progressive disclosure): the manager, in shadow.
+        if (def && dH >= 20) {
+          const pal: Record<string, string> = {};
+          for (const k of Object.keys(def.manager.palette)) pal[k] = hidden ? '#0e0814' : '#1a1222';
+          drawSprite(gr, def.manager.portrait[0], pal, dx + Math.floor((dW - 24) / 2), dy + Math.max(2, Math.floor((dH - 24) / 2)), 2);
+        }
         // Boards across a sealed or unbuilt door.
         gr.rect(dx - 1, dy + 6, dW + 2, 3).fill(0x6e4a2e);
         gr.rect(dx - 1, dy + dH - 10, dW + 2, 3).fill(0x6e4a2e);
       }
     }
-    door.label.set(NAMES[door.id], d ? C.ink : '#7a6e80');
+    // The offline cap vault (24 h base): how full the last absence got, until the department is
+    // visited (its haul collected).
+    const away = s.meta.lastAway;
+    if (d && d.haul && d.haul > 0 && away && away.cap > 0) {
+      const f = Math.min(1, away.seconds / away.cap);
+      const vh = Math.max(6, dH - 2);
+      const vy = (door.id === 'pit' ? dy - 4 : dy) + 1;
+      gr.rect(2, vy, 3, vh).fill(C.outline);
+      const fh = Math.max(1, Math.round((vh - 2) * f));
+      gr.rect(3, vy + vh - 1 - fh, 1, fh).fill(f >= 1 ? (Math.floor(this.t * 2) % 2 ? C.red : C.gold) : C.gold);
+    }
+    door.label.set(hidden ? '???' : NAMES[door.id], d ? C.ink : '#7a6e80');
     door.label.position.set(Math.floor((w - door.label.width) / 2), 3);
 
     let status = '';
     let statusColor = '#9c8aa8';
     if (!def) status = 'SOON';
-    else if (!d) {
+    else if (hidden) {
+      status = RUMOURS[door.id][0];
+      statusColor = '#6a5e70';
+    } else if (!d) {
       const dread = g.sealDread(door.id);
       if (s.meta.dreadLifetime < dread) status = `${dread} DREAD`;
       else {
@@ -773,4 +855,92 @@ function drawHelm(g: Graphics, x: number, y: number, color: number): void {
   g.rect(x + 1, y + 5, 6, 2).fill(0x2a1a3a);
   g.rect(x + 3, y + 7, 2, 4).fill(0x2a1a3a);
   g.rect(x + 3, y - 2, 2, 3).fill(color);
+}
+
+/**
+ * The Night Orders picker (research R1): one row per open department, its manager and its two
+ * orders. One tap picks (it is remembered until changed), so leaving orders is the ORDERS button
+ * plus one tap. Tapping outside or DONE closes.
+ */
+export function openNightOrders(game: Game): void {
+  const s = game.save;
+  const L = game.layout;
+  const open = game.built.filter((id) => s.depts[id]);
+  const root = new Container();
+  const close = () => destroyTree(root);
+  const dim = new Graphics().rect(0, 0, L.w, L.h).fill({ color: 0x0a0410, alpha: 0.75 });
+  dim.eventMode = 'static';
+  dim.on('pointertap', close);
+  root.addChild(dim);
+  const w = L.w - L.safe.l - L.safe.r - 8;
+  const avail = L.h - L.safe.t - L.safe.b - 8;
+  const headH = 26;
+  const footH = 24;
+  const rowH = Math.max(22, Math.min(28, Math.floor((avail - headH - footH) / Math.max(1, open.length))));
+  const h = Math.min(avail, headH + footH + open.length * rowH);
+  const x = L.safe.l + 4;
+  const y = Math.max(L.safe.t + 4, Math.floor((L.h - h) / 2));
+  const panel = new Graphics();
+  drawPanel(panel, x, y, w, h, 0x221428, 0x6e4a2e);
+  panel.eventMode = 'static';
+  root.addChild(panel);
+  const title = new PixelText('NIGHT ORDERS', C.goldText);
+  title.position.set(x + 6, y + 5);
+  const sub = new PixelText(wrap('WHAT SHOULD THEY DO WHILE YOU ARE AWAY?', w - 12), '#c8b8d0');
+  sub.position.set(x + 6, y + 14);
+  root.addChild(title, sub);
+  const bw = Math.floor((w - 12 - 3) / 2);
+  const showDesc = rowH >= 26;
+  let ry = y + headH;
+  for (const id of open) {
+    const def = game.defs[id];
+    const d = s.depts[id]!;
+    const list = ordersFor(id, def, d).slice(0, 2);
+    const row = new Container();
+    root.addChild(row);
+    const build = () => {
+      for (const c of [...row.children]) destroyTree(c as Container);
+      const cur = standingOrder(s, id, def);
+      const pg = new Graphics();
+      pg.rect(x + 3, ry - 2, 14, 14).fill(C.outline);
+      drawSprite(pg, def.manager.portrait[0], def.manager.palette, x + 4, ry - 1, 1);
+      row.addChild(pg);
+      const nm = new PixelText(`${NAMES[id]}  ${def.manager.name.toUpperCase()}`, C.ink);
+      nm.position.set(x + 19, ry + 1);
+      row.addChild(nm);
+      if (showDesc && cur) {
+        const ds = new PixelText(cur.desc.length > Math.floor((w - 24) / 4) ? `${cur.desc.slice(0, Math.floor((w - 24) / 4) - 2)}..` : cur.desc, '#9c8aa8');
+        ds.position.set(x + 19, ry + 8);
+        row.addChild(ds);
+      }
+      list.forEach((o, i) => {
+        const on = cur?.id === o.id;
+        const b = new Button({
+          w: bw,
+          h: 10,
+          label: o.label.length > Math.floor((bw - 4) / 4) ? o.label.slice(0, Math.floor((bw - 4) / 4)) : o.label,
+          color: on ? C.green : 0x3a2a46,
+          shade: on ? C.greenDark : 0x24162e,
+          textColor: on ? '#140c1c' : '#b8a8c0',
+          hitPad: 2,
+          onTap: () => {
+            if (setOrder(s, id, def, o.id)) {
+              game.saveSoon();
+              game.haptic(8);
+              build();
+            }
+          },
+        });
+        b.position.set(x + 6 + i * (bw + 3), ry + (showDesc ? 15 : 10));
+        row.addChild(b);
+      });
+    };
+    build();
+    ry += rowH;
+  }
+  const done = new Button({ w: w - 12, h: 14, label: 'DONE', onTap: close });
+  done.position.set(x + 6, y + h - 19);
+  root.addChild(done);
+  game.trackModal(root, { reopen: () => openNightOrders(game) });
+  game.modalLayer.addChild(root);
 }

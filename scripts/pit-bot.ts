@@ -1,6 +1,7 @@
 // War Pit sanity check: a greedy draft bot plays Runs on the real rules and we compare active
 // Teeth/min with the on-screen idle of the warband it would station.
-// Usage: node scripts/run-ts.mjs scripts/pit-bot.ts [runs=200] [stakes=0] [hardy=0]
+// Usage: node scripts/run-ts.mjs scripts/pit-bot.ts [runs=200] [stakes=0] [hardy=0] [pv=current]
+// (pv 3 plays the pre-wave-1 rules: round-scaled rivals, the classic Huntmaster, no banked Chow.)
 import { mulberry32 } from '../src/depts/pit/engine';
 import { newRun, runEndBonus, type RunOpts } from '../src/depts/pit/run';
 import { botRun } from '../src/depts/pit/bot';
@@ -11,6 +12,7 @@ import type { DeptSave } from '../src/core/types';
 const N = Number(process.argv[2] ?? 200);
 const S = Number(process.argv[3] ?? 0);
 const hardy = Number(process.argv[4] ?? 0);
+const PV = process.argv[5] ? Number(process.argv[5]) : 0;
 
 const opts: RunOpts = { pool: BASE_POOL, larder: 0, deepLarder: 0, penSpace: 0, freeRoll: false, gritMax: 4, hardy, ratStart: false, chowR1: false, sigils: 0, shade: 0 };
 let tri = 0;
@@ -28,6 +30,7 @@ let battles = 0;
 const rng = mulberry32(1234);
 for (let i = 0; i < N; i++) {
   const rs = newRun(1000 + i, S, opts);
+  if (PV) rs.pv = PV;
   const rep = botRun(rs, rng);
   battles += rep.outcomes.length;
   if (rep.ended === 'triumph') tri++;

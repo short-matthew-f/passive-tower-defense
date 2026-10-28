@@ -41,8 +41,19 @@ import {
   type PitRun,
   type PitSave,
 } from './def';
-import type { Fighter, Frame, Snap } from './engine';
+import type { Fighter, Frame, Snap, UnitTally } from './engine';
 import {
+  BANK_PER,
+  ENCORE_MAX,
+  TOUGH_PAY,
+  bankFor,
+  encoreCashOut,
+  encoreFight,
+  encoreOpen,
+  ENCORE_R,
+  huntOf,
+  isTough,
+  toughRound,
   SCAR_MAX,
   SCAR_STEP,
   WINS_TO_TRIUMPH,
@@ -70,7 +81,7 @@ import {
   type RunState,
 } from './run';
 import { sfx } from './sfx';
-import { ARCHES, FOODS, UNITS, type UnitId } from './units';
+import { ARCHES, FOODS, HUNTS, UNITS, comboWith, type ArchId, type Trig, type UnitId } from './units';
 import { anyAffordable, buildGroups } from './upgrades';
 import { destroyTree } from '../../ui/destroy';
 
@@ -97,6 +108,35 @@ interface Play {
 }
 
 const MAX_PARTICLES = 140;
+/** Hit-stop per big strike, shorter at faster playback (ms). */
+const e6 = (speed: number) => Math.round(60 / Math.max(1, speed));
+/** The Skirmish purse auto-banks once it holds this many seconds of Skirmish pay (nothing is
+ * ever lost by not tapping it). */
+const PURSE_FULL_S = 15 * 60;
+/** Gap between the two lines while a Run battle plays (07 §10 "12 px apart", research R2). */
+const CLASH_GAP = 12;
+/** Recap and battle-log words per trigger glyph. */
+const TRIG_WORD: Partial<Record<Trig, string>> = { faint: 'FAINT', hurt: 'HURT', start: 'START', attack: 'BITE', ko: 'KNOCKOUT', ahead: 'RALLY', passive: 'HEAL' };
+/** Snarl's counter hint per rival archetype, shown on a loss. */
+const ARCH_TIP: Record<ArchId, string> = {
+  ratcatcher: 'SWARMS: START DAMAGE AND BAT FAINTS CLEAR THEM',
+  falconer: 'SNIPERS: STURDY BACKLINE, OR A GARGOYLE UP FRONT',
+  bulwark: 'TANKS: STACK ATTACK, A WOLF BEHIND YOUR FRONT',
+  brawler: 'BIG HITTERS: A RUST BEETLE OR GORGON SLOWS THEM',
+  hexer: 'ITEMS: HIT HARD EARLY BEFORE THEY GROW',
+};
+
+interface Flyer {
+  s: Sprite;
+  vx: number;
+  vy: number;
+  vr: number;
+  life: number;
+}
+interface BigNum {
+  t: PixelText;
+  life: number;
+}
 /** Logical px a press must travel before it becomes a drag, and seconds before it is a hold. */
 const DRAG_PX = 5;
 const HOLD_S = 0.45;
@@ -152,6 +192,20 @@ export class PitScene implements DeptScene {
   private tacticG = new Graphics();
   private tacticBox = new Container();
   private homeHint = new PixelText('', '#9c8aa8');
+  // Wave 1: the battle log / recap under the clash, big damage numbers, fainted beasts flying off,
+  // and the Skirmish purse on the home panel.
+  private logText = new PixelText('', '#d8c8b0');
+  private infoBg = new Graphics();
+  private battleLog: string[] = [];
+  private recap = '';
+  private flyers: Flyer[] = [];
+  private bigNums: BigNum[] = [];
+  private purseG = new Graphics();
+  private purseBtn!: Button;
+  private purseFx = 0;
+  /** Row offsets that slide the two lines together for a Run battle (eased). */
+  private clash = 0;
+  private purseW = 0;
 
   private rollBtn!: Button;
   private sellBtn!: Button;
@@ -253,7 +307,7 @@ export class PitScene implements DeptScene {
       this.shopLayer.addChild(c);
       this.makeStrip('food', i);
     }
-    this.ui.addChild(this.gritFull, this.gritEmpty, this.runInfo, this.rivalTag, this.info, this.chowIcon, this.chowText, this.stakesText, this.crownText, this.tacticBox, this.homeHint);
+    this.ui.addChild(this.gritFull, this.gritEmpty, this.runInfo, this.rivalTag, this.infoBg, this.info, this.chowIcon, this.chowText, this.stakesText, this.crownText, this.tacticBox, this.homeHint, this.logText, this.purseG);
     this.tacticBox.addChild(this.tacticG);
     // The rival tag doubles as the scout button.
     this.rivalTag.eventMode = 'static';
@@ -283,6 +337,8 @@ export class PitScene implements DeptScene {
     this.stakesUp = new Button({ w: 16, h: 14, label: '+', onTap: () => this.setStakes(this.run.stakes + 1), ...dark });
     this.stakesBuy = new Button({ w: 62, h: 14, label: 'BUY', onTap: () => this.buyStakes(), color: C.gold, shade: 0x9a7a20 });
     this.dropBtn = new Button({ w: 62, h: 14, label: 'DROP -2', onTap: () => this.setStakes(this.run.stakes - 2), color: 0x6ac8f0, shade: 0x2a6a8a });
+    this.purseBtn = new Button({ w: this.wRow, h: 14, label: 'PURSE', onTap: () => this.collectPurse(), color: 0x3a2a1a, shade: 0x1c1008, textColor: '#e8c04a' });
+    this.ui.addChild(this.purseBtn);
     this.ui.addChild(this.rollBtn, this.sellBtn, this.fightBtn, this.brandBtn, this.pauseBtn, this.speedBtn, this.skipBtn, this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn);
 
     this.banner.addChild(this.bannerBg, this.bannerText, this.bannerSub);
@@ -427,7 +483,32 @@ export class PitScene implements DeptScene {
     this.upBtn.position.set(xL, ys + 74);
     this.bandsBtn.position.set(xL + this.wRow - 88, ys + 74);
     this.homeHint.position.set(xL, ys + 96);
+    this.purseG.position.set(xL, ys + 93);
+    if (this.purseW !== this.wRow) {
+      this.purseW = this.wRow;
+      const vis = this.purseBtn.visible;
+      destroyTree(this.purseBtn);
+      this.purseBtn = new Button({ w: this.wRow, h: 14, label: 'PURSE', onTap: () => this.collectPurse(), color: 0x3a2a1a, shade: 0x1c1008, textColor: '#e8c04a' });
+      this.purseBtn.visible = vis;
+      this.ui.addChild(this.purseBtn);
+    }
+    this.purseBtn.position.set(xL, ys + 96);
+    this.logText.position.set(xL, this.yShop + 30);
+    const it = this.info.text;
+    this.info.set('');
+    this.setInfoText(it || ' ', '#f4e8c1');
     this.bgKey = '';
+  }
+
+  /** Where the rival (1) / your (0) row sits right now: slid together during a Run battle. */
+  private rowY(side: 0 | 1): number {
+    return side === 0 ? this.lineCards[0].by : this.rivalCards[0].by;
+  }
+
+  /** How far each row moves toward the clash line for a Run battle (0 when already close). */
+  private clashShift(): number {
+    const gap = this.yLine - (this.yRival + CH);
+    return Math.max(0, Math.floor((gap - CLASH_GAP) / 2));
   }
 
   private drawBg(): void {
@@ -468,6 +549,11 @@ export class PitScene implements DeptScene {
   private setMode(m: Mode): void {
     this.mode = m;
     this.sel = null;
+    // A battle's "hold for the whole fight" line never outlives the fight.
+    if ((m === 'home' || m === 'shop') && this.infoHold > 30) {
+      this.infoHold = 0;
+      this.infoText = '';
+    }
     if (m !== 'battle') {
       this.play = null;
       this.sdTint = false;
@@ -485,6 +571,8 @@ export class PitScene implements DeptScene {
     const home = m === 'home';
     for (const b of [this.startBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy]) b.visible = home;
     this.stakesText.visible = this.crownText.visible = this.tacticBox.visible = this.homeHint.visible = home;
+    this.purseBtn.visible = this.purseG.visible = home;
+    this.logText.visible = m === 'battle' || m === 'result';
     for (const c of this.shopCards) c.visible = run;
     for (const c of this.foodCards) c.visible = run;
     for (const s of this.strips) s.c.visible = shopUi;
@@ -517,16 +605,22 @@ export class PitScene implements DeptScene {
       this.setMode('shop');
       return;
     }
+    this.collectPurse(true);
     const opts = runOpts(this.save);
     if (opts.carry) this.per.carry = null;
     const seed = (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
     this.run.cur = newRun(seed, this.run.stakes, opts, Date.now());
     this.run.cur.earned = 0;
+    if (this.run.scouted) {
+      this.run.cur.scoutAll = true;
+      this.run.scouted = false;
+    }
     this.syncShown();
     sfx.whistle(this.vol());
     this.ctx.saveSoon();
     this.setMode('shop');
-    if (this.run.stakes >= 1 && (this.run.cur.stakes ?? 0) >= 1) this.setInfo(`STAKES ${this.run.stakes}: PAY X${(1.22 ** this.run.stakes).toFixed(2)}, RIVALS TOUGHER`, 4);
+    if (this.run.cur.scoutAll) this.setInfo("SNARL'S SCOUTS WATCHED ALL NIGHT: EVERY RIVAL THIS RUN IS FULLY SCOUTED.", 4);
+    else if (this.run.stakes >= 1 && (this.run.cur.stakes ?? 0) >= 1) this.setInfo(`STAKES ${this.run.stakes}: PAY X${(1.22 ** this.run.stakes).toFixed(2)}, RIVALS TOUGHER`, 4);
   }
 
   private pauseRun(): void {
@@ -626,12 +720,16 @@ export class PitScene implements DeptScene {
     if (riv.arch === 'hunt') {
       const sc = this.run.cur?.opts.scars ?? 0;
       const oath = (this.run.cur?.stakes ?? 0) >= 18 && (this.run.cur?.pv ?? 0) >= 3;
-      this.setInfo(`THE HUNTMASTER: NETS YOUR TOP ATTACKER, HIS BEASTS +1 ATK. ARMOR 2.${oath ? ' OATH: REVIVES ONCE.' : ''}${sc ? ` SCARRED X${sc}: -${Math.round(sc * SCAR_STEP * 100)}%.` : ''}`, 6);
+      const h = HUNTS[riv.line.find((f) => f.kind === 'hunt')?.hunt ?? 'net'];
+      const tries = this.run.cur?.huntTries ?? 0;
+      this.setInfo(`HUNTMASTER, ${h.name}: ${h.text}. ARMOR 2. COUNTER: ${h.tip}.${oath ? ' OATH: REVIVES ONCE.' : ''}${sc ? ` SCARRED X${sc}: -${Math.round(sc * SCAR_STEP * 100)}%.` : ''}${tries ? ' A NEW HUNT EACH RETRY.' : ''}`, 7);
       return;
     }
     const a = ARCHES[riv.arch];
     const bias = a.bias.map((k) => UNITS[k].name.split(' ').pop()).join(', ');
-    this.setInfo(`${a.name.toUpperCase()} TAMER: LIKES ${bias}.${lvOf(this.run, 'scout') ? '' : ' STATS: BUY SCOUTING.'}`, 6);
+    const rs = this.run.cur;
+    const tough = rs && isTough(rs) ? ` TOUGH BOUT: DRAFTED AHEAD, A WIN PAYS X${TOUGH_PAY}.` : '';
+    this.setInfo(`${a.name.toUpperCase()} TAMER: LIKES ${bias}.${tough}${this.scoutLevel() ? '' : ' STATS: BUY SCOUTING.'}`, 6);
   }
 
   /** Teeth/min of the Standing Warband (on-screen idle, with core multipliers). */
@@ -998,7 +1096,9 @@ export class PitScene implements DeptScene {
     if (g === 'shop' && rs?.shop[i]) {
       const s = rs.shop[i]!;
       const d = UNITS[s.k];
-      text = `${d.name} T${d.tier} ${s.a}/${s.h}: ${d.text(1)}${d.shopOnly ? ' (NOT IN SKIRMISHES)' : ''}. TAP AGAIN TO BUY, OR TAP A SLOT.`;
+      const twin = rs.line.some((p) => p && p.k === s.k && p.xp < 5);
+      const combo = twin ? null : comboWith(s.k, this.lineKinds(rs));
+      text = `${d.name} ${s.a}/${s.h}: ${d.text(1)}${d.shopOnly ? ' (NOT IN SKIRMISHES)' : ''}.${twin ? ' TWIN: MERGES +1/+1.' : combo ? ` COMBO: ${combo}.` : ' TAP AGAIN TO BUY.'}`;
     } else if (g === 'food' && rs?.food[i]) {
       const f = FOODS[rs.food[i]!.f];
       text = `${f.name} (${f.cost}): ${f.text}. ${f.all ? 'TAP AGAIN TO FEED ALL.' : 'TAP A BEAST TO FEED.'}`;
@@ -1023,7 +1123,16 @@ export class PitScene implements DeptScene {
   private setInfo(text: string, hold: number): void {
     this.infoText = text;
     this.infoHold = hold;
-    this.info.set(wrap(text.toUpperCase(), this.wRow) || ' ', '#f4e8c1');
+    this.setInfoText(wrap(text.toUpperCase(), this.wRow) || ' ', '#f4e8c1');
+  }
+
+  /** The info line holds 2 rows; a longer text gets a dark backing so it never reads over cards. */
+  private setInfoText(t: string, color: string): void {
+    if (this.info.text === t) return;
+    this.info.set(t, color);
+    const rows = t.split('\n').length;
+    const g = this.infoBg.clear();
+    if (rows > 2) g.rect(this.xL - 2, this.yInfo - 1, this.wRow + 4, rows * 7 + 3).fill({ color: 0x1c1024, alpha: 0.94 });
   }
 
   // ---------- fighting ----------
@@ -1043,8 +1152,11 @@ export class PitScene implements DeptScene {
     this.lastOut = out;
     this.ctx.saveSoon();
     sfx.whistle(this.vol());
+    this.battleLog = [];
+    this.logText.set(' ');
     this.setMode('battle');
-    this.setInfo(out.hunt ? 'THE HUNTMASTER BOUT!' : `ROUND ${out.round}: FIGHT!`, 99);
+    const hunt = out.hunt ? out.rival.line.find((f) => f.kind === 'hunt')?.hunt : undefined;
+    this.setInfo(out.hunt ? `THE HUNTMASTER BOUT! ${HUNTS[hunt ?? 'net'].name}: ${HUNTS[hunt ?? 'net'].text}.` : `ROUND ${out.round}: FIGHT!${out.tough ? ` TOUGH BOUT, TEETH X${TOUGH_PAY}.` : ''}`, 99);
     this.startPlay(out.result.frames, false, () => this.endBattle());
   }
 
@@ -1094,7 +1206,7 @@ export class PitScene implements DeptScene {
 
   private applyFrame(f: Frame, p: Play, quiet: boolean): void {
     const views: [CardView[], CardView[]] = [this.lineCards, this.rivalCards];
-    const ys = [this.yLine, this.yRival];
+    const ys = [this.rowY(0), this.rowY(1)];
     const now = new Map<number, { side: 0 | 1; j: number; s: Snap }>();
     ([0, 1] as const).forEach((side) => f.lines[side].forEach((s, j) => now.set(s.u, { side, j, s })));
     const v = this.vol() * (p.home ? 0.35 : 1);
@@ -1103,7 +1215,11 @@ export class PitScene implements DeptScene {
         if (!now.has(uid)) {
           const x = this.slotX(old.j) + 17;
           this.burst(x, ys[old.side] + 18, 0xc8b8a0, 12);
-          if (!p.home) sfx.faint(v);
+          if (!p.home) {
+            sfx.faint(v);
+            this.flyOff(old.s.k, old.side, x, ys[old.side] + 16);
+            this.logLine(`${old.side ? 'THEIR' : 'YOUR'} ${UNITS[old.s.k].short} FAINTS`);
+          }
         }
       }
     }
@@ -1126,8 +1242,10 @@ export class PitScene implements DeptScene {
             const dh = s.h - old.s.h;
             const da = s.a - old.s.a;
             const x = this.slotX(j) + 17;
-            if (dh < 0) this.ctx.float(`${dh}`, x, ys[side] + 10, '#ff6a5a');
-            else if (dh > 0) this.ctx.float(`+${dh}`, x, ys[side] + 10, '#8fd14f');
+            if (dh < 0) {
+              if (f.e === 'hit') this.bigNum(`${-dh}`, x, ys[side] + 8, side);
+              else this.ctx.float(`${dh}`, x, ys[side] + 10, '#ff6a5a');
+            } else if (dh > 0) this.ctx.float(`+${dh}`, x, ys[side] + 10, '#8fd14f');
             if (da > 0) this.ctx.float(`+${da}A`, x, ys[side] - 2, '#f0a040');
             else if (da < 0) this.ctx.float(`${da}A`, x, ys[side] - 2, '#c0a0a0');
           }
@@ -1142,16 +1260,35 @@ export class PitScene implements DeptScene {
           const e = now.get(uid) ?? p.prev.get(uid);
           if (!e) continue;
           const c = views[e.side][e.j];
-          c.offY = e.side === 0 ? -7 : 7;
+          // Lunge into the clash gap (research R2).
+          c.offY = e.side === 0 ? -(CLASH_GAP / 2 + 1) : CLASH_GAP / 2 + 1;
           views[e.side === 0 ? 1 : 0][0].flash = 1;
           if (e.s.a >= 6) big = true;
         }
-        if (big && !p.home) this.shake = 0.15;
+        if (big && !p.home) {
+          // Shared juice kit (ui/juice.ts): a 2 px shake and a short hit-stop on the big ones.
+          const j = this.ctx.game.juice;
+          if (j) {
+            j.shake(1);
+            j.hitStop(e6(this.speed()));
+          } else this.shake = 0.15;
+        }
         sfx.hit(v, big);
       } else if (f.e === 'trig' && f.src !== undefined) {
         const e = now.get(f.src) ?? p.prev.get(f.src);
         if (e) views[e.side][e.j].pulse = 1;
-        if (!p.home) sfx.trig(v);
+        if (!p.home) {
+          sfx.trig(v);
+          if (e) {
+            // A Faint glyph on a beast that just appeared is its summon (or a Shade / Charm return).
+            const word = e.s.k === 'hunt' ? 'HUNT' : f.icon === 'faint' && !p.prev.has(f.src) ? 'ARRIVES' : TRIG_WORD[f.icon ?? 'none'];
+            if (word) {
+              // Trigger words float away from the clash gap (the big damage numbers live there).
+              this.ctx.float(word, this.slotX(e.j) + 17, ys[e.side] + (e.side ? -8 : CH + 1), e.side ? '#ffb0a0' : '#c8f0a0');
+              this.logLine(`${e.side ? 'THEIR' : 'YOUR'} ${UNITS[e.s.k].short} ${word}`);
+            }
+          }
+        }
       }
     }
     if (this.ritual && this.ritual.end < 0 && f.lines[1].length === 0) this.ritual.end = this.ritual.t;
@@ -1195,10 +1332,13 @@ export class PitScene implements DeptScene {
       color = '#e05050';
       sfx.lose(v);
     }
-    this.showBanner(title, `+${formatNum(teeth)} TEETH`, color);
+    this.showBanner(title, `+${formatNum(teeth)} TEETH${out.tough && out.outcome === 1 ? ` (TOUGH X${TOUGH_PAY})` : ''}`, color);
+    const rc = this.recapOf(out.result.stats, out.outcome, out.rival);
+    this.recap = rc.short;
+    this.logText.set(rc.lines.join('\n'), '#f4e8c1');
     this.ctx.markSeen('pit.fight');
     this.mode = 'result';
-    this.resultT = out.ended ? 2.2 : 1.6;
+    this.resultT = out.ended ? 3 : 2.6; // time to read the recap (tap to skip)
     this.resultNext = () => {
       if (rs.ended) {
         this.finalizeRun(rs);
@@ -1207,6 +1347,7 @@ export class PitScene implements DeptScene {
         this.syncShown();
         this.prepRound(rs);
         this.setMode('shop');
+        if (this.recap) this.setInfo(`LAST FIGHT: ${this.recap}${out.banked ? ` BANKED +${out.banked} CHOW.` : ''}`, 8);
         if (out.outcome === 1 && Math.random() < 0.3) this.ctx.say('win');
         if (out.outcome === -1 && Math.random() < 0.4) this.ctx.say('loss');
       }
@@ -1246,8 +1387,8 @@ export class PitScene implements DeptScene {
     drawPanel(g, 0, 0, w, h, 0x1c1028, C.gold);
     this.bannerText.position.set(Math.floor((w - measure(title).w) / 2), 5);
     this.bannerSub.position.set(Math.floor((w - measure(sub).w) / 2), 14);
-    const mid = Math.floor((this.yRival + 40 + this.yLine) / 2);
-    this.banner.position.set(this.xL + Math.floor((this.wRow - w) / 2), mid - 12);
+    // Under the info line, in the shop's empty counter: the clash stays visible (research R2).
+    this.banner.position.set(this.xL + Math.floor((this.wRow - w) / 2), this.yShop + 2);
     this.banner.hitArea = new Rectangle(-20, -20, w + 40, h + 40);
     this.banner.visible = true;
   }
@@ -1330,6 +1471,7 @@ export class PitScene implements DeptScene {
     if (tri) {
       sfx.triumph(v);
       this.ctx.haptic(40);
+      if (!rs.encore) this.ctx.game.juice?.shake(2);
       for (let i = 0; i < 4; i++) this.burst(this.xL + 20 + i * 45, this.yLine, PAL.gold, 16);
     } else sfx.lose(v);
     const target = pitEcon.skillTarget(this.save.cycle.n);
@@ -1339,6 +1481,9 @@ export class PitScene implements DeptScene {
       `RUN BONUS  +${formatNum(rs.bonus ?? 0)} TEETH${tri ? ' (X2)' : ''}`,
     ];
     if (rs.crestsWon) lines.push(`CRESTS +${rs.crestsWon}  (NOW ${this.per.crests})`);
+    const enc = rs.encore;
+    const potShown = (enc?.pot ?? 0) * teethMult(this.run) * this.ctx.mult();
+    if (enc) lines.push(`ENCORE: ${enc.n} WON${enc.open ? `, POT ${formatNum(potShown)} AT RISK` : enc.pot ? `, POT ${formatNum(potShown)}` : ', POT LOST'}`);
     if (rs.crown) lines.push(`PIT CROWN! ${Math.min(PIT_CROWNS, crownsAtOrAbove(this.run.crowns, target))}/${PIT_CROWNS} AT STAKES ${target}+`);
     else if (rs.scarred) lines.push(`HUNTMASTER SCARRED (${this.run.scars}/${SCAR_MAX}): -${Math.round((this.run.scars ?? 0) * SCAR_STEP * 100)}% NEXT TIME`);
     const band = rs.line.filter((p): p is Pet => !!p);
@@ -1347,6 +1492,7 @@ export class PitScene implements DeptScene {
     const shopOnly = band.some((p) => UNITS[p.k].shopOnly);
     if (shopOnly) lines.push('(SHOP TRIGGERS DO NOTHING IN SKIRMISHES)');
     const done = (stationIt: boolean) => {
+      this.payEncore(rs);
       if (stationIt && band.length) this.station(band);
       this.run.cur = null;
       this.closePanel();
@@ -1355,7 +1501,16 @@ export class PitScene implements DeptScene {
       this.ctx.saveSoon();
     };
     const better = next > now * 1.001;
+    const encore = encoreOpen(rs)
+      ? [{
+          label: rs.encore?.n ? `ENCORE ${rs.encore.n + 1}/${ENCORE_MAX}: RISK THE POT` : `ENCORE BOUT? (ROUND ${ENCORE_R} RIVAL)`,
+          color: 0x7a2a2a,
+          text: '#ffd0c0',
+          onTap: () => this.startEncore(rs),
+        }]
+      : [];
     const rects = this.openPanel(tri ? 'TRIUMPH!' : 'RETREAT', lines, [
+      ...encore,
       {
         label: `SKIRMISH ${formatNum(now)} > ${formatNum(next)}/MIN`,
         color: 0x2a1a3a,
@@ -1368,9 +1523,55 @@ export class PitScene implements DeptScene {
       { label: better ? 'STATION' : 'STATION ANYWAY', color: better ? C.green : C.edge, onTap: () => done(true) },
       { label: 'KEEP OLD', onTap: () => done(false) },
     ], tri ? '#e8c04a' : '#e05050');
-    this.summaryRects = { 'summary.rate': rects[0], station: rects[1] };
+    this.summaryRects = { 'summary.rate': rects[encore.length], station: rects[encore.length + 1] };
     // Stationing micro-lesson (07 §18) on the first finished Run: mechanic_unlocked.
     this.ctx.lesson('station');
+  }
+
+  /** Bank the Encore pot (Retreat from the Encore, or leaving the summary). */
+  private payEncore(rs: RunState): void {
+    const pot = encoreCashOut(rs);
+    if (pot > 0) {
+      const got = this.ctx.earn(pot * teethMult(this.run));
+      rs.earned = (rs.earned ?? 0) + got;
+      this.ctx.game.juice?.coinFly(this.xL + this.wRow / 2, this.yLine, 8);
+      this.ctx.game.toast(`ENCORE POT BANKED: +${formatNum(got)} TEETH`);
+    }
+  }
+
+  /** One more bout after the Triumph (research R8): a tougher rival, the pot grows or is lost. */
+  private startEncore(rs: RunState): void {
+    const n = rs.encore?.n ?? 0;
+    const out = encoreFight(rs, true);
+    if (!out) return;
+    this.closePanel();
+    this.ctx.saveSoon();
+    this.lastOut = { result: out.result, rival: out.rival, team: out.team, outcome: out.result.outcome, teeth: 0, gritLost: false, hunt: false, ended: 'triumph', round: rs.round, tough: false, banked: 0 };
+    this.battleLog = [];
+    this.logText.set(' ');
+    sfx.whistle(this.vol());
+    this.setMode('battle');
+    this.setInfo(`ENCORE ${n + 1}: A ROUND ${ENCORE_R + 2 * n} RIVAL. WIN TO GROW THE POT.`, 99);
+    const arch = out.rival.arch;
+    this.rivalTag.set(`ENCORE ${n + 1}/${ENCORE_MAX}  VS ${arch === 'hunt' ? 'THE HUNTMASTER' : `${ARCHES[arch].name.toUpperCase()} TAMER`}`, '#f0a040');
+    this.startPlay(out.result.frames, false, () => {
+      const v = this.vol();
+      if (out.won) {
+        sfx.win(v);
+        this.ctx.haptic(20);
+        const pot = (rs.encore?.pot ?? 0) * teethMult(this.run) * this.ctx.mult();
+        this.showBanner('ENCORE WON!', `POT ${formatNum(pot)} TEETH`, '#8fd14f');
+      } else {
+        sfx.lose(v);
+        this.showBanner('ENCORE LOST', 'POT GONE. TRIUMPH KEPT.', '#e05050');
+      }
+      const rc = this.recapOf(out.result.stats, out.result.outcome, out.rival);
+      this.logText.set(rc.lines.join('\n'), '#f4e8c1');
+      this.mode = 'result';
+      this.resultT = 2.6;
+      this.resultNext = () => this.showSummary();
+      this.refresh();
+    });
   }
 
   private afterRunLines(rs: RunState): void {
@@ -1502,7 +1703,14 @@ export class PitScene implements DeptScene {
     if (rs && !idle && (this.mode === 'shop' || this.mode === 'battle')) rs.playMs += dt * 1000;
     // Skirmishes pay only when no Run is on screen (07 §3, decided OQ 31), or while it sits idle.
     if (this.mode === 'home' || idle) {
-      this.idleAcc += pitEcon.idleRate(this.save) * dt;
+      const rate = pitEcon.idleRate(this.save);
+      if (this.mode === 'home' && !idle) {
+        // The visible Skirmish purse (research R9): pay fills the jar until you tap it (or it
+        // auto-banks when full). Present-but-idle time still pays straight in at the offline
+        // factor below (D-pit-01), so the jar never dodges that rule.
+        this.run.purse = (this.run.purse ?? 0) + rate * dt;
+        if (rate > 0 && this.run.purse >= rate * PURSE_FULL_S) this.collectPurse(true);
+      } else this.idleAcc += rate * dt;
       this.idleT += dt;
       if (this.idleT >= 1) {
         this.idleT = 0;
@@ -1544,6 +1752,16 @@ export class PitScene implements DeptScene {
       p.t += dt * sp;
       if (p.t >= p.dur) this.advance();
     }
+    // Slide the lines together for a Run battle (and back for the shop).
+    const want = this.mode === 'result' || (this.mode === 'battle' && !!this.play && !this.play.home) ? 1 : 0;
+    this.clash += (want - this.clash) * Math.min(1, dt * 9);
+    if (Math.abs(want - this.clash) < 0.02) this.clash = want;
+    const sh = Math.round(this.clashShift() * this.clash);
+    for (let i = 0; i < 5; i++) {
+      this.rivalCards[i].by = this.yRival + sh;
+      this.lineCards[i].by = this.yLine - sh;
+    }
+    this.updateFlyers(dt);
     if (this.mode === 'result') {
       this.resultT -= dt;
       if (this.resultT <= 0) this.finishResult();
@@ -1553,7 +1771,7 @@ export class PitScene implements DeptScene {
       this.infoHold -= dt;
       if (this.infoHold <= 0) this.infoText = '';
     }
-    if (!this.infoText) this.info.set(wrap(this.hint(), this.wRow) || ' ', '#9c8aa8');
+    if (!this.infoText) this.setInfoText(wrap(this.hint(), this.wRow) || ' ', '#9c8aa8');
     // Flavor lines only when calm.
     this.flavorT -= dt;
     if (this.flavorT <= 0) {
@@ -1574,6 +1792,144 @@ export class PitScene implements DeptScene {
       this.arena.position.set(Math.round(Math.sin(t * 90)), 0);
     } else this.arena.position.set(0, 0);
     this.upPulse += dt;
+    this.purseFx = Math.max(0, this.purseFx - dt);
+  }
+
+  /** One line of the live battle log under the clash (newest last, 5 kept). */
+  private logLine(t: string): void {
+    this.battleLog.push(t);
+    if (this.battleLog.length > 5) this.battleLog.shift();
+    if (this.mode === 'battle') this.logText.set(this.battleLog.join('\n'), '#d8c8b0');
+  }
+
+  /** Post-fight recap (research R2): MVP, the key trigger, what beat you and a counter tip. */
+  private recapOf(stats: UnitTally[] | undefined, outcome: 1 | 0 | -1, riv: RivalInfo): { lines: string[]; short: string } {
+    if (!stats?.length) return { lines: [], short: '' };
+    const best = (side: 0 | 1, key: (t: UnitTally) => number) =>
+      stats.filter((t) => t.side === side).sort((a, b) => key(b) - key(a) || b.kos - a.kos || a.u - b.u)[0];
+    const nm = (t: UnitTally) => UNITS[t.k].short;
+    const mvp = best(0, (t) => t.dmg);
+    const key = best(0, (t) => t.trig);
+    const foe = best(1, (t) => t.dmg);
+    const lines: string[] = [];
+    let short = '';
+    if (mvp && mvp.dmg > 0) {
+      lines.push(`MVP: YOUR ${nm(mvp)}  ${mvp.dmg} DMG${mvp.kos ? `, ${mvp.kos} KO` : ''}`);
+      short = `MVP ${nm(mvp)} ${mvp.dmg} DMG.`;
+    }
+    if (key && key.trig > 0) lines.push(`KEY: ${nm(key)} ${TRIG_WORD[UNITS[key.k].trig] ?? 'TRIGGER'} X${key.trig}`);
+    if (foe && foe.dmg > 0) lines.push(`${outcome === 1 ? 'THEIR BEST' : 'BEAT YOU'}: ${nm(foe)}  ${foe.dmg} DMG${foe.kos ? `, ${foe.kos} KO` : ''}`);
+    if (outcome !== 1) {
+      const hunt = riv.arch === 'hunt' ? riv.line.find((f) => f.kind === 'hunt')?.hunt : undefined;
+      const tip = riv.arch === 'hunt' ? HUNTS[hunt ?? 'net'].tip : ARCH_TIP[riv.arch];
+      lines.push(`TIP: ${tip}`);
+      short = `${foe ? `LOST TO THEIR ${nm(foe)} (${foe.dmg} DMG).` : ''} TIP: ${tip}.`;
+    }
+    return { lines: lines.map((l) => wrap(l, this.wRow)), short };
+  }
+
+  /** A fainted beast tumbles off the arena (research R2 "flip and fly off"). */
+  private flyOff(k: UnitId, side: 0 | 1, x: number, y: number): void {
+    if (this.flyers.length >= 8) {
+      const old = this.flyers.shift()!;
+      old.s.destroy();
+    }
+    const s = new Sprite(beastTex(k, side === 0 ? skinOf(this.per, k) : 0));
+    s.anchor.set(0.5);
+    s.scale.set(2);
+    s.position.set(x, y);
+    s.eventMode = 'none';
+    if (side === 1) s.tint = 0xffb0a0;
+    this.arena.addChild(s);
+    const dir = this.lh ? 1 : -1;
+    this.flyers.push({ s, vx: dir * (30 + Math.random() * 30), vy: side === 1 ? -90 : -60, vr: dir * (6 + Math.random() * 4), life: 0.8 });
+  }
+
+  private updateFlyers(dt: number): void {
+    for (let i = this.flyers.length - 1; i >= 0; i--) {
+      const f = this.flyers[i];
+      f.life -= dt;
+      if (f.life <= 0 || f.s.destroyed) {
+        if (!f.s.destroyed) f.s.destroy();
+        this.flyers.splice(i, 1);
+        continue;
+      }
+      f.vy += 260 * dt;
+      f.s.x += f.vx * dt;
+      f.s.y += f.vy * dt;
+      f.s.rotation += f.vr * dt;
+      f.s.scale.set(2 + (0.8 - f.life) * 1.2);
+      f.s.alpha = Math.min(1, f.life * 2.5);
+    }
+    for (let i = this.bigNums.length - 1; i >= 0; i--) {
+      const b = this.bigNums[i];
+      b.life -= dt;
+      b.t.y -= 14 * dt;
+      b.t.alpha = Math.min(1, b.life * 3);
+      if (b.life <= 0) {
+        b.t.visible = false;
+        this.bigNums.splice(i, 1);
+        this.numPool.push(b.t);
+      }
+    }
+  }
+
+  private numPool: PixelText[] = [];
+
+  /** A 2x damage number on a strike (research R2: "damage numbers at 2x"). */
+  private bigNum(text: string, x: number, y: number, side: 0 | 1): void {
+    if (this.bigNums.length >= 10) {
+      const old = this.bigNums.shift()!;
+      old.t.visible = false;
+      this.numPool.push(old.t);
+    }
+    const t = this.numPool.pop() ?? new PixelText('', '#ff6a5a');
+    if (!t.parent) this.arena.addChild(t);
+    t.set(text, side === 0 ? '#ff6a5a' : '#fff4e0');
+    t.scale.set(2);
+    t.visible = true;
+    t.alpha = 1;
+    t.position.set(Math.round(x - t.width / 2), Math.round(y));
+    this.bigNums.push({ t, life: 0.7 });
+  }
+
+  /** Bank the Skirmish purse (tap, a full jar, leaving, or starting a Run). */
+  private collectPurse(auto = false): void {
+    const base = this.run.purse ?? 0;
+    this.run.purse = 0;
+    if (base <= 0) {
+      if (!auto) this.setInfo('THE PURSE FILLS WHILE YOUR STANDING WARBAND SKIRMISHES. COME BACK FOR IT.', 4);
+      return;
+    }
+    const got = this.ctx.earn(base);
+    if (this.root.destroyed || !this.purseBtn.visible) return;
+    const b = this.purseBtn;
+    const j = this.ctx.game.juice;
+    if (j && !auto) {
+      j.popValue(got, b.x + this.wRow / 2, b.y - 2);
+      j.coinFly(b.x + this.wRow / 2, b.y + 6, 6);
+    } else this.ctx.float(`+${formatNum(got)}`, b.x + this.wRow / 2, b.y - 6, '#e8c04a');
+    this.burst(b.x + this.wRow / 2, b.y + 4, PAL.gold, auto ? 6 : 14);
+    if (!auto) {
+      if (!j) for (let i = 0; i < 4; i++) sfx.coin(this.vol(), i);
+      this.ctx.haptic(10);
+      this.ctx.markSeen('pit.purse');
+    }
+    this.purseFx = 0.4;
+    this.ctx.saveSoon();
+  }
+
+  /** The purse row: the jar's fill bar and its label (home only). */
+  private refreshPurse(): void {
+    const rate = pitEcon.idleRate(this.save);
+    const base = this.run.purse ?? 0;
+    const frac = rate > 0 ? Math.min(1, base / (rate * PURSE_FULL_S)) : 0;
+    const g = this.purseG.clear();
+    g.rect(0, 0, this.wRow, 2).fill(0x1c1008);
+    if (frac > 0) g.rect(0, 0, Math.max(1, Math.round(this.wRow * frac)), 2).fill(this.purseFx > 0 ? 0xfff2a0 : PAL.gold);
+    const notation = this.ctx.game.save.meta.settings.notation;
+    const shown = base * this.ctx.mult();
+    this.purseBtn.setLabel(shown >= 0.05 ? `{tooth} PURSE ${formatNum(shown, notation)}  COLLECT` : `{tooth} PURSE  +${formatNum(this.idlePerMin(), notation)}/MIN`);
   }
 
   private hint(): string {
@@ -1586,8 +1942,17 @@ export class PitScene implements DeptScene {
       case 'shop': {
         if (!rs) return '';
         if (!lineCount(rs)) return 'TAP A SHOP BEAST, THEN A SLOT. FRONT = LEFT.';
-        if (rs.wins === WINS_TO_TRIUMPH - 1) return 'NEXT: THE HUNTMASTER. BEAT HIM FOR THE TRIUMPH.';
-        return 'TAP OR DRAG BEASTS. HOLD ONE TO READ IT. 3 COPIES = LEVEL 2. TOP ROW: SCOUT.';
+        if (rs.wins === WINS_TO_TRIUMPH - 1) {
+          const h = HUNTS[huntOf(rs.seed, rs.huntTries ?? 0, rs.pv)];
+          return `NEXT: THE HUNTMASTER, ${h.name}. ${h.text}. COUNTER: ${h.tip}.`;
+        }
+        if (rs.pv >= 4 && rs.wins === WINS_TO_TRIUMPH - 2) {
+          const h = HUNTS[huntOf(rs.seed, 0, rs.pv)];
+          return `HUNT AHEAD: ${h.name}. ${h.text}. PLAN FOR IT.`;
+        }
+        if (rs.pv >= 4 && rs.round + 1 === toughRound(rs) && rs.round >= 2) return `NEXT ROUND IS THE TOUGH BOUT: TEETH X${TOUGH_PAY}. SPEND TO WIN IT.`;
+        if (rs.pv >= 4 && rs.chow > 0 && rs.chow < 3 + BANK_PER) return `GLOWING CARDS COMBO WITH YOUR LINE. ${BANK_PER} CHOW LEFT AT FIGHT = +1 NEXT ROUND.`;
+        return 'GLOW: +1 MERGES, BLUE COMBOS. HOLD A CARD TO READ IT. TOP ROW: SCOUT.';
       }
       case 'battle':
       case 'result':
@@ -1611,14 +1976,14 @@ export class PitScene implements DeptScene {
       if (selFood && p && !FOODS[selFood.f].all) target = true;
       if (selLine && sel!.i !== i) target = !p || p.k !== selLine.k || p.xp < 5;
       if (!p) this.lineCards[i].setState({ empty: true, target });
-      else this.lineCards[i].setState({ ...this.petState(p, rs), sel: sel?.g === 'line' && sel.i === i, target: target && !!selShop && p.k === selShop.k });
+      else this.lineCards[i].setState({ ...this.petState(p, rs), nm: true, sel: sel?.g === 'line' && sel.i === i, target: target && !!selShop && p.k === selShop.k });
     }
     for (let i = 0; i < 6; i++) {
       const s = rs.shop[i];
       const card = this.shopCards[i];
       card.visible = !!s;
       if (!s) card.setState(null);
-      else card.setState({ k: s.k, a: s.a, h: s.h, lvl: 1, sel: sel?.g === 'shop' && sel.i === i, dim: rs.chow < 3 });
+      else card.setState({ k: s.k, a: s.a, h: s.h, lvl: 1, nm: true, glow: this.shopGlow(rs, s.k), sel: sel?.g === 'shop' && sel.i === i, dim: rs.chow < 3 });
     }
     for (let i = 0; i < 2; i++) {
       const f = rs.food[i];
@@ -1646,13 +2011,28 @@ export class PitScene implements DeptScene {
     this.pauseBtn.visible = this.mode === 'shop' && !sixth;
     // Scouted rival on the top row.
     const riv = this.scoutInfo();
-    const scout = lvOf(this.run, 'scout');
+    const scout = this.scoutLevel();
     for (let i = 0; i < 5; i++) {
       const f = riv?.line[i];
       const col = riv && riv.arch !== 'hunt' ? ARCHES[riv.arch].color : 0xe04040;
-      this.rivalCards[i].setState(f ? this.fighterState(f, scout < 1 && f.kind !== 'hunt', col, scout >= 2) : null);
+      this.rivalCards[i].setState(f ? { ...this.fighterState(f, scout < 1 && f.kind !== 'hunt', col, scout >= 2), nm: true } : null);
     }
     this.refresh();
+  }
+
+  /** Scouting level for the scout row (the Scout Rivals Night Order lends level 2 for a Run). */
+  private scoutLevel(): number {
+    return Math.max(lvOf(this.run, 'scout'), this.run.cur?.scoutAll ? 2 : 0);
+  }
+
+  /** Shop glow: a twin merges into your line, a combo pairs with it (units.ts comboWith). */
+  private shopGlow(rs: RunState, k: UnitId): 'twin' | 'combo' | undefined {
+    if (rs.line.some((p) => p && p.k === k && p.xp < 5)) return 'twin';
+    return comboWith(k, this.lineKinds(rs)) ? 'combo' : undefined;
+  }
+
+  private lineKinds(rs: RunState): UnitId[] {
+    return rs.line.filter((p): p is Pet => !!p).map((p) => p.k);
   }
 
   private petState(p: Pet, rs: RunState): CardState {
@@ -1668,7 +2048,9 @@ export class PitScene implements DeptScene {
   }
 
   private setModeVisuals(): void {
-    for (const b of [this.rollBtn, this.sellBtn, this.fightBtn, this.brandBtn, this.pauseBtn, this.speedBtn, this.skipBtn, this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn]) b.visible = false;
+    for (const b of [this.rollBtn, this.sellBtn, this.fightBtn, this.brandBtn, this.pauseBtn, this.speedBtn, this.skipBtn, this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn, this.purseBtn]) b.visible = false;
+    this.purseG.visible = false;
+    this.logText.visible = false;
     for (const s of this.strips) s.c.visible = false;
   }
 
@@ -1686,13 +2068,16 @@ export class PitScene implements DeptScene {
       this.gritEmpty.position.set(this.gritFull.x + full * 4, this.gritFull.y);
       this.runInfo.set(`WINS ${sh.wins}/${WINS_TO_TRIUMPH}  RD ${sh.round}  S${rs.stakes}`);
       this.runInfo.position.set(this.xL + rs.gritMax * 4 + 6, this.gritFull.y);
-      this.chowText.set(`${rs.chow} CHOW`);
+      const bk = bankFor(rs);
+      this.chowText.set(rs.pv >= 4 ? `${rs.chow} CHOW${bk ? ` BANK+${bk}` : ''}` : `${rs.chow} CHOW`, bk ? '#8fd14f' : '#e8c04a');
       if (m === 'shop') {
         const riv = this.scoutInfo();
         if (riv) {
           const sc = rs.opts.scars ?? 0;
-          const name = riv.arch === 'hunt' ? `THE HUNTMASTER!${sc ? ` SCARS ${sc}` : ''}` : `${ARCHES[riv.arch].name.toUpperCase()} TAMER`;
-          this.rivalTag.set(`VS ${name}  (TAP TO SCOUT)`, riv.arch === 'hunt' ? '#ff6a5a' : '#f4e8c1');
+          const hunt = riv.arch === 'hunt' ? riv.line.find((f) => f.kind === 'hunt')?.hunt : undefined;
+          const tough = riv.arch !== 'hunt' && isTough(rs);
+          const name = riv.arch === 'hunt' ? `HUNTMASTER: ${hunt ? HUNTS[hunt].name : 'NETS'}${sc ? ` SC${sc}` : ''}` : `${ARCHES[riv.arch].name.toUpperCase()} TAMER${tough ? `  TOUGH: TEETH X${TOUGH_PAY}` : '  (TAP: SCOUT)'}`;
+          this.rivalTag.set(`VS ${name}`, riv.arch === 'hunt' ? '#ff6a5a' : tough ? '#f0a040' : '#f4e8c1');
         }
         const rc = rollCost(rs);
         this.rollBtn.setLabel(rc ? 'ROLL 1' : 'ROLL FREE').setEnabled(rs.chow >= rc);
@@ -1709,7 +2094,8 @@ export class PitScene implements DeptScene {
     } else if (m === 'home') {
       this.runInfo.position.set(this.xL, this.y0 + this.T - 10);
       if (this.ritual) {
-        for (const b of [this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn]) b.visible = false;
+        for (const b of [this.startBtn, this.forfeitBtn, this.upBtn, this.bandsBtn, this.stakesDown, this.stakesUp, this.stakesBuy, this.dropBtn, this.purseBtn]) b.visible = false;
+        this.purseG.visible = false;
         this.stakesText.visible = this.crownText.visible = this.tacticBox.visible = false;
         return;
       }
@@ -1751,6 +2137,8 @@ export class PitScene implements DeptScene {
       if (cur) this.startBtnWidth(this.wRow - 54);
       else this.startBtnWidth(this.wRow);
       this.homeHint.set(' ');
+      this.purseBtn.visible = this.purseG.visible = true;
+      this.refreshPurse();
       // UPGRADES pulses when something is affordable.
       const any = anyAffordable(this.groups);
       this.upBtn.setLabel(any && Math.floor(this.upPulse * 2) % 2 === 0 ? 'UPGRADES!' : 'UPGRADES');
@@ -1777,7 +2165,7 @@ export class PitScene implements DeptScene {
     const team = garrisonFighters(this.run);
     for (let i = 0; i < 5; i++) {
       const f = team[i];
-      this.lineCards[i].setState(f ? { ...this.fighterState(f, false, undefined), sel: this.homeSel === i } : { empty: true });
+      this.lineCards[i].setState(f ? { ...this.fighterState(f, false, undefined), nm: true, sel: this.homeSel === i } : { empty: true });
       if (!this.skirmishArch) this.rivalCards[i].setState(null);
     }
     if (!team.length) this.rivalTag.set('NO STANDING WARBAND', '#9c8aa8');
@@ -2153,9 +2541,11 @@ export class PitScene implements DeptScene {
   }
 
   destroy(): void {
-    // Never lose pay: credit Skirmish change and any battle Teeth still pending.
+    // Never lose pay: credit Skirmish change, the purse and any battle Teeth still pending.
     if (this.idleAcc > 0) this.ctx.earn(this.idleAcc);
     this.idleAcc = 0;
+    if ((this.run.purse ?? 0) > 0) this.ctx.earn(this.run.purse!);
+    this.run.purse = 0;
     const rs = this.run.cur;
     if (rs && rs.pend) this.creditBattle(rs);
     this.closePanel();

@@ -9,6 +9,7 @@ import {
   bucketMults,
   dropsPerSec,
   evPerDrop,
+  feverTiers,
   fillRun,
   goldCount,
   goldMult,
@@ -26,6 +27,7 @@ import {
   SLOP_MULT,
   taughtShare,
   ticketsOf,
+  tierMults,
   tiersOf,
   toadlings,
   tossCd,
@@ -35,7 +37,53 @@ import {
 } from './econ';
 import { Board, BOARD_W, BUCKETS, COL_W, RUNE_MULT, SPECIALS, STEP, type Ball, type GoldPeg, type IngId, type Peg } from './sim';
 
-export const MAX_BALLS = 60;
+/** Wave 1 (genre-research plinko #8, "thin the rain"): 60 -> 30. With the bundled rain below the
+ * board rarely holds more than ~12 ingredients, so this cap is only a safety net. */
+export const MAX_BALLS = 30;
+/**
+ * Thinned rain (PlinkIdle's cap-then-scale): the toadlings drop at most ~RAIN_VIS ingredients a
+ * second onto the board. Past that, drops are bundled into one heavy ingredient that carries the
+ * whole bundle's value (scale = drops), so the pour, the drop count and the EV are unchanged
+ * (balls never touch each other, so the landing odds are the same), the toadling rain stops
+ * being a constant peak-intensity flood, and the player's own spoon stays easy to follow.
+ */
+export const RAIN_VIS = 3;
+/** Drops per ingredient on the board for this pour (1 until the pour passes RAIN_VIS). */
+export const bundleOf = (run: CRun): number => Math.max(1, Math.ceil(dropsPerSec(run) / RAIN_VIS - 1e-9));
+
+/*
+ * Bubble Reach and Bubble Fever (genre-research plinko #3, pachinko's start pocket / reach /
+ * jitan, Peggle's Extreme Fever). Only the player's ingredients (Tossed or Ladled) spin it, when
+ * they land in a jackpot bucket: three bubbles roll; two alike is a REACH (the third rolls slowly),
+ * three alike starts Bubble Fever, which raises every bucket one tier and doubles it for FEVER_S. A spin that
+ * wins during a Fever extends it (the chain). The toadling rain never spins, so idleRate (the
+ * board with no input) is untouched; Fever is part of the active edge, like Ladles and Batches.
+ * SIM-TUNED: REACH_P x FEVER_P = 1/8 per spin (a REACH is a coin flip), about one Fever a
+ * minute for a player tossing down the middle.
+ */
+export const FEVER_S = 8;
+/** Bubble Fever also doubles every payout (the frenzy spike). SIM-TUNED: with the raised floor
+ * alone the thinned rain left active : on-screen idle at ~2.0x (band 2-3x). */
+export const FEVER_MULT = 2;
+export const SPIN_S = 0.9;
+export const REACH_S = 2.4;
+export const SPIN_SYMS = 4;
+export const REACH_P = 0.25;
+export const FEVER_P = 0.5;
+/** Spins held while one rolls (pachinko's reserved spins). */
+export const SPIN_QUEUE = 3;
+/** A Fever never stacks past this. */
+export const FEVER_MAX_S = 3 * FEVER_S;
+
+export interface Spin {
+  /** Bubble symbols (0..SPIN_SYMS-1). */
+  sym: [number, number, number];
+  t: number;
+  dur: number;
+  reach: boolean;
+  win: boolean;
+}
+
 /** Live pieces including Splitroot / thorn halves and the Hopper rain (render pool size). */
 export const MAX_LIVE = 96;
 export const CHARGE_S = 8;
@@ -68,6 +116,12 @@ export interface CoreHooks {
   drop?(x: number, toadling: number): void;
   overflow?(amount: number): void;
   hopper?(bucket: number): void;
+  /** A Bubble Reach spin started rolling (Tossed or Ladled ingredient in the jackpot). */
+  spin?(s: Spin): void;
+  /** A spin finished rolling (before a win starts the Fever). */
+  spinEnd?(s: Spin): void;
+  /** Bubble Fever started (`chain` = it extended a running Fever) or ended. */
+  fever?(on: boolean, chain: boolean): void;
   /** Wall clock (ms) for seasonal content. Absent (the balance sim) = no seasonal content. */
   now?(): number;
   /** DeptSave.imports (Goods, 00 §4): read live, so a purchase applies at once. */
@@ -92,6 +146,13 @@ export class CauldronCore {
   private seed: number;
   private rnd: () => number;
   private aimChute = 4;
+  /** Toadling drops waiting to be bundled into the next heavy ingredient. */
+  private pend = 0;
+  /** The Bubble Reach spin rolling now, and how many more are held. */
+  spin: Spin | null = null;
+  spinQ = 0;
+  /** Bubble Fever time left (s). */
+  feverT = 0;
 
   constructor(run: CRun, per: CPersistent, hooks: CoreHooks, seed = (Math.random() * 2 ** 31) | 0) {
     this.run = run;
@@ -182,7 +243,10 @@ export class CauldronCore {
     return pickIngredient(this.run, this.rnd(), this.exotic);
   }
 
-  update(dt: number): void {
+  /** `physScale` slows only the ball physics (the scene's slow motion); the pour, the timers and
+   * the Fever keep wall-clock time, so a slow-mo shot never costs income. */
+  update(dt: number, physScale = 1): void {
+    this.updateFever(dt);
     // Ladle charges recharge one at a time.
     const maxC = this.maxCharges;
     if (this.charges < maxC) {
@@ -204,7 +268,7 @@ export class CauldronCore {
       }
     }
 
-    this.acc += dt;
+    this.acc += dt * physScale;
     const ev = {
       peg: (b: Ball, p: Peg) => this.hooks.peg?.(b, p),
       gold: (b: Ball, g: GoldPeg) => {
@@ -230,11 +294,16 @@ export class CauldronCore {
   }
 
   private toadlingDrop(i: number): void {
+    // Thinned rain: bundle drops into one heavy ingredient once the pour passes RAIN_VIS.
+    this.pend++;
+    if (this.pend < bundleOf(this.run)) return;
+    const n = this.pend;
+    this.pend = 0;
     const ing = pickIngredient(this.run, this.rnd(), this.exotic);
     if (this.board.balls.length >= MAX_BALLS) {
       // Over the cap: resolve instantly at the expected value.
-      const amount = this.hooks.earn(evPerDrop(this.run, this.exotic));
-      this.run.stats.drops++;
+      const amount = this.hooks.earn(evPerDrop(this.run, this.exotic) * n);
+      this.run.stats.drops += n;
       this.hooks.overflow?.(amount);
       return;
     }
@@ -246,7 +315,9 @@ export class CauldronCore {
       x = k * COL_W + COL_W / 2 + (this.rnd() - 0.5) * 2;
     }
     this.toadX[i] = 3 + this.rnd() * (BOARD_W - 6);
-    this.board.drop(ing, x);
+    const b = this.board.drop(ing, x);
+    b.scale = n;
+    b.drops = n;
     this.hooks.drop?.(x, i);
   }
 
@@ -311,7 +382,7 @@ export class CauldronCore {
     if (b.hopper) return;
     const amount = this.hooks.earn(ingValue(this.run, b.ing) * b.scale * SLOP_MULT * allFactor(this.run));
     this.run.stats.spills++;
-    this.run.stats.drops++;
+    this.run.stats.drops += b.drops;
     this.hooks.spill?.(b, side, amount);
   }
 
@@ -321,13 +392,15 @@ export class CauldronCore {
       return;
     }
     const run = this.run;
-    const mults = bucketMults(run);
     const tiers = tiersOf(run);
+    const mults = bucketMults(run);
+    // Bubble Fever: every bucket pays one tier up.
+    const base = this.feverT > 0 ? tierMults(run)[feverTiers(tiers)[bucket]] * FEVER_MULT : mults[bucket];
     const hex = this.hexUntil[bucket] > this.board.t ? 2 : 1;
-    const mult = mults[bucket] * (1 + (goldMult(run) - 1) * b.goldHits) * (b.rune ? RUNE_MULT : 1) * hex;
+    const mult = base * (1 + (goldMult(run) - 1) * b.goldHits) * (b.rune ? RUNE_MULT : 1) * hex;
     const amount = this.hooks.earn(ingValue(run, b.ing) * b.scale * mult);
     const s = run.stats;
-    s.drops++;
+    s.drops += b.drops;
     if (b.tossed) s.tossLands++;
     const inner = inZone(bucket, 1, tiers);
     if (b.ladled && inner) {
@@ -340,6 +413,16 @@ export class CauldronCore {
     s.bestMult = Math.max(s.bestMult, mults[bucket]);
     if (b.ing === 'pumpkin') this.hexUntil[bucket] = this.board.t + HEX_S;
     this.hooks.land?.(b, bucket, amount, mult);
+    if (b.tossed || b.ladled) {
+      // The very first spin of a save is a sure win on any decent landing: the first-minute
+      // "whoa" (the first Toss is Granny's first beat). After that only the jackpot spins.
+      // The Night Order "Simmer a Fever" primes the same sure spin for the return.
+      if ((run.feverPrimed || (!(this.per.fevers ?? 0) && !s.fevers)) && !this.spin && tiers[bucket] >= 2) {
+        run.feverPrimed = false;
+        this.queueSpin(true);
+      }
+      else if (tiers[bucket] === 4) this.queueSpin(false);
+    }
 
     if (!(b.tossed || b.ladled) || b.group?.ticked) return;
     const list = this.tickets();
@@ -359,8 +442,10 @@ export class CauldronCore {
       const item = t.items.find((i) => i.ing === b.ing && i.got < i.n);
       if (!item) continue;
       if (b.group) b.group.ticked = true;
-      item.got++;
-      s.ticks++;
+      // A heavy (bundled) ingredient is a bucketful of that ingredient: it fills one line per drop.
+      const add = Math.min(item.n - item.got, Math.max(1, Math.round(b.drops)));
+      item.got += add;
+      s.ticks += add;
       this.hooks.tick?.(b.ing, bucket, ti);
       if (t.items.every((i) => i.got >= i.n)) this.completeBatch(ti);
       return;
@@ -381,6 +466,59 @@ export class CauldronCore {
     if (slot === 1) run.ticket2 = next;
     else run.ticket = next;
     this.hooks.batch?.(payout, 1, sock);
+  }
+
+  // ---------- Bubble Reach / Bubble Fever ----------
+
+  get fever(): boolean {
+    return this.feverT > 0;
+  }
+
+  private queueSpin(rig: boolean): void {
+    if (!this.spin) this.startSpin(rig);
+    else if (this.spinQ < SPIN_QUEUE) this.spinQ++;
+  }
+
+  private startSpin(rig: boolean): void {
+    const r = this.rnd;
+    const pick = () => Math.min(SPIN_SYMS - 1, Math.floor(r() * SPIN_SYMS));
+    const other = (x: number) => (x + 1 + Math.min(SPIN_SYMS - 2, Math.floor(r() * (SPIN_SYMS - 1)))) % SPIN_SYMS;
+    const a = pick();
+    const reach = rig || r() < REACH_P;
+    const win = rig || (reach && r() < FEVER_P);
+    const b = reach ? a : other(a);
+    const c = win ? a : reach ? other(a) : pick();
+    this.spin = { sym: [a, b, c], t: 0, dur: reach ? REACH_S : SPIN_S, reach, win };
+    this.run.stats.spins++;
+    if (reach) this.run.stats.reaches++;
+    this.hooks.spin?.(this.spin);
+  }
+
+  private updateFever(dt: number): void {
+    if (this.feverT > 0) {
+      this.feverT -= dt;
+      if (this.feverT <= 0) {
+        this.feverT = 0;
+        this.hooks.fever?.(false, false);
+      }
+    }
+    const sp = this.spin;
+    if (!sp) return;
+    sp.t += dt;
+    if (sp.t < sp.dur) return;
+    this.spin = null;
+    this.hooks.spinEnd?.(sp);
+    if (sp.win) {
+      const chain = this.feverT > 0;
+      this.feverT = Math.min(FEVER_MAX_S, this.feverT + FEVER_S);
+      this.run.stats.fevers++;
+      this.per.fevers = (this.per.fevers ?? 0) + 1;
+      this.hooks.fever?.(true, chain);
+    }
+    if (this.spinQ > 0) {
+      this.spinQ--;
+      this.startSpin(false);
+    }
   }
 
   /** Expected pour rate, for the HUD-like readouts. */

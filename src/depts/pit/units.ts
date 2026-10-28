@@ -16,6 +16,8 @@ export type Trig = 'faint' | 'hurt' | 'start' | 'attack' | 'ko' | 'buy' | 'sell'
 export interface UnitDef {
   id: UnitId;
   name: string;
+  /** Card nameplate (<= 5 letters, 07 §13 readability pass). */
+  short: string;
   tier: number;
   atk: number;
   hp: number;
@@ -34,34 +36,34 @@ export interface UnitDef {
 const U = (d: UnitDef) => d;
 
 export const UNITS: Record<UnitId, UnitDef> = {
-  rat: U({ id: 'rat', name: 'Gutter Rat', tier: 1, atk: 2, hp: 1, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON ${L} RATLING 1/1` }),
-  stirge: U({ id: 'stirge', name: 'Stirge', tier: 1, atk: 1, hp: 2, trig: 'start', front: -2, text: (L) => `START: ${L} DMG TO A RANDOM ENEMY` }),
-  piglet: U({ id: 'piglet', name: 'Tusk Piglet', tier: 1, atk: 2, hp: 2, trig: 'sell', front: 1, shopOnly: true, text: (L) => `SELL: +${L} CHOW` }),
-  dung: U({ id: 'dung', name: 'Dung Beetle', tier: 1, atk: 2, hp: 1, trig: 'buy', front: 0, shopOnly: true, text: (L) => `BUY: 2 RANDOM FRIENDS +${L} ATK` }),
-  crow: U({ id: 'crow', name: 'Carrion Crow', tier: 1, atk: 1, hp: 3, trig: 'ahead', front: -1, text: (L) => `FRIEND AHEAD FAINTS: +${L}/+${L}` }),
-  leech: U({ id: 'leech', name: 'Bog Leech', tier: 1, atk: 1, hp: 3, trig: 'attack', front: 2, text: (L) => `BEFORE ATTACK: STEAL ${L} HP` }),
-  wolf: U({ id: 'wolf', name: 'Dire Wolf', tier: 2, atk: 3, hp: 3, trig: 'ahead', front: -1, text: (L) => `FRIEND AHEAD ATTACKS: +${L} ATK` }),
-  spider: U({ id: 'spider', name: 'Cave Spider', tier: 2, atk: 2, hp: 2, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON A ${2 * L}/${2 * L} BROOD` }),
-  rust: U({ id: 'rust', name: 'Rust Beetle', tier: 2, atk: 2, hp: 4, trig: 'start', front: 2, text: (L) => `START: FRONT ENEMY -${2 * L} ATK, -1 ARMOR` }),
-  ember: U({ id: 'ember', name: 'Ember Hound', tier: 2, atk: 3, hp: 2, trig: 'ko', front: 1, text: (L) => `KNOCKOUT: +${L}/+${L} FOR THE RUN` }),
-  mimic: U({ id: 'mimic', name: 'Mimic', tier: 2, atk: 2, hp: 3, trig: 'faint', front: 2, crests: 2, text: () => 'FAINT: FRIEND BEHIND GETS A RANDOM ITEM' }),
-  bat: U({ id: 'bat', name: 'Grave Bat', tier: 2, atk: 2, hp: 2, trig: 'faint', front: 1, crests: 3, text: (L) => `FAINT: ${L} DMG TO 2 RANDOM ENEMIES` }),
-  boar: U({ id: 'boar', name: 'Tusk Boar', tier: 3, atk: 4, hp: 4, trig: 'hurt', front: 4, text: (L) => `HURT: +${2 * L} ATK (BATTLE)` }),
-  gorgon: U({ id: 'gorgon', name: 'Gorgon Lizard', tier: 3, atk: 3, hp: 5, trig: 'start', front: 0, text: (L) => `START: TOP-ATK ENEMY SKIPS ${L} STRIKE${L > 1 ? 'S' : ''}` }),
-  owlbear: U({ id: 'owlbear', name: 'Owlbear', tier: 3, atk: 5, hp: 5, trig: 'endshop', front: 1, shopOnly: true, text: (L) => `END OF SHOP: FRIEND AHEAD +${L}/+${L}` }),
-  wasp: U({ id: 'wasp', name: 'Hive Wasp', tier: 3, atk: 1, hp: 4, trig: 'start', front: -1, crests: 4, text: (L) => `START: ALL FRIENDS GAIN THORNS ${L}` }),
-  manticore: U({ id: 'manticore', name: 'Manticore', tier: 4, atk: 5, hp: 4, trig: 'start', front: -3, text: (L) => `START: ${3 * L} DMG TO 2 HIGHEST-HP ENEMIES` }),
-  wyvern: U({ id: 'wyvern', name: 'Wyvern', tier: 4, atk: 5, hp: 5, trig: 'ko', front: 1, text: (L) => `KNOCKOUT: STRIKE AGAIN (${L}X PER BATTLE)` }),
-  sabre: U({ id: 'sabre', name: 'Sabre Cat', tier: 4, atk: 6, hp: 3, trig: 'start', front: 0, text: (L) => `START: +${L} ATK PER EMPTY SLOT` }),
-  gargoyle: U({ id: 'gargoyle', name: 'Gargoyle', tier: 4, atk: 3, hp: 8, trig: 'passive', front: 5, crests: 5, text: (L) => `TAKES -${L} DMG PER HIT (MIN 1)` }),
-  ogre: U({ id: 'ogre', name: 'Bone Ogre', tier: 5, atk: 6, hp: 6, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON TWO ${L}/${L} RATLINGS` }),
-  hydra: U({ id: 'hydra', name: 'Hydra', tier: 5, atk: 4, hp: 6, trig: 'faint', front: 3, crests: 7, text: (L) => `FAINT: SUMMON TWO ${3 * L}/${3 * L} HEADS` }),
-  dragon: U({ id: 'dragon', name: 'Pit Dragon', tier: 5, atk: 6, hp: 8, trig: 'start', front: -2, crests: 9, text: (L) => `START: ${2 * L} DMG TO EVERY ENEMY` }),
-  ratling: U({ id: 'ratling', name: 'Ratling', tier: 1, atk: 1, hp: 1, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
-  brood: U({ id: 'brood', name: 'Brood', tier: 1, atk: 2, hp: 2, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
-  head: U({ id: 'head', name: 'Hydra Head', tier: 1, atk: 3, hp: 3, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
-  shade: U({ id: 'shade', name: 'Shade', tier: 1, atk: 1, hp: 1, trig: 'none', front: 0, token: true, text: () => 'A RESTLESS SPIRIT' }),
-  hunt: U({ id: 'hunt', name: 'The Huntmaster', tier: 6, atk: 14, hp: 30, trig: 'start', front: -5, token: true, text: () => 'START: NETS YOUR TOP ATTACKER, BEASTS +1 ATK. ARMOR 2' }),
+  rat: U({ id: 'rat', short: 'RAT', name: 'Gutter Rat', tier: 1, atk: 2, hp: 1, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON ${L} RATLING 1/1` }),
+  stirge: U({ id: 'stirge', short: 'STIRG', name: 'Stirge', tier: 1, atk: 1, hp: 2, trig: 'start', front: -2, text: (L) => `START: ${L} DMG TO A RANDOM ENEMY` }),
+  piglet: U({ id: 'piglet', short: 'PIGLT', name: 'Tusk Piglet', tier: 1, atk: 2, hp: 2, trig: 'sell', front: 1, shopOnly: true, text: (L) => `SELL: +${L} CHOW` }),
+  dung: U({ id: 'dung', short: 'DUNG', name: 'Dung Beetle', tier: 1, atk: 2, hp: 1, trig: 'buy', front: 0, shopOnly: true, text: (L) => `BUY: 2 RANDOM FRIENDS +${L} ATK` }),
+  crow: U({ id: 'crow', short: 'CROW', name: 'Carrion Crow', tier: 1, atk: 1, hp: 3, trig: 'ahead', front: -1, text: (L) => `FRIEND AHEAD FAINTS: +${L}/+${L}` }),
+  leech: U({ id: 'leech', short: 'LEECH', name: 'Bog Leech', tier: 1, atk: 1, hp: 3, trig: 'attack', front: 2, text: (L) => `BEFORE ATTACK: STEAL ${L} HP` }),
+  wolf: U({ id: 'wolf', short: 'WOLF', name: 'Dire Wolf', tier: 2, atk: 3, hp: 3, trig: 'ahead', front: -1, text: (L) => `FRIEND AHEAD ATTACKS: +${L} ATK` }),
+  spider: U({ id: 'spider', short: 'SPIDR', name: 'Cave Spider', tier: 2, atk: 2, hp: 2, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON A ${2 * L}/${2 * L} BROOD` }),
+  rust: U({ id: 'rust', short: 'RUST', name: 'Rust Beetle', tier: 2, atk: 2, hp: 4, trig: 'start', front: 2, text: (L) => `START: FRONT ENEMY -${2 * L} ATK, -1 ARMOR` }),
+  ember: U({ id: 'ember', short: 'EMBER', name: 'Ember Hound', tier: 2, atk: 3, hp: 2, trig: 'ko', front: 1, text: (L) => `KNOCKOUT: +${L}/+${L} FOR THE RUN` }),
+  mimic: U({ id: 'mimic', short: 'MIMIC', name: 'Mimic', tier: 2, atk: 2, hp: 3, trig: 'faint', front: 2, crests: 2, text: () => 'FAINT: FRIEND BEHIND GETS A RANDOM ITEM' }),
+  bat: U({ id: 'bat', short: 'BAT', name: 'Grave Bat', tier: 2, atk: 2, hp: 2, trig: 'faint', front: 1, crests: 3, text: (L) => `FAINT: ${L} DMG TO 2 RANDOM ENEMIES` }),
+  boar: U({ id: 'boar', short: 'BOAR', name: 'Tusk Boar', tier: 3, atk: 4, hp: 4, trig: 'hurt', front: 4, text: (L) => `HURT: +${2 * L} ATK (BATTLE)` }),
+  gorgon: U({ id: 'gorgon', short: 'GORGN', name: 'Gorgon Lizard', tier: 3, atk: 3, hp: 5, trig: 'start', front: 0, text: (L) => `START: TOP-ATK ENEMY SKIPS ${L} STRIKE${L > 1 ? 'S' : ''}` }),
+  owlbear: U({ id: 'owlbear', short: 'OWLBR', name: 'Owlbear', tier: 3, atk: 5, hp: 5, trig: 'endshop', front: 1, shopOnly: true, text: (L) => `END OF SHOP: FRIEND AHEAD +${L}/+${L}` }),
+  wasp: U({ id: 'wasp', short: 'WASP', name: 'Hive Wasp', tier: 3, atk: 1, hp: 4, trig: 'start', front: -1, crests: 4, text: (L) => `START: ALL FRIENDS GAIN THORNS ${L}` }),
+  manticore: U({ id: 'manticore', short: 'MANTI', name: 'Manticore', tier: 4, atk: 5, hp: 4, trig: 'start', front: -3, text: (L) => `START: ${3 * L} DMG TO 2 HIGHEST-HP ENEMIES` }),
+  wyvern: U({ id: 'wyvern', short: 'WYVRN', name: 'Wyvern', tier: 4, atk: 5, hp: 5, trig: 'ko', front: 1, text: (L) => `KNOCKOUT: STRIKE AGAIN (${L}X PER BATTLE)` }),
+  sabre: U({ id: 'sabre', short: 'SABRE', name: 'Sabre Cat', tier: 4, atk: 6, hp: 3, trig: 'start', front: 0, text: (L) => `START: +${L} ATK PER EMPTY SLOT` }),
+  gargoyle: U({ id: 'gargoyle', short: 'GARGL', name: 'Gargoyle', tier: 4, atk: 3, hp: 8, trig: 'passive', front: 5, crests: 5, text: (L) => `TAKES -${L} DMG PER HIT (MIN 1)` }),
+  ogre: U({ id: 'ogre', short: 'OGRE', name: 'Bone Ogre', tier: 5, atk: 6, hp: 6, trig: 'faint', front: 3, text: (L) => `FAINT: SUMMON TWO ${L}/${L} RATLINGS` }),
+  hydra: U({ id: 'hydra', short: 'HYDRA', name: 'Hydra', tier: 5, atk: 4, hp: 6, trig: 'faint', front: 3, crests: 7, text: (L) => `FAINT: SUMMON TWO ${3 * L}/${3 * L} HEADS` }),
+  dragon: U({ id: 'dragon', short: 'DRAGN', name: 'Pit Dragon', tier: 5, atk: 6, hp: 8, trig: 'start', front: -2, crests: 9, text: (L) => `START: ${2 * L} DMG TO EVERY ENEMY` }),
+  ratling: U({ id: 'ratling', short: 'RATLG', name: 'Ratling', tier: 1, atk: 1, hp: 1, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
+  brood: U({ id: 'brood', short: 'BROOD', name: 'Brood', tier: 1, atk: 2, hp: 2, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
+  head: U({ id: 'head', short: 'HEAD', name: 'Hydra Head', tier: 1, atk: 3, hp: 3, trig: 'none', front: 0, token: true, text: () => 'SUMMONED' }),
+  shade: U({ id: 'shade', short: 'SHADE', name: 'Shade', tier: 1, atk: 1, hp: 1, trig: 'none', front: 0, token: true, text: () => 'A RESTLESS SPIRIT' }),
+  hunt: U({ id: 'hunt', short: 'HUNT', name: 'The Huntmaster', tier: 6, atk: 14, hp: 30, trig: 'start', front: -5, token: true, text: () => 'START: NETS YOUR TOP ATTACKER, BEASTS +1 ATK. ARMOR 2' }),
 };
 
 /** The 23 shop units, in tier order. */
@@ -144,3 +146,91 @@ export const ARCHES: Record<ArchId, ArchDef> = {
   hexer: { id: 'hexer', name: 'Hexer', short: 'HEX', from: 4, bias: ['gorgon', 'mimic', 'owlbear'], color: 0x9a4ad8, foods: true },
 };
 export const ARCH_LIST: ArchId[] = ['ratcatcher', 'falconer', 'bulwark', 'brawler', 'hexer'];
+
+// ---------- Huntmaster hunts (genre research R5: a rotating, telegraphed skill check) ----------
+
+/** The Huntmaster's counter-move for a bout. Drawn from the Run seed and the attempt number, so
+ * a retry re-rolls it (params version 4); version-3 Runs keep the classic net ('net'). */
+export type HuntId = 'net' | 'trap' | 'volley' | 'muzzle' | 'hamstring';
+
+export interface HuntDef {
+  id: HuntId;
+  name: string;
+  /** What he does (3x5 font, short). */
+  text: string;
+  /** Snarl's counter tip. */
+  tip: string;
+}
+
+export const HUNTS: Record<HuntId, HuntDef> = {
+  net: { id: 'net', name: 'NET-THROWER', text: 'NETS YOUR TOP ATTACKER, HIS BEASTS +1 ATK', tip: 'SPREAD YOUR ATTACK' },
+  trap: { id: 'trap', name: 'TRAPPER', text: 'YOUR FRONT TAKES 4 AT THE START', tip: 'TOUGH FRONT, OR A CHEW TOY' },
+  volley: { id: 'volley', name: 'BOWMASTER', text: '2 DMG TO YOUR BACK TWO AT THE START', tip: 'STURDY BACK, OR FAINT BEASTS THERE' },
+  muzzle: { id: 'muzzle', name: 'MUZZLER', text: 'YOUR START TRIGGERS FIZZLE', tip: 'LEAN ON FAINT, HURT AND KNOCKOUT' },
+  hamstring: { id: 'hamstring', name: 'HAMSTRINGER', text: 'YOUR TOUGHEST BEAST -3 ATK', tip: 'DO NOT STACK ONE CARRY' },
+};
+export const HUNT_LIST: HuntId[] = ['net', 'trap', 'volley', 'muzzle', 'hamstring'];
+
+// ---------- shop combos (genre research R3: the "aha" when two cards meet) ----------
+
+const FAINTERS: UnitId[] = ['rat', 'spider', 'ogre', 'hydra', 'bat', 'mimic'];
+const TANKS: UnitId[] = ['boar', 'gargoyle', 'leech', 'rust', 'ogre', 'hydra', 'spider'];
+const KOERS: UnitId[] = ['ember', 'wyvern'];
+const STARTERS: UnitId[] = ['stirge', 'manticore', 'dragon'];
+
+/**
+ * Why shop unit `k` combos with a line of `line` kinds (first match), or null. Pure display: it
+ * never changes a rule. Duplicates (merges) are handled separately by the scene.
+ */
+export function comboWith(k: UnitId, line: UnitId[]): string | null {
+  const has = (ks: UnitId[]) => line.find((x) => ks.includes(x));
+  const name = (x: UnitId) => UNITS[x].short;
+  let m: UnitId | undefined;
+  switch (k) {
+    case 'crow':
+      if ((m = has(FAINTERS))) return `PUT IT BEHIND YOUR ${name(m)}: FAINTS FEED IT`;
+      break;
+    case 'wolf':
+      if ((m = has(TANKS))) return `BEHIND YOUR ${name(m)}: EVERY SWING +ATK`;
+      break;
+    case 'wasp':
+      if ((m = has(['boar', 'gargoyle', 'leech']))) return `THORNS ON YOUR ${name(m)} HIT BACK`;
+      break;
+    case 'owlbear':
+      if (line.length) return 'FEEDS THE BEAST AHEAD EVERY ROUND';
+      break;
+    case 'sabre':
+      if (line.length <= 3) return 'SHORT LINE: +ATK PER EMPTY SLOT';
+      break;
+    case 'dung':
+      if (line.length >= 2) return 'BUY: TWO FRIENDS +ATK';
+      break;
+    case 'mimic':
+      if (line.length) return 'FAINT: ARMS THE FRIEND BEHIND';
+      break;
+    case 'boar':
+      if ((m = has(['wolf', 'wasp']))) return `PAIRS WITH YOUR ${name(m)}`;
+      break;
+    case 'gargoyle':
+      if ((m = has(['wolf', 'wasp', 'crow']))) return `A WALL FOR YOUR ${name(m)}`;
+      break;
+    case 'gorgon':
+    case 'rust':
+      if ((m = has(TANKS.filter((x) => x !== k)))) return `SHIELDS YOUR ${name(m)} UP FRONT`;
+      break;
+    case 'ember':
+    case 'wyvern':
+      if ((m = has([...STARTERS, 'rust', 'gorgon']))) return `YOUR ${name(m)} SOFTENS, IT FINISHES`;
+      break;
+    case 'stirge':
+    case 'manticore':
+    case 'dragon':
+      if ((m = has(KOERS))) return `SOFTENS FOES FOR YOUR ${name(m)}`;
+      break;
+    default:
+      if (FAINTERS.includes(k) && (m = has(['crow']))) return `FAINTS FEED YOUR ${name(m)}`;
+      if (FAINTERS.includes(k) && (m = has(['wolf']))) return `A FRONT FOR YOUR ${name(m)}`;
+  }
+  if (TANKS.includes(k) && (m = has(['wolf']))) return `A FRONT FOR YOUR ${name(m)}`;
+  return null;
+}

@@ -81,9 +81,9 @@ describe('spire special orbs and tools', () => {
     expect(c.run.stats.catalysts).toBe(1);
   });
 
-  it('the bag deals a Catalyst every 60 drops (Catalyst Coil: -6 each)', () => {
-    expect(D.catalystEveryL(0)).toBe(60);
-    expect(D.catalystEveryL(7)).toBe(18);
+  it('Catalysts are earned by x4 chains on a recharge, never dealt by the bag (R9)', () => {
+    expect(D.catalystEveryL(0)).toBe(36);
+    expect(D.catalystEveryL(7)).toBe(12);
     const { c } = core();
     let seen = 0;
     for (let i = 0; i < 130; i++) {
@@ -92,7 +92,18 @@ describe('spire special orbs and tools', () => {
       c.cool = 0;
       c.drop(0);
     }
-    expect(seen).toBe(2);
+    expect(seen).toBe(0);
+    // A three-step cascade (x4) once the recharge is full puts one next in line.
+    c.run.catT = 40;
+    c.flask.clear();
+    c.depth = 2; // two merges into a cascade already
+    c.sinceMerge = 0;
+    c.flask.add(1, -5, 150);
+    c.flask.add(1, 5, 150);
+    settle(c, 0.5);
+    expect(c.run.stats.bestChain).toBe(3);
+    expect(c.run.queue[1]).toBe(D.CATALYST);
+    expect(c.run.catT).toBe(0);
   });
 
   it('three touching Hex Stones shatter for 3 x the top tier value / 10', () => {
@@ -234,12 +245,13 @@ describe('spire advancement hooks', () => {
     expect(r.lv.hire).toBe(4);
     spire.signature!.apply(s);
     spire.signature!.apply(s);
-    expect(r.lv.wider).toBe(1);
+    expect(r.lv.richer).toBe(1);
     expect(r.lv.coil).toBe(2);
     r.lv.coil = 5;
     spire.signature!.apply(s);
     expect(r.lv.coil).toBe(5);
     expect(s.persistent).toEqual(D.defaultPersistent());
+    expect(r.lv.wider).toBeUndefined();
   });
 
   it('manager lines stay <= 32 characters, and each 04 §18 trigger has 2+ variants', () => {
@@ -258,5 +270,145 @@ describe('spire advancement hooks', () => {
     for (const b of beats) expect(b.line.length, b.line).toBeLessThanOrEqual(32);
     // First purchase by beat 3 (00 §5.4.2).
     expect(spire.onboarding.findIndex((b) => b.id === 'upgrade')).toBeLessThanOrEqual(2);
+  });
+});
+
+// ---------- Wave 1: the geometry re-cut, chains, flask scores and the apprentices' study ----------
+
+describe('spire wave 1', () => {
+  it('the box is tight and late tiers really grow: a 1.3-1.8 area step all the way up', () => {
+    expect(D.FLASK_H).toBe(160);
+    for (let t = 2; t <= D.MAX_TIER; t++) {
+      const ratio = (D.TIERS[t].r / D.TIERS[t - 1].r) ** 2;
+      expect(ratio, `T${t}`).toBeGreaterThan(1.3);
+      expect(ratio, `T${t}`).toBeLessThan(1.8);
+    }
+    // The biggest spawn (T4) is ~18% of the width; a Void Star is over half of it.
+    expect((2 * D.TIERS[4].r) / D.BASE_FLASK_W).toBeGreaterThan(0.17);
+    expect((2 * D.TIERS[D.MAX_TIER].r) / D.BASE_FLASK_W).toBeGreaterThan(0.6);
+  });
+
+  it('Wider Flask and Taller Neck are gone; an old save gets their Arcana back and keeps a repacked flask', () => {
+    expect(D.UPGRADES.some((u) => u.id === 'wider' || u.id === 'neck')).toBe(false);
+    const run = D.defaultRun() as any;
+    delete run.geo;
+    run.bank = 100;
+    run.lv = { wider: 2, neck: 1, potent: 0 };
+    // Twenty Soulfires stacked in the old 216 px flask: more than 40% of the new one.
+    run.flask = [];
+    for (let i = 0; i < 20; i++) run.flask.push(7, (i % 3) * 30 - 30, 200 - Math.floor(i / 3) * 30);
+    const { c } = core(run);
+    expect(run.lv.wider).toBeUndefined();
+    expect(run.lv.neck).toBeUndefined();
+    expect(run.geo).toBe(D.GEO_V);
+    const kept = c.flask.count;
+    expect(kept).toBeGreaterThan(0);
+    expect(kept).toBeLessThan(20);
+    // 1,000 + 3,000 (Wider 1-2) + 1,500 (Neck 1) + 1,000 per Soulfire paid out.
+    expect(run.bank).toBe(100 + 1000 + 3000 + 1500 + 1000 * (20 - kept));
+    // Idempotent: a second load changes nothing.
+    D.normalize(run, D.defaultPersistent());
+    expect(run.bank).toBe(100 + 5500 + 1000 * (20 - kept));
+    for (const o of c.flask.orbs) expect(o.y).toBeLessThanOrEqual(D.FLASK_H);
+  });
+
+  it('chains pay geometrically: x1, x2, x4, x6 ... up to the Resonant Glass cap (R5)', () => {
+    expect([1, 2, 3, 4, 5].map((d) => D.chainMultL(d, 99))).toEqual([1, 2, 4, 6, 8]);
+    expect(D.chainMultL(9, D.resCapL(0))).toBe(D.resCapL(0));
+    expect(D.resCapL(10)).toBeGreaterThan(D.resCapL(0));
+  });
+
+  it('a real overflow ends the flask: its score is studied and sets the BEST', () => {
+    const run = D.defaultRun();
+    let ended: [number, number] | null = null;
+    const c = new SpireCore(run, D.defaultPersistent(), { earn: (b) => b, raiseSkill: () => {}, flaskEnd: (s, p) => (ended = [s, p]) }, 5);
+    c.flask.add(3, -8, 150);
+    c.flask.add(3, 8, 150);
+    settle(c, 1);
+    expect(run.flaskScore).toBe(36);
+    c.vent();
+    expect(ended).toEqual([36, 0]);
+    expect(run.flaskBest).toBe(36);
+    expect(run.recent).toEqual([36]);
+    expect(run.flaskScore).toBe(0);
+    // A Vent Now (manual) never ends the flask.
+    run.lv.settle = 1;
+    c.flask.add(4, 0, 5);
+    run.flaskScore = 10;
+    c.lock = 0;
+    expect(c.ventNow()).toBe(true);
+    expect(run.flaskScore).toBe(10);
+    expect(run.recent).toEqual([36]);
+  });
+
+  it('the first brim warning of a flask hands over one free Quicksilver (R9)', () => {
+    const run = D.defaultRun();
+    const kinds: string[] = [];
+    const c = new SpireCore(run, D.defaultPersistent(), { earn: (b) => b, raiseSkill: () => {}, rescue: (k) => kinds.push(k) }, 5);
+    // A pile of unmergeable heavy bodies up past the Brim Line.
+    for (let row = 0; row < 8; row++) for (let i = 0; i < 4; i++) c.flask.add(D.LEGEND_BODY, -39 + i * 26 + (row % 2) * 4, D.FLASK_H - 13 - row * 24);
+    for (let i = 0; i < 90 && !kinds.length; i++) settle(c, 1 / 6);
+    expect(kinds).toEqual(['quick']);
+    expect(c.current).toBe(D.QUICK);
+    expect(run.qsGiven).toBe(true);
+  });
+
+  it('idle copies your best flask: pure, bounded, and higher for a better flask (R6)', () => {
+    const run = D.defaultRun();
+    const per = D.defaultPersistent();
+    run.ceiling = 9;
+    run.lv.hire = 2;
+    const at = (score: number) => {
+      run.recent = [score];
+      return D.idleRateOf(run, per);
+    };
+    const none = at(0);
+    expect(D.studyMultOf(run, per)).toBe(D.STUDY_LO);
+    const typical = at(D.STUDY_REF * D.TIERS[9].value);
+    const great = at(4 * D.STUDY_REF * D.TIERS[9].value);
+    expect(typical / none).toBeCloseTo(1 / D.STUDY_LO, 5);
+    expect(great / typical).toBeCloseTo(2, 5);
+    expect(at(1e15) / typical).toBeCloseTo(D.STUDY_HI, 5);
+    // Pure: same save, same answer; only the last STUDY_FLASKS flasks count.
+    expect(at(12345)).toBe(at(12345));
+    run.recent = [1e9, 1, 1, 1].slice(-D.STUDY_FLASKS);
+    expect(D.studyScore(run)).toBe(1);
+  });
+
+  it('under real play the flask fills and vents (a sloppy random dropper, no upgrades)', () => {
+    const run = D.defaultRun();
+    const c = new SpireCore(run, D.defaultPersistent(), { earn: (b) => b, raiseSkill: () => {} }, 11);
+    let x = 0;
+    for (let i = 0; i < 400 && run.stats.vents === 0; i++) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      c.drop(((x / 2147483648) * 2 - 1) * 56);
+      settle(c, 1.3);
+    }
+    expect(run.stats.vents).toBeGreaterThan(0);
+    expect(run.stats.drops).toBeLessThan(400);
+  });
+
+  it('Next Goal and the Night Orders (HUNT PAGES banks hours toward Pages)', () => {
+    const s = mkSave();
+    const r = s.run as D.SpireRun;
+    const p = s.persistent as D.SpirePersistent;
+    expect(spire.nextGoal!(s)!.label).toBe('HIRE AN APPRENTICE');
+    r.lv.hire = 1;
+    r.flaskBest = 1000;
+    r.flaskScore = 250;
+    const g = spire.nextGoal!(s)!;
+    expect(g.label).toBe('BEAT YOUR BEST FLASK');
+    expect(g.progress).toBeCloseTo(0.25);
+    const orders = spire.nightOrders!(s);
+    expect(orders.length).toBe(2);
+    for (const o of orders) {
+      expect(o.label.length).toBeLessThanOrEqual(15);
+      expect(o.desc.length).toBeLessThanOrEqual(34);
+    }
+    expect(spire.applyNightOrder!(s, 'distill', 3600, 1)).toBeUndefined();
+    expect(spire.applyNightOrder!(s, 'pages', 6 * 3600, 1)).toBe('PAGE HUNT 60%');
+    expect(spire.applyNightOrder!(s, 'pages', 15 * 3600, 1)).toBe('2 GRIMOIRE PAGES FOUND');
+    expect(p.pages).toBe(2);
+    expect(p.pageHunt).toBeCloseTo(1);
   });
 });

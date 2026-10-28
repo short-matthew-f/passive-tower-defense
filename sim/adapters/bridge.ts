@@ -12,13 +12,19 @@
 // The shop is the real upgrade list (src/depts/bridge/upgrades.ts buildGroups) on a headless
 // DeptCtx, so costs, caps and the Menace dial match the game.
 //
-// Bot (00 §8.1 "Bridge" row): it reads the traveler the way a player does. It compares each
-// visible part and the destination with what the Claim normally looks like (model.ts NORMAL),
-// checks a Writ's seal and the Poster, and ignores today's fake tell once the Menace 9 rule card
-// is out. Each real contradiction is noticed with a skill-dependent chance, and novices sometimes
-// misread an allowed alternate as a tell. It Unmasks at >= 2 hero clues (the expert at 1),
-// Searches on smuggling clues or a sniff, and otherwise haggles inside the Wallet Sense band
-// (lower for brawny Claims and suspects), taking or pushing a counter. The greedy buyer ranks
+// Bot (00 §8.1 "Bridge" row; wave 1 rules): it reads the traveler the way a player does. It
+// compares each visible part and the destination with what the Claim normally looks like
+// (model.ts NORMAL); an odd part counts only if it is on today's Decree (the bot knows what each
+// Decree part means, as a player's Codex does after a few catches). Each real tell is noticed with a
+// skill-dependent chance; a skill-dependent share of travelers is read without checking the
+// Decree, so off-Decree fashion (red herrings, yesterday's tell) reads as a tell. It checks a
+// Writ's seal and the Wanted poster, and ignores today's fake tell once the Menace 9 card is out.
+// It Unmasks at >= 2 hero clues (the expert at 1) and Searches on smuggling clues or a sniff.
+// Otherwise it haggles with the price tiers: the highest tier under its aim inside the Wallet
+// Sense band (lower for brawny Claims and suspects), GOUGE / ROB only while Glower lasts, taking
+// a counter and stepping down a tier after a FURIOUS refusal. Mistakes (false accusations, liars
+// let through while a tell showed) are fined after two free ones per session, as in the scene.
+// No information leaks to the bot that the player can't see. The greedy buyer ranks
 // nodes by Δ(value)/cost, value = idleRate + a share of the bot's expected active income per
 // traveler (a Monte Carlo over the real generator and reply rules, common random numbers).
 import type { DeptCtx, UpgradeEntry } from '../../src/core/dept';
@@ -36,10 +42,13 @@ export type Skill = 'novice' | 'reference' | 'expert';
  * card; think: seconds to size up a traveler and drag the stack; aim: where in the Wallet band
  * the demand lands (0 = low edge), with noise; unmaskAt: hero clues needed; push: pushes a
  * counter by 0.1; taps: taps/s on a napping Grumm. */
-const SKILL: Record<Skill, { notice: number; misread: number; poster: number; rule: number; think: number; aim: number; noise: number; unmaskAt: number; push: boolean; taps: number }> = {
-  novice: { notice: 0.7, misread: 0.04, poster: 0.5, rule: 0.6, think: 2.6, aim: 0.35, noise: 0.15, unmaskAt: 2, push: false, taps: 1 },
-  reference: { notice: 0.9, misread: 0.01, poster: 0.9, rule: 0.95, think: 1.8, aim: 0.5, noise: 0.08, unmaskAt: 2, push: false, taps: 2 },
-  expert: { notice: 0.98, misread: 0.003, poster: 1, rule: 1, think: 1.2, aim: 0.55, noise: 0.04, unmaskAt: 1, push: true, taps: 4 },
+// decree: chance a traveler is read against today's Decree (else every pool part reads as a tell).
+const SKILL: Record<Skill, { notice: number; misread: number; poster: number; rule: number; decree: number; think: number; aim: number; noise: number; unmaskAt: number; push: boolean; taps: number }> = {
+  novice: { notice: 0.7, misread: 0.04, poster: 0.5, rule: 0.6, decree: 0.7, think: 2.6, aim: 0.35, noise: 0.15, unmaskAt: 2, push: false, taps: 1 },
+  // SIM-TUNED (wave 1): reference unmaskAt 2 -> 1 (one Decree tell is real evidence now that
+  // off-Decree parts are fashion; at 2 it let most heroes through and paid the fines), aim 0.5 -> 0.6.
+  reference: { notice: 0.9, misread: 0.01, poster: 0.9, rule: 0.95, decree: 0.95, think: 1.8, aim: 0.65, noise: 0.08, unmaskAt: 1, push: false, taps: 2 },
+  expert: { notice: 0.98, misread: 0.003, poster: 1, rule: 1, decree: 0.99, think: 1.2, aim: 0.7, noise: 0.04, unmaskAt: 1, push: true, taps: 4 },
 };
 
 export interface BridgeOpts {
@@ -81,9 +90,6 @@ function shop(save: DeptSave): UpgradeEntry[] {
   return buildGroups(headlessCtx(save), { onGoon() {}, onMenaceBought() {} }).flatMap((g) => g.entries);
 }
 
-const HERO_PARTS = new Set(M.HERO_TELLS.map(([, p]) => p));
-const SMUGGLE_PARTS = new Set([...M.SMUGGLE_TELLS.map(([, p]) => p), M.HAT_SMUGGLE[1]]);
-
 // ---------- the bot's reading of a traveler ----------
 
 interface Read {
@@ -94,15 +100,18 @@ interface Read {
 function readTraveler(t: M.Traveler, menace: number, poster: M.Poster, sk: (typeof SKILL)[Skill], rnd: Rng): Read {
   const normal = M.NORMAL[t.who];
   const ignoreFake = menace >= 9 && rnd() < sk.rule;
+  const decreeCheck = rnd() < sk.decree;
   let hero = 0;
   let smuggle = false;
   for (const slot of M.SLOTS) {
     const part = t.look[slot];
     if (normal[slot].includes(part)) continue;
     if (ignoreFake && part === poster.fake) continue;
-    if (rnd() >= sk.notice) continue;
-    if (SMUGGLE_PARTS.has(part)) smuggle = true;
-    else if (HERO_PARTS.has(part)) hero++;
+    // On the Decree it marks a liar; off it, fashion, unless the bot forgot to check the Decree.
+    const k = M.decreeKind(poster.decree, part, menace) ?? (decreeCheck ? null : M.poolKind(part));
+    if (!k || rnd() >= sk.notice) continue;
+    if (k === 'smug') smuggle = true;
+    else hero++;
   }
   if (!normal.where.includes(t.where) && rnd() < sk.notice) hero++;
   if (t.shift && rnd() < sk.notice) hero++;
@@ -113,16 +122,18 @@ function readTraveler(t: M.Traveler, menace: number, poster: M.Poster, sk: (type
   return { hero, smuggle: smuggle || t.sniff };
 }
 
-/** The demand (x claimed fare) the bot drags to, from the Wallet Sense band. */
-function demandFor(t: M.Traveler, r: M.BridgeRun, offended: boolean, wary: boolean, sk: (typeof SKILL)[Skill], rnd: Rng): number {
+/** The price tier (index into M.PRICE_TIERS) the bot asks: the highest under its aim inside the
+ * Wallet Sense band, GOUGE / ROB only with Glower left, and below `cap` (a tier just refused). */
+function tierFor(t: M.Traveler, r: M.BridgeRun, offended: boolean, wary: boolean, sk: (typeof SKILL)[Skill], rnd: Rng, glower: number, cap = 99): number {
   const [lo, hi] = M.band(t, r.lv.sense, offended);
   let f = sk.aim + (rnd() * 2 - 1) * sk.noise - (wary ? 0.25 : 0);
   f = Math.max(0, Math.min(1, f));
-  let m = lo + f * (hi - lo);
-  // Reach the streak threshold when the band clearly allows it.
-  if (m < M.STREAK_MIN && m > M.STREAK_MIN - 0.15 && hi >= M.STREAK_MIN + 0.1 && !wary) m = M.STREAK_MIN;
-  const notch = Math.max(M.NOTCH_MIN, Math.min(M.NOTCH_MAX, Math.round(m * 10)));
-  return notch / 10;
+  const aim = lo + f * (hi - lo);
+  let k = 0;
+  M.PRICE_TIERS.forEach((tier, i) => {
+    if (i < cap && tier.mult <= aim + 1e-6 && glower + 1e-6 >= tier.glower) k = i;
+  });
+  return k;
 }
 
 // ---------- the buyer's expected active income per traveler (Monte Carlo, common random numbers) ----------
@@ -157,19 +168,28 @@ function expectedPerTraveler(r: M.BridgeRun, sk: (typeof SKILL)[Skill]): number 
     }
     if (read.smuggle) {
       if (t.smuggler) {
-        total += t.kindFare * 4 * pm;
+        total += t.kindFare * M.SEIZE_MULT * pm;
         continue;
       }
       h.offended = true;
       streak = 0;
     }
     const wary = read.hero > 0 || t.who === 'adventurer';
-    let mult = demandFor(t, fm, h.offended, wary, sk, rnd);
+    // The tier haggle: take a counter, step down a tier after a refusal (Glower assumed on hand).
+    let k = tierFor(t, fm, h.offended, wary, sk, rnd, M.GLOWER_MAX);
+    let mult = M.PRICE_TIERS[k].mult;
     let rep = M.reply(t, h, fm, mult);
-    if (rep.kind === 'counter') {
-      h.round = 1;
-      h.counter = rep.mult;
-      mult = sk.push && t.who !== 'adventurer' ? rep.mult + 0.1 : rep.mult;
+    for (let guard = 0; guard < 4 && (rep.kind === 'counter' || rep.kind === 'refuse'); guard++) {
+      h.round++;
+      if (rep.kind === 'counter') {
+        h.counter = rep.mult;
+        h.pips = rep.pips;
+        mult = rep.mult;
+      } else {
+        h.pips = rep.pips;
+        k = tierFor(t, fm, h.offended, wary, sk, rnd, M.GLOWER_MAX, k);
+        mult = M.PRICE_TIERS[k].mult;
+      }
       rep = M.reply(t, h, fm, mult);
     }
     if (rep.kind === 'pay') {
@@ -203,13 +223,16 @@ interface Gate {
   searched: boolean;
   goonT: number;
   next: 'unmask' | 'search' | null;
+  lastTier: number;
 }
 
 export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) => {
   const sk = SKILL[opts.skill ?? 'reference'];
   let sessions = 0;
   const seeded = new WeakSet<object>();
-  const counters = { liveS: 0 };
+  // Verdict accuracy (wave 1 target ~75-85% for a skilled reader): liars caught + honest tolled
+  // over all travelers the bot decided on; mistakes and fines as charged by the scene's rules.
+  const counters = { liveS: 0, liars: 0, caught: 0, decided: 0, correct: 0, falseAcc: 0, missed: 0, unread: 0, fines: 0, finesTp: 0, earnedTp: 0, tollTp: 0, bountyTp: 0, seizeTp: 0 };
 
   function startSession(save: DeptSave, env: SessionEnv): ActiveSession {
     const skulls = () => save.imports?.bones ?? 0;
@@ -232,6 +255,39 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     let wordT = 0;
     let songT = 0;
     const falseStamps: number[] = [];
+    const ses = M.session(r, env.now());
+    const earnActive = (base: number, src: 'tollTp' | 'bountyTp' | 'seizeTp' = 'tollTp') => {
+      const before = r.bank;
+      env.earn(base);
+      const got = Math.max(0, r.bank - before);
+      counters[src] += got;
+      ses.purse += got;
+      ses.paid++;
+      counters.earnedTp += got;
+    };
+    function mistake(): void {
+      const fine = M.mistakeFine(ses, r.bank);
+      r.stats.mistakes = (r.stats.mistakes ?? 0) + 1;
+      r.streak = 0;
+      if (fine > 0) {
+        r.bank -= fine;
+        r.stats.fines = (r.stats.fines ?? 0) + fine;
+        counters.fines++;
+        counters.finesTp += fine;
+      }
+    }
+    /** A traveler passed on a toll, a wave or a bribe: a liar with a tell showing is a mistake. */
+    function liarPassed(bribed: boolean): void {
+      const t = cur!.t;
+      if (t.hero) heroSlipped();
+      if ((!t.hero && !t.smuggler) || (t.smuggler && bribed)) return;
+      counters.liars++;
+      if (t.tells.length > 0 || t.posterMatch) {
+        counters.missed++;
+        r.stats.missed = (r.stats.missed ?? 0) + 1;
+        mistake();
+      } else counters.unread++;
+    }
     // Passive (calibration): play normally until the first goon is hired, then give no orders.
     const passive = () => !!opts.passive && r.lv.goons > 0;
     if (!opts.passive) r.stats.posterOpens++;
@@ -261,7 +317,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       } else t = bench.shift();
       if (!t) return;
       r.stats.travelers++;
-      cur = { t, phase: 'walkIn', timer: 0, think: sk.think * (0.6 + 0.8 * rnd()), h: { round: 0, counter: 0, offended: false }, searched: false, goonT: 0, next: null };
+      cur = { t, phase: 'walkIn', timer: 0, think: sk.think * (0.6 + 0.8 * rnd()), h: { round: 0, counter: 0, offended: false }, searched: false, goonT: 0, next: null, lastTier: 99 };
     }
     function leave(): void {
       if (!cur) return;
@@ -281,26 +337,40 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         r.whisper = 0;
       }
     }
-    function collect(mult: number): void {
+    function collect(mult: number, bribed = false): void {
       const c = cur!;
-      if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
-      r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
-      env.earn(c.t.claimFare * mult * M.fareMult(r, skulls()) * M.streakMult(r.streak) * (songT > 0 ? M.SONG_MULT : 1));
+      if (!bribed) {
+        if (mult >= M.STREAK_MIN - 1e-6) r.streak = Math.min(10, r.streak + 1);
+        r.stats.bestStreak = Math.max(r.stats.bestStreak, r.streak);
+        if (mult <= 1 + 1e-6) ses.glower = Math.min(M.GLOWER_MAX, ses.glower + M.GLOWER_FAIR_REFUND);
+      }
+      earnActive(c.t.claimFare * mult * M.fareMult(r, skulls()) * (bribed ? 1 : M.streakMult(r.streak) * (songT > 0 ? M.SONG_MULT : 1)));
       r.stats.tolls++;
       if (c.t.kind === 'bard') songT = M.SONG_S;
-      heroSlipped();
+      counters.decided++;
+      if (!c.t.hero && !c.t.smuggler) counters.correct++;
+      liarPassed(bribed);
       leave();
     }
-    function demand(mult: number): void {
+    /** Asks price tier k (Glower spent up front, as in the scene). */
+    function demand(k: number): void {
       const c = cur!;
-      const rep = M.reply(c.t, c.h, r, mult);
-      if (rep.kind === 'pay') collect(mult);
+      const tier = M.PRICE_TIERS[k];
+      ses.glower = Math.max(0, ses.glower - tier.glower);
+      const rep = M.reply(c.t, c.h, r, tier.mult);
+      c.h.round++;
+      c.lastTier = k;
+      if (rep.kind === 'pay') collect(tier.mult);
       else if (rep.kind === 'counter') {
-        c.h.round = 1;
         c.h.counter = rep.mult;
+        c.h.pips = rep.pips;
         c.phase = 'counter';
         c.timer = 0;
         c.think = 0.4 + 0.4 * rnd();
+      } else if (rep.kind === 'refuse') {
+        c.h.pips = rep.pips;
+        c.timer = 0;
+        c.think = 0.5 + 0.5 * rnd();
       } else if (rep.kind === 'leave') {
         r.streak = 0;
         leave();
@@ -316,7 +386,12 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       if (c.t.hero) {
         const ev = M.evidence(c.t);
         const mult = c.t.showdown ? 10 : M.bountyMult(ev);
-        env.earn(c.t.kindFare * M.unmaskPay(mult, save.imports?.captives ?? 0) * M.fareMult(r, skulls()));
+        earnActive(c.t.kindFare * M.unmaskPay(mult, save.imports?.captives ?? 0) * M.fareMult(r, skulls()), 'bountyTp');
+        counters.decided++;
+        counters.correct++;
+        counters.liars++;
+        counters.caught++;
+        M.codexNote(p, c.t);
         r.stats.unmasks++;
         p.bountiesLife++;
         if (ev >= 2) {
@@ -331,6 +406,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
         c.phase = 'reveal';
         c.timer = 0;
       } else {
+        counters.decided++;
         falseAcc();
         leave();
       }
@@ -338,17 +414,25 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     function falseAcc(): void {
       r.streak = 0;
       r.stats.falseAcc++;
+      counters.falseAcc++;
+      mistake();
       if (M.falseAccusation(falseStamps, clock)) wordT = M.WORD_S;
     }
     function finishSearch(): void {
       const c = cur!;
       if (c.t.smuggler) {
-        env.earn(c.t.kindFare * 4 * M.fareMult(r, skulls()));
+        earnActive(c.t.kindFare * M.SEIZE_MULT * M.fareMult(r, skulls()), 'seizeTp');
+        counters.decided++;
+        counters.correct++;
+        counters.liars++;
+        counters.caught++;
+        M.codexNote(p, c.t);
         r.stats.confisc++;
         c.phase = 'reveal';
         c.timer = 0.3;
       } else {
         c.h.offended = true;
+        c.h.pips = Math.max(1, M.pipsLeft(c.t, { ...c.h, offended: false }) - 1);
         falseAcc();
         c.phase = 'wait';
         c.timer = 0;
@@ -367,8 +451,7 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
     function decide(): void {
       const c = cur!;
       if (c.phase === 'counter') {
-        const push = sk.push && c.t.who !== 'adventurer';
-        demand(push ? Math.round(c.h.counter * 10 + 1) / 10 : c.h.counter);
+        collect(c.h.counter);
         return;
       }
       const read = readTraveler(c.t, r.menace, poster, sk, rnd);
@@ -386,13 +469,17 @@ export const createBridge = (opts: BridgeOpts = {}): AdapterFactory => (seed) =>
       }
       if (c.t.bribe > 0 && !c.searched && c.h.round === 0) {
         r.stats.bribes = (r.stats.bribes ?? 0) + 1;
-        collect(c.t.bribe);
+        collect(c.t.bribe, true);
         return;
       }
-      demand(demandFor(c.t, r, c.h.offended, read.hero > 0 || c.t.who === 'adventurer', sk, rnd));
+      // After a FURIOUS refusal, step down below the refused tier.
+      const cap = c.h.round > 0 ? c.lastTier : 99;
+      demand(tierFor(c.t, r, c.h.offended, read.hero > 0 || c.t.who === 'adventurer', sk, rnd, ses.glower, cap));
     }
 
     function stepH(h: number): void {
+      ses.at = env.now();
+      if (ses.glower < M.GLOWER_MAX) ses.glower = Math.min(M.GLOWER_MAX, ses.glower + h / M.GLOWER_REGEN_S);
       if (napT > 0) napT = Math.max(0, napT - h * (1 + (passive() ? 0 : sk.taps)));
       clock += h;
       if (wordT > 0) wordT = Math.max(0, wordT - h);

@@ -1,6 +1,6 @@
 // The River Styx's pure economy definition (no Pixi): the shared core and the headless balance
 // simulation read this; index.ts spreads it into the full DeptDef.
-import type { DeptEcon, StewardCandidate } from '../../core/dept';
+import type { DeptEcon, DeptGoal, NightOrderDef, StewardCandidate } from '../../core/dept';
 import type { DeptSave } from '../../core/types';
 import { longLocked } from '../../core/longnode';
 import * as M from './model';
@@ -29,6 +29,27 @@ const IDLE_NODES: { id: M.NodeId; label: string }[] = [
   { id: 'legend', label: "Ferryman's Legend" },
 ];
 const legendOpen = (s: DeptSave) => !longLocked(s.cycle?.n ?? 0);
+const bandName = (b: number) => (b <= 1 ? `THE ${M.BANDS[b].name}` : M.BANDS[b].name);
+
+/** Night Orders (Wave 1, core/orders.ts): Pilk's lads brew bait, or scout a rare for your return. */
+const ORDERS: NightOrderDef[] = [
+  { id: 'scout', label: 'SCOUT A RARE', desc: 'A rare soul waits for your hook' },
+  { id: 'bait', label: 'BREW BAIT', desc: 'The lads brew bait from the haul' },
+];
+/** Bait brewed per hour away (BREW BAIT), and the most per absence. */
+const BREW_PER_H = { promise: 3, debt: 1.5 };
+const BREW_MAX = { promise: 12, debt: 6 };
+
+/** The rare SCOUT A RARE finds: an uncaught rare in the open river first (deepest), else the
+ * deepest band's rare. Pure (deterministic on the save). */
+export function scoutPick(r: M.StyxRun, p: M.StyxPersistent): { id: string; band: number } {
+  const bands = Math.max(1, Math.min(M.MAX_BANDS, r.bands ?? 1));
+  for (let b = bands - 1; b >= 0; b--) {
+    const sp = M.speciesFor(b, 'rare');
+    if (!((p.codex?.[sp.id] ?? 0) > 0)) return { id: sp.id, band: b };
+  }
+  return { id: M.speciesFor(bands - 1, 'rare').id, band: bands - 1 };
+}
 
 export const styxEcon: DeptEcon = {
   id: 'styx',
@@ -76,7 +97,10 @@ export const styxEcon: DeptEcon = {
   // fishing with a never-used-up Gilded Obol (the Chum Barrel bug), and its active catches with
   // flat-priced ones; with the barrel eating stock and band-priced bait the first Fall slipped to
   // day 6 21:00. 1.4e9 puts it back at day 5 18:00 (4.75 d).
-  econBase: 1.4e9,
+  // SIM-TUNED (Wave 1): netters fetch only NET_UNKNOWN of the souls the Codex doesn't know, so
+  // early idle dips until you have landed each species once; at 1.4e9 the first Fall slipped to
+  // day 6 08:00. 1.15e9 puts it back near day 5 evening.
+  econBase: 1.15e9,
   rankRef: 12,
   rankTarget: 4800,
 
@@ -90,6 +114,54 @@ export const styxEcon: DeptEcon = {
     const before = r.chumAt != null && t < info.capSeconds ? Math.max(0, Math.min(12 * 3600, (info.now - r.chumAt) / 1000 - t)) : 0;
     M.settleChum(r, p, before + t * Math.max(0, factor));
     r.chumAt = info.now;
+  },
+
+  // ----- Wave 1: Next Goal ribbon and Night Orders -----
+
+  // The Codex as a goal list (research R4): the next uncaught soul in the open river, else the
+  // next band. Opening a band wins once it is half paid for.
+  nextGoal(save): DeptGoal | null {
+    const r = run(save);
+    const p = per(save);
+    if (!r?.lv) return null;
+    const bands = Math.max(1, Math.min(M.MAX_BANDS, r.bands ?? 1));
+    const bank = Math.max(0, r.bank ?? 0);
+    const next = bands < M.MAX_BANDS ? M.BANDS[bands] : null;
+    const openGoal = next ? { label: `OPEN ${next.name}`.slice(0, 24), progress: Math.min(1, bank / next.cost) } : null;
+    if (openGoal && openGoal.progress >= 0.5) return openGoal;
+    const open = M.SPECIES.filter((sp) => sp.band >= 0 && sp.band < bands);
+    const known = open.filter((sp) => (p?.codex?.[sp.id] ?? 0) > 0).length;
+    const gap = open.find((sp) => !((p?.codex?.[sp.id] ?? 0) > 0));
+    if (gap) return { label: `??? IN ${bandName(gap.band)}`.slice(0, 24), progress: known / open.length, detail: `CODEX ${known}/${open.length}` };
+    if (openGoal) return openGoal;
+    if (!((p?.codex?.echo ?? 0) > 0)) return { label: "??? A HERO'S GOLD", progress: 0, detail: 'ANY DEPTH' };
+    return null;
+  },
+
+  nightOrders: () => ORDERS,
+
+  applyNightOrder(save, orderId, elapsedSeconds) {
+    const r = run(save);
+    const p = per(save);
+    if (!r?.lv || !p?.baits) return;
+    const h = Math.max(0, elapsedSeconds) / 3600;
+    if (orderId === 'scout') {
+      if (h < 0.25) return;
+      const pick = scoutPick(r, p);
+      p.scout = pick;
+      return `${M.SPECIES_BY_ID[pick.id].name.toUpperCase()} SPOTTED`.slice(0, 28);
+    }
+    if (orderId === 'bait') {
+      const add = (id: 'promise' | 'debt') => {
+        const n = Math.min(BREW_MAX[id], Math.floor(h * BREW_PER_H[id]), M.BAIT_CAP[id] - (p.baits[id] ?? 0));
+        if (n > 0) p.baits[id] = (p.baits[id] ?? 0) + n;
+        return Math.max(0, n);
+      };
+      const a = add('promise');
+      const b = (r.bands ?? 1) >= 2 ? add('debt') : 0;
+      if (a + b <= 0) return 'NO BAIT BREWED';
+      return (b > 0 ? `+${a} PROMISES +${b} DEBTS` : `+${a} BROKEN PROMISES`).slice(0, 28);
+    }
   },
 
   // ----- advancement hooks (00 §2.5, §5.2) -----

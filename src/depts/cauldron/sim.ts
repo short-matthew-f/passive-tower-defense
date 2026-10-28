@@ -115,6 +115,9 @@ export interface Ball {
   bumped: boolean;
   /** Split pieces share one ticket tick (the first piece to count fills the line). */
   group: { ticked: boolean } | null;
+  /** Toadling drops this ball carries (the thinned rain bundles drops into heavy balls; 1 for
+   * everything else). Its value is already in `scale`; this only feeds the drop count. */
+  drops: number;
 }
 
 export type LayoutId = 'classic' | 'funnel' | 'hex' | 'spiral';
@@ -198,6 +201,7 @@ function newBall(ing: IngId, x: number, y: number, vx: number, vy: number, tosse
     hopper: false,
     bumped: false,
     group: null,
+    drops: 1,
   };
 }
 
@@ -332,6 +336,7 @@ export class Board {
       c.hopper = b.hopper;
       c.bumped = b.bumped;
       c.group = b.group;
+      c.drops = b.drops;
       parts.push(c);
       this.born.push(c);
     }

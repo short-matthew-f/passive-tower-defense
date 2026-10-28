@@ -20,8 +20,37 @@ export function offlineFactor(s: SaveRoot, id?: DeptId): number {
   return Math.min(OFFLINE_CAP_FACTOR, OFFLINE_BASE + 0.05 * perk(s, 'empire.idleHands') + edictOfflineAdd(s, id));
 }
 
+/**
+ * Base offline cap in hours (local income, Goods and Tribute alike).
+ * Pass 7 (fun plan A4 / research R10): 8 h -> 24 h. A forgotten evening or a night's sleep is never
+ * lost; Curfew Bells, Long Reach and Treasury Vaults stretch it past a day.
+ */
+export const OFFLINE_CAP_BASE_H = 24;
+
 export function offlineCapSeconds(s: SaveRoot): number {
-  return (8 + throne(s, 'curfewBells') + perk(s, 'empire.longReach')) * 3600;
+  return (OFFLINE_CAP_BASE_H + throne(s, 'curfewBells') + perk(s, 'empire.longReach')) * 3600;
+}
+
+/**
+ * Fun plan A5, "your hands move the meter": local income earned by on-screen play (ctx.earn, not
+ * the present-but-idle rate) counts x2 toward the economy gate. The bank gets the plain amount.
+ */
+export const ACTIVE_GATE_MULT = 2;
+
+/**
+ * Offline time fills the economy gate only up to this fraction of the floor (linear; ~99% Infamy
+ * on the log bar), so a Legend is always one short visit away and the last push is the player's.
+ * The "gate" Night Order (core/orders.ts) lifts the limit. Background departments while the player
+ * is present count in full.
+ */
+export const OFFLINE_GATE_CAP = 0.9;
+
+/** How much of an offline gate credit the economy gate may still take under `capFrac` x floor
+ * (Infinity = no limit). Pure. */
+export function offlineGateRoom(def: DeptEcon, d: DeptSave, capFrac = OFFLINE_GATE_CAP): number {
+  if (!Number.isFinite(capFrac)) return Infinity;
+  const room = capFrac * econFloor(def, d.cycle.n) - d.cycle.earnings;
+  return Number.isFinite(room) ? Math.max(0, room) : 0;
 }
 
 /** The present-but-idle rule (00 §7): seconds of an offline credit a department gets when `live`
@@ -37,7 +66,7 @@ export function idleEarnAllowed(idleSince: number, now: number, capSeconds: numb
 }
 
 export function tributeCapSeconds(s: SaveRoot): number {
-  return (8 + 2 * throne(s, 'treasury')) * 3600;
+  return (OFFLINE_CAP_BASE_H + 2 * throne(s, 'treasury')) * 3600;
 }
 
 /** Temp multiplier: Rebuild Rush (x3 for 30 min after a Fall, +15 min per Swift Rebuild) or Late

@@ -31,6 +31,15 @@ export interface MinesStats {
   bedrock: number;
   /** Thunder Beats landed. */
   thunders: number;
+  /** Fury bursts unleashed (Wave 1: replaces the old rapid-tap soft cap). */
+  furies: number;
+  /** Longest Break Chain this cycle. */
+  bestChain: number;
+  /** Gold Goblins caught / escaped. */
+  golds: number;
+  goldsMissed: number;
+  /** Perfect Beat Hits (inside the inner window). */
+  perfects: number;
 }
 
 export interface MinesRun {
@@ -95,6 +104,10 @@ export interface MinesPersistent {
   gemFrac: number;
   /** Last time (ms) the wall was on screen, for offline Gems. 0 = never. */
   gemAt: number;
+  /** Night Order "Bait a Thief": the next Gold Goblin's sack is set ('' = roll as usual). */
+  goldNext: GoldKind | '';
+  /** Night Order "Dig Deeper": the crew pre-cracks the wall for the next visit. */
+  precrack: boolean;
 }
 
 export const MAX_DEPTH = 60;
@@ -129,6 +142,11 @@ export function defaultStats(): MinesStats {
     sinceMother: 0,
     bedrock: 0,
     thunders: 0,
+    furies: 0,
+    bestChain: 0,
+    golds: 0,
+    goldsMissed: 0,
+    perfects: 0,
   };
 }
 
@@ -183,6 +201,8 @@ export function defaultPersistent(): MinesPersistent {
     gemAway: 0,
     gemFrac: 0,
     gemAt: 0,
+    goldNext: '',
+    precrack: false,
   };
 }
 
@@ -199,6 +219,7 @@ export type RockKind =
   | 'geode'
   | 'keg'
   | 'rubble'
+  | 'soft' // Crumbly rock (Wave 1): half HP, half pay; the Break Chain's stepping stones
   | 'mother' // Motherlode (later): one every MOTHER_EVERY rocks
   | 'gas' // Gas Rock (later, d >= 25)
   | 'bedrock' // Bedrock (later, d >= 30): blasts and lightning only
@@ -208,6 +229,12 @@ export type RockKind =
   | 'hollow'; // Abyss
 
 export const VEIN_P = 0.08;
+/** Crumbly rocks (Wave 1, audit M1 "make 1 rock in 5 visibly different"): pale, pre-cracked, half
+ * HP and half pay. With veins, kegs and the stratum rocks about a quarter of the wall reads as
+ * "different": veins are the value, crumbly rocks the cheap steps that keep a Break Chain alive.
+ * SIM-TUNED pay 1 -> 0.5: at a common's full pay they sped the whole economy up (crew included)
+ * and pulled every Fall earlier; at half pay they are neutral per HP. */
+export const SOFT_P = 0.12;
 export const GEODE_P = 0.005;
 export const kegP = (powder: number) => 0.03 + 0.005 * powder;
 /** Prospectors: +2% vein spawn each, at most +10% (02 §5). */
@@ -236,6 +263,7 @@ export const KIND_HP: Record<RockKind, number> = {
   geode: 3,
   keg: 0,
   rubble: 0,
+  soft: 0.5,
   mother: 15,
   gas: 1,
   bedrock: 0,
@@ -251,6 +279,7 @@ export const KIND_REWARD: Record<RockKind, number> = {
   geode: 1,
   keg: 0,
   rubble: 0,
+  soft: 0.5,
   mother: 40,
   gas: 1.5,
   bedrock: 0,
@@ -276,6 +305,7 @@ export function spawnTable(d: number, powder: number, prospectors: number): [Roc
     ['keg', kegP(powder)],
     ['geode', GEODE_P],
     ['vein', veinP(prospectors)],
+    ['soft', SOFT_P],
   ];
   if (d >= GAS_DEPTH) t.push(['gas', GAS_P]);
   if (d >= BEDROCK_DEPTH) t.push(['bedrock', BEDROCK_P]);
@@ -376,8 +406,13 @@ export const knucklesSplash = (L: number) => 0.15 * Math.min(KNUCKLES_MAX, L);
  * SIM-TUNED 2.0 -> 1.8 (finishing pass): Heavy Knuckles, Magma Pick, Echo Strike, Thunder Beat,
  * offline Gems and Motherlodes all add to the taps, and at 2.0 the drum-on ratio read ~3.7x; at
  * 1.8 (with econBase 4e10) the 3-seed median is 2.69x (band 2.4-3.0x, centre 2.7x).
+ * SIM-TUNED 1.8 -> 1.55 (Wave 1, genre-research "spikes, not a flat multiplier"): Fury, the Break
+ * Chain and the Gold Goblin add active value in bursts, so the flat tap power drops to keep the
+ * drum-on on-screen ratio in its 2.4-3.0x band (at 1.8 with Wave 1 it read ~7x; at 1.55 seed 1
+ * reads 2.5x with the finished core). The Gold Goblin makes single-seed reads lumpy: 1.57 and 1.6
+ * read 3.3x / 3.06x on the same seed, so stay at 1.55. Early tiers barely change.
  */
-export const FIST_TIER = 1.8;
+export const FIST_TIER = 1.55;
 export const fistTierMult = (T: number) => FIST_TIER ** T;
 /** Damage of one plain tap (no crit, beat or Frenzy) at the run's Tap Damage level and Pick Tier. */
 export const fistDamage = (r: MinesRun) => tapDamage(r.tap) * fistTierMult(r.tier);
@@ -500,11 +535,24 @@ export const tempoOf = (p: MinesPersistent): Tempo => {
   return idx > 0 && idx <= (p.tempoL ?? 0) ? t : 'march';
 };
 export const beatPeriod = (d: number, tempo: Tempo = 'march') => Math.max(0.5, 0.7 - 0.03 * Math.floor((d - 1) / 10)) * TEMPO[tempo].period;
-/** Half-width of the on-beat window in seconds. 02 §6E: 60 ms + 10 ms per Wide Swing level.
- * We read it as a half-width (±), which is kinder to touch latency on phones without calibration.
- * Steady Drum doubles it. */
+/** Half-width of the on-beat ("Good") window in seconds. Wave 1 (Hi-Fi Rush / Arcaea's outer
+ * window, genre-research R4): 02 §6E's 60 ms + 10 ms per Wide Swing was stricter than a hardcore
+ * touch rhythm game's outer window, through a PWA's touch latency. Now 100 ms + 15 ms per Wide
+ * Swing; every tap outside it is still a normal tap (nothing is ever lost). Steady Drum doubles it. */
 export const beatWindow = (wide: number, tempo: Tempo = 'march', steady = false) =>
-  (0.06 + 0.01 * wide) * TEMPO[tempo].window * (steady ? 2 : 1);
+  (0.1 + 0.015 * wide) * TEMPO[tempo].window * (steady ? 2 : 1);
+/** The inner "Perfect" window, as a share of the Good window (45 ms at base). Precision pays the
+ * full Beat Hit multiplier; a Good hit pays GOOD_SHARE of the bonus. */
+export const PERFECT_FRAC = 0.45;
+export const GOOD_SHARE = 0.6;
+export const goodMult = (beat: number) => 1 + GOOD_SHARE * (beat - 1);
+/** A missed judged tap halves the streak (NecroDancer's groove chain, softened) instead of
+ * zeroing it. */
+export const streakAfterMiss = (streak: number) => Math.floor(streak / 2);
+/** Silent auto-calibration (Rhythm Doctor / Rhythm Quest): a running median of the signed offsets
+ * of the last AUTO_CAL_N judged taps nudges the latency by AUTO_CAL_RATE of it per judged tap. */
+export const AUTO_CAL_N = 16;
+export const AUTO_CAL_RATE = 0.25;
 export const beatMult = (drumhead: number, tempo: Tempo = 'march') => 2 + 0.1 * drumhead + TEMPO[tempo].mult;
 export const streakBonus = (streak: number) => 1 + 0.03 * Math.min(streak, 10);
 /** Default touch-to-beat latency before calibration. */
@@ -545,6 +593,74 @@ export const THUNDER_EVERY = 16;
 /** Tempo Lever (later, Gems): L1 Stomp, L2 Charge. */
 export const tempoCost = (L: number) => 10 * 2 ** L;
 export const TEMPO_MAX = 2;
+
+// ---------- Wave 1: Fury, Break Chain, Gold Goblin (genre-research R1/R2) ----------
+
+/** Fury replaces the old 8 taps/s half-damage soft cap ("cap the reward, not the verb"): every
+ * real tap (not hold auto-hits or echoes) adds FURY_PER_TAP to the meter, which drains at
+ * FURY_DRAIN/s, so 2 taps/s never fills it and 6 taps/s fills it in ~9 s. Full: FURY_DUR s of
+ * x FURY_MULT tap damage, a red wall and a war-shriek. */
+export const FURY_PER_TAP = 1 / 36;
+export const FURY_DRAIN = 2 / 36;
+export const FURY_DUR = 4;
+export const FURY_MULT = 2;
+/** Break Chain: every rock you break yourself adds a step (+CHAIN_STEP per step on that rock's
+ * Nuggets, up to CHAIN_STEPS); more than CHAIN_WINDOW s without a break sheds one step per
+ * CHAIN_DECAY s; it never resets outright. Crumbly rocks are how you keep it going. SIM-TUNED
+ * CHAIN_STEP 0.1 -> 0.05 (cap x2 -> x1.5): a steady 6 taps/s player holds the chain near its cap,
+ * so at x2 it was mostly a flat +30% on active income. */
+export const CHAIN_WINDOW = 1.2;
+export const CHAIN_DECAY = 1;
+export const CHAIN_STEPS = 10;
+export const CHAIN_STEP = 0.05;
+export const chainMult = (steps: number) => 1 + CHAIN_STEP * Math.max(0, Math.min(CHAIN_STEPS, steps));
+
+/** The Gold Goblin (Cookie Clicker's golden cookie, Egg, Inc.'s drone): a thief with a sack who
+ * scampers across the wall every GOLD_MIN-GOLD_MAX s while it is on screen and stays GOLD_LIFE s.
+ * Tap him for one of the outcomes below; their windows stack. He never spawns offline; a return
+ * after GOLD_AWAY_S finds one waiting. */
+export const GOLD_MIN = 120;
+export const GOLD_MAX = 360;
+export const GOLD_LIFE = 7;
+export const GOLD_HOP = 0.8;
+export const GOLD_AWAY_S = 600;
+/** No Gold Goblin before this many rocks (the onboarding gets the stage first). */
+export const GOLD_ROCKS = 25;
+export type GoldKind = 'sack' | 'rush' | 'fist' | 'gems';
+/** [kind, chance]: Lucky Sack 60%, Gold Rush 30%, Overlord's Fist 8%, Gem Pouch 2%. */
+export const GOLD_TABLE: [GoldKind, number][] = [
+  ['sack', 0.6],
+  ['rush', 0.3],
+  ['fist', 0.08],
+  ['gems', 0.02],
+];
+export function rollGold(x: number): GoldKind {
+  let acc = 0;
+  for (const [k, p] of GOLD_TABLE) {
+    acc += p;
+    if (x < acc) return k;
+  }
+  return 'sack';
+}
+/** Night Order "Dig Deeper": rocks start the next visit at this share of their HP. */
+export const PRECRACK_HP = 0.3;
+/** Lucky Sack: this many seconds of the department's income (crew plus a 4 taps/s player). */
+export const GOLD_SACK_S = 90;
+/** Gold Rush: every rock pays x GOLD_RUSH_MULT for GOLD_RUSH_S s. */
+export const GOLD_RUSH_MULT = 7;
+export const GOLD_RUSH_S = 20;
+/** Overlord's Fist: taps x GOLD_FIST_MULT for GOLD_FIST_S s (every tap one-shots). */
+export const GOLD_FIST_MULT = 77;
+export const GOLD_FIST_S = 8;
+/** Income the Lucky Sack counts per second: the crew's idle Nuggets, or what a calm 2 taps/s player
+ * breaks if that is more (so a crew-less early game still gets a real sack). SIM-TUNED: crew + a
+ * 4 taps/s player (the first draft) put the Gold Goblin alone at ~+50% of active income. */
+export const SACK_TAPS = 2;
+export function sackRate(r: MinesRun, p: MinesPersistent, bones = 0): number {
+  const f = avgFactors(r.depth, r.prospectors ?? 0);
+  const tapRocks = Math.min(SACK_TAPS, (SACK_TAPS * tapExpected(r)) / (H(r.depth) * f.hp));
+  return Math.max(idleNuggets(r, p, bones), tapRocks * R(r.depth) * f.reward * oreMult(r));
+}
 
 // ---------- infernal engineering (Gems, persistent) ----------
 

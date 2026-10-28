@@ -51,6 +51,10 @@ export interface CStats {
   specials: number;
   socks: number;
   boneHits: number;
+  /** Bubble Reach spins (a player ingredient in the jackpot), REACHes and Bubble Fevers. */
+  spins: number;
+  reaches: number;
+  fevers: number;
 }
 
 export interface CRun {
@@ -73,6 +77,8 @@ export interface CRun {
   tiers?: number[];
   /** Date.now() ms when the next Bucket Shift swap is ready. */
   shiftAt?: number;
+  /** Night Order "Simmer a Fever": the next decent player landing spins a sure Bubble Fever. */
+  feverPrimed?: boolean;
 }
 
 export interface CPersistent {
@@ -81,6 +87,8 @@ export interface CPersistent {
   batchesLifetime: number;
   /** Last Board Layout picked (the next cycle starts on it). */
   layout?: LayoutId;
+  /** Lifetime Bubble Fevers (the very first spin is a sure win: the first-minute "whoa"). */
+  fevers?: number;
 }
 
 export type CSave = DeptSave<CRun, CPersistent>;
@@ -102,6 +110,9 @@ export function defaultStats(): CStats {
     specials: 0,
     socks: 0,
     boneHits: 0,
+    spins: 0,
+    reaches: 0,
+    fevers: 0,
   };
 }
 
@@ -139,6 +150,7 @@ export function fillRun(run: CRun, per?: CPersistent): void {
     per.rlv ??= {};
     per.tokens ??= 0;
     per.batchesLifetime ??= 0;
+    per.fevers ??= 0;
     if (per.layout && !LAYOUTS[per.layout]) delete per.layout;
   }
 }
@@ -164,7 +176,7 @@ export interface UpDef {
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const fmtX = (n: number) => (n >= 100 ? Math.round(n).toString() : n.toFixed(n >= 10 ? 1 : 2));
-const JACKPOT = [3, 5, 7, 10, 15];
+export const JACKPOT = [3, 5, 7, 10, 15];
 
 /** Bone pegs: each hit pays this share of the ingredient's value, x1.15 per level after the first. */
 export const BONE_FRAC = 0.08;
@@ -181,7 +193,11 @@ export const ticketsOf = (p: CPersistent) => (rlvOf(p, 'double') > 0 ? 2 : 1);
 
 export const UPGRADES: UpDef[] = [
   // Toadling Kitchen.
-  { id: 'hire', name: 'Hire Toadling', branch: 'kitchen', base: 100, growth: 7, max: 7, desc: (l) => `Toadlings ${l + 1} > ${l + 2}` },
+  // SIM-TUNED (Wave 1, fun-review C "Cauldron first minute"): growth 7 -> 2.4 (the spec's value), so
+  // the 2nd-4th toadlings cost 100 / 240 / 576 instead of 100 / 700 / 4,900 and the board fills in
+  // the first minutes. The thinned rain (logic.ts RAIN_VIS) keeps it readable. The 7-day quick sim
+  // moved by noise only (first Fall day 1 19:04, active : on-screen idle 2.35x).
+  { id: 'hire', name: 'Hire Toadling', branch: 'kitchen', base: 100, growth: 2.4, max: 7, desc: (l) => `Toadlings ${l + 1} > ${l + 2}` },
   { id: 'bribes', name: 'Fly Bribes', branch: 'kitchen', base: 75, growth: 1.9, max: 20, desc: (l) => `Drop every ${interval(l).toFixed(2)}s > ${interval(l + 1).toFixed(2)}s` },
   // SIM-TUNED price (spec seed 10,000 x 2^L): an idle multiplier (+~6%/level), so it sits late.
   { id: 'taught', name: 'Taught Toadlings', branch: 'kitchen', base: 1e8, growth: 15, max: 3, desc: (l) => `Aimed drops ${pct(TAUGHT_SHARE * l)} > ${pct(TAUGHT_SHARE * (l + 1))}` },
@@ -369,6 +385,10 @@ export function bucketMults(run: CRun, malice = run.malice): number[] {
   const t = tierMults(run, malice);
   return tiersOf(run).map((k) => t[k]);
 }
+
+/** Bubble Fever's bucket floor (Peggle's Extreme Fever bins, pachinko's jitan): every bucket
+ * pays one tier up, so the jackpot spreads over its neighbours and the Dregs pay x1. */
+export const feverTiers = (tiers: number[]): number[] => tiers.map((t) => Math.min(4, t + 1));
 
 /** Does a bucket count for a ticket zone? (tier >= 4 - zone). */
 export function inZone(bucket: number, zone: number, tiers: number[] = LAYOUTS.classic.tiers): boolean {

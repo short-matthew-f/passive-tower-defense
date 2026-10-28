@@ -32,14 +32,14 @@ export function buildGroups(ctx: DeptCtx, hooks: Hooks): UpgradeGroup[] {
   });
 
   const grumm = [
-    node('glare', 'Intimidating Glare', () => `PATIENCE X${M.glareMult(r().lv.glare).toFixed(2)} -> X${M.glareMult(r().lv.glare + 1).toFixed(2)}`),
+    node('glare', 'Intimidating Glare', () => `GRUDGE ROOM X${M.glareMult(r().lv.glare).toFixed(2)} -> X${M.glareMult(r().lv.glare + 1).toFixed(2)}`),
     node('tongue', "Haggler's Tongue", () => `COUNTER ${pct(M.tongueFrac(r().lv.tongue))} -> ${pct(M.tongueFrac(r().lv.tongue + 1))} TOWARD ASK`),
     node('skull', 'Thick Skull', () => `NAP ${M.napSeconds(r().lv.skull)}S -> ${M.napSeconds(r().lv.skull + 1)}S`),
     node('fists', 'Big Fists', () => `BONK CHANCE X${M.brawnMult(r().lv.fists).toFixed(2)} -> X${M.brawnMult(r().lv.fists + 1).toFixed(2)}`),
   ];
   const eye = [
     node('squint', 'Squint', () => `TAP A TRAVELER: GRUMM POINTS AT ${M.squintHints(r().lv.squint)} -> ${M.squintHints(r().lv.squint + 1)} ODD PARTS`),
-    node('sense', 'Wallet Sense', () => `PURSE BAND +-${pct(M.senseBand(r().lv.sense))} -> +-${pct(M.senseBand(r().lv.sense + 1))}`, () => {
+    node('sense', 'Wallet Sense', () => `FACE HINTS +-${pct(M.senseBand(r().lv.sense))} -> +-${pct(M.senseBand(r().lv.sense + 1))}`, () => {
       ctx.say('senseUp', { type: 'first_upgrade', key: 'sense' });
     }),
     node('nose', 'Hero Nose', () => `TELLS SHOW ${pct(M.visibleChance(r().lv.nose))} -> ${pct(M.visibleChance(r().lv.nose + 1))}`),

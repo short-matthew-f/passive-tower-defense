@@ -1,6 +1,7 @@
 // The Goblin Mines' pure economy definition (no Pixi): the shared core and the headless
 // balance simulation (sim/) read this; index.ts spreads it into the full DeptDef.
-import type { DeptEcon, StewardCandidate } from '../../core/dept';
+import type { DeptEcon, DeptGoal, NightOrderDef, StewardCandidate } from '../../core/dept';
+import { ORDER_EFFECTS } from '../../core/orders';
 import type { DeptSave } from '../../core/types';
 import { LONG_MAX, longLocked } from '../../core/longnode';
 import * as M from './model';
@@ -58,6 +59,62 @@ function buys(s: DeptSave): Buy[] {
     add('frenzy', 'Goblin Frenzy', r.frenzy < M.FRENZY_MAX, M.frenzyCost(r.frenzy), (x) => x.frenzy++);
   }
   return out;
+}
+
+// ---------- Wave 1: Next Goal and Night Orders ----------
+
+/** The one next goal for the ribbon: the Legend's 50-rock gate when it is the blocker, then the
+ * Doom Drum once its depth is open, the first four goblins, the next depth, more goblins. */
+export function minesNextGoal(s: DeptSave): DeptGoal | null {
+  const r = run(s);
+  const p = per(s);
+  if (!r || !p) return null;
+  ensure(s);
+  const target = minesEcon.skillTarget(s.cycle?.n ?? 0);
+  if (r.maxDepth >= target && (s.cycle?.heldLevel ?? 0) < target) {
+    const n = Math.min(M.GATE_ROCKS, r.gate[String(target)] ?? 0);
+    return { label: `BREAK ${M.GATE_ROCKS} ROCKS AT D${target}`.slice(0, 24), progress: n / M.GATE_ROCKS, detail: `${n}/${M.GATE_ROCKS}` };
+  }
+  if (!p.drum && everOf(s) >= M.DRUM_DEPTH) {
+    const g = Math.min(M.DRUM_GEMS, Math.floor(p.gems));
+    return { label: 'BUY THE DOOM DRUM', progress: g / M.DRUM_GEMS, detail: `${g}/${M.DRUM_GEMS} GEMS` };
+  }
+  const bank = r.bank ?? 0;
+  const crew = M.crewSize(r, bonesOf(s));
+  const hire = (): DeptGoal => ({ label: `HIRE GOBLIN #${crew + 1}`, progress: Math.min(1, bank / M.hireCost(r)) });
+  if (crew < 4) return hire();
+  if (r.maxDepth < M.MAX_DEPTH) return { label: `DIG TO DEPTH ${r.maxDepth + 1}`, progress: Math.min(1, bank / M.digCost(r.maxDepth)) };
+  return crew < M.MAX_GOBLINS ? hire() : null;
+}
+
+/** Absences shorter than this leave the order's own effect out (the core part still applies). */
+const ORDER_MIN_S = 600;
+
+/** Two themed orders, each on top of a core effect (income / gate) so the economy stays as tuned. */
+export function minesOrders(): NightOrderDef[] {
+  const inc = Math.round((ORDER_EFFECTS.income.bank - 1) * 100);
+  return [
+    { id: 'thief', label: 'BAIT A THIEF', desc: inc > 0 ? `+${inc}% Nuggets, a Gold Rush waits` : 'A Gold Rush waits on return', kind: 'income' },
+    { id: 'deep', label: 'DIG DEEPER', desc: `Legend gate x${ORDER_EFFECTS.gate.gate}, wall pre-cracked`, kind: 'gate' },
+  ];
+}
+
+export function applyMinesOrder(s: DeptSave, orderId: string, elapsedSeconds: number): string | void {
+  try {
+    const p = per(s);
+    if (!p || !(elapsedSeconds >= ORDER_MIN_S)) return;
+    if (orderId === 'thief') {
+      // The Gold Goblin waiting on return (he always is, after 10 min) carries a Gold Rush.
+      p.goldNext = 'rush';
+      return 'A GOLD RUSH THIEF WAITS!';
+    }
+    if (orderId === 'deep') {
+      p.precrack = true;
+      return 'WALL PRE-CRACKED: CHAIN IT!';
+    }
+  } catch {
+    /* an order's flavour never breaks the return */
+  }
 }
 
 export const minesEcon: DeptEcon = {
@@ -118,6 +175,11 @@ export const minesEcon: DeptEcon = {
     { id: 'drum', label: 'FIRST DOOM DRUM BOOM', test: (s) => !!per(s).drum },
     { id: 'iron', label: 'INTO THE IRON: DEPTH 21', test: (s) => (s.lifetime.best.maxDepth ?? 1) >= 21 },
   ],
+
+  // ----- Wave 1: Next Goal ribbon and Night Orders -----
+  nextGoal: (s) => minesNextGoal(s),
+  nightOrders: () => minesOrders(),
+  applyNightOrder: (s, id, elapsed) => applyMinesOrder(s, id, elapsed),
 
   // ----- advancement hooks (00 §2.5, §5.2) -----
 

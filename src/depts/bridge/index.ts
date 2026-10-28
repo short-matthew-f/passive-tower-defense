@@ -27,18 +27,18 @@ const grumm: ManagerDef = {
   lines: {
     intro: ['HRRM! GRUMM BRIDGE. YOU BOSS.'],
     firstUpgrade: ['OOH! SHINY! GRUMM LIKE. {coin}', 'NEW THING! GRUMM PROUD.'],
-    senseUp: ['GRUMM SEE PURSES! GREEN = PURSE', 'PURSE BAND! GRUMM SMELL {coin}.'],
+    senseUp: ['GRUMM READ FACES BETTER!', 'PURSE SENSE! FACES TELL {coin}.'],
     firstHelper: ['GOON GOON GOON! GRUMM GANG!', 'THREE GOONS. GATE NEVER SLEEP.'],
     tier10x: ['BIG HERO. BIG COINS! {coin}{coin}', 'X10! GRUMM THUMP CHEST!'],
-    card_writ: ['NEW RULE: WRITS. GRUMM WATCH.', 'SEALS! CHECK POSTER. HRRM.'],
+    card_writ: ['NEW RULE: WRITS. GRUMM WATCH.', 'SEALS! CHECK BOARD. HRRM.'],
     card_hats: ['NEW RULE: TALL HATS. SEARCH!', 'HATS HIDE EELS. GRUMM KNOW.'],
-    card_kits: ['NEW RULE: FAKE TELL. IGNORE!', 'POSTER SAY FAKE. NO FOOL GRUMM.'],
+    card_kits: ['NEW RULE: FAKE TELL. IGNORE!', 'BOARD SAY FAKE. NO FOOL GRUMM.'],
     card_bribe: ['NEW RULE: BRIBES. {coin} OR EELS?', 'SMUGGLER OFFER {coin}. HMMM.'],
     card_shift: ['NEW RULE: SHIFTERS. LOOK TWICE!', 'CLAIM WIGGLE? HERO! HRRM.'],
     dialRaised: ['SCARY SIGN. MORE {coin}! {up}', 'GRRR! SIGN SCARY. HEROES SNEAKY.'],
     hazardFirst: ['BONK. OW. TAP GRUMM. WAKE!', 'GRUMM BONKED. NAP. ZZZ.'],
     word: ['WORD GET AROUND. FEWER COME.', 'TOO MANY WRONG. FOLK SCARED.'],
-    struggle: ['GRUMM WRONG. SAD. LOOK POSTER?', 'OOPS. POSTER HELP? {check}'],
+    struggle: ['GRUMM WRONG. SAD. LOOK DECREE?', 'OOPS. DECREE HELP? {check}'],
     showdown: ['LETTER! BIG HERO COMING!', 'HERO MAD. COMES BACK. WATCH!'],
     bard: ['BARD SING! COINS SING TOO!', 'LA LA LA. {coin}{coin}. NICE.'],
     goodsLink: ['%good%! GRUMM LIKE!', 'PRESENT? %good%! {up}'],
@@ -52,10 +52,11 @@ const grumm: ManagerDef = {
     ambient: [
       'GRUMM POLISH RAIL. SHINY.',
       'PILGRIM NO BOOTS. BARE FEET!',
-      'GLOW = HERO. HERO = {coin}{coin}.',
-      'BIG SACK ON PEASANT? SEARCH!',
+      'DECREE NEW EVERY DAY. LOOK!',
+      'OLD TELL = FASHION NOW. HRRM.',
+      'SMILE BIG? ASKED TOO LITTLE.',
       'ONE, TWO, MANY COINS. GOOD.',
-      'MERCHANT FAT PURSE. ASK MORE.',
+      'GLOWER FOR FAT PURSES ONLY.',
       'BRUTES BONK. NO PUSH BRUTES.',
       'GRUMM BRIDGE BEST BRIDGE.',
     ],
@@ -76,7 +77,7 @@ const seen = (s: DeptSave, k: string) => !!s.seen?.[k];
 // Onboarding (06 §18): 6 beats, one mechanic each; first purchase at beat 3. Lines <= 32 chars.
 const onboarding: OnboardingStep[] = [
   { id: 'look', line: 'LOOK! TAP THE TRAVELER.', target: 'traveler', gesture: 'tap', done: (s) => st(s).looks >= 1 || st(s).tolls >= 1 },
-  { id: 'toll', line: 'DRAG COINS UP. LET GO! {coin}{uarr}', target: 'stackGrab', gesture: 'drag', dragTo: 'stackBand', done: (s) => st(s).tolls >= 1 },
+  { id: 'toll', line: 'TAP A PRICE. WATCH THE FACE!', target: 'fair', gesture: 'tap', done: (s) => st(s).tolls >= 1 },
   {
     id: 'hire',
     line: 'GOON! UPGRADES: HIRE GOON {coin}',
@@ -85,15 +86,15 @@ const onboarding: OnboardingStep[] = [
     waitFor: (s) => run(s).bank >= M.nodeCost('goons', 0),
     done: (s) => lv(s).goons >= 1,
   },
-  { id: 'unmask', line: 'PILGRIM BOOTS? GLOW? HOLD UNMASK', target: 'unmask', gesture: 'hold', waitFor: (s) => seen(s, 'b.obr.unmask'), done: (s) => st(s).unmasks >= 1 },
-  { id: 'search', line: 'BIG BARREL? HOLD SEARCH!', target: 'search', gesture: 'hold', waitFor: (s) => seen(s, 'b.obr.search'), done: (s) => st(s).confisc >= 1 },
-  { id: 'poster', line: 'TAP WANTED POSTER. WHO IS WHO!', target: 'poster', gesture: 'tap', done: (s) => st(s).posterOpens >= 1 },
+  { id: 'unmask', line: 'ODD + ON DECREE? HOLD UNMASK', target: 'unmask', gesture: 'hold', waitFor: (s) => seen(s, 'b.obr.unmask'), done: (s) => st(s).unmasks >= 1 },
+  { id: 'search', line: 'DECREE GOODS? HOLD SEARCH!', target: 'search', gesture: 'hold', waitFor: (s) => seen(s, 'b.obr.search'), done: (s) => st(s).confisc >= 1 },
+  { id: 'poster', line: "TAP DECREE: TODAY'S TELLS!", target: 'decree', gesture: 'tap', done: (s) => st(s).posterOpens >= 1 },
 ];
 
 // Rule-card micro-lessons (06 §18): (1) the card on the Poster board, (2) a scripted traveler who
 // shows the new tell; done on a verdict or once that traveler has gone. Keys match the
 // mechanic_unlocked say() keys, so the director runs them instead of a line.
-const board = (card: string, line: string): OnboardingStep => ({ id: 'board', line, target: 'poster', gesture: 'tap', done: (s) => seen(s, `b.board.${card}`) });
+const board = (card: string, line: string): OnboardingStep => ({ id: 'board', line, target: 'decree', gesture: 'tap', done: (s) => seen(s, `b.board.${card}`) });
 const verdict = (card: string, line: string, target: string, gesture: 'tap' | 'hold' | 'drag'): OnboardingStep => ({
   id: 'verdict',
   line,
@@ -104,11 +105,11 @@ const verdict = (card: string, line: string, target: string, gesture: 'tap' | 'h
   done: (s) => seen(s, `b.lsv.${card}`),
 });
 const lessons: Record<string, OnboardingStep[]> = {
-  card_writ: [board('writ', 'NEW RULE! TAP POSTER: WRITS'), verdict('writ', 'SEAL NOT POSTER? HOLD UNMASK!', 'unmask', 'hold')],
-  card_hats: [board('hats', 'NEW RULE! TAP POSTER: HATS'), verdict('hats', 'TALL LUMPY HAT? HOLD SEARCH!', 'search', 'hold')],
-  card_kits: [board('kits', 'NEW RULE! TAP POSTER: FAKE TELL'), verdict('kits', 'FAKE TELL = NOTHING. ASK TOLL!', 'stackGrab', 'drag')],
-  card_bribe: [board('bribe', 'NEW RULE! TAP POSTER: BRIBES'), verdict('bribe', 'BRIBE! TAP TAKE, OR SEARCH!', 'resp', 'tap')],
-  card_shift: [board('shift', 'NEW RULE! TAP POSTER: SHIFTERS'), verdict('shift', 'TAP TRAVELER TWICE. SEE CLAIM!', 'traveler', 'tap')],
+  card_writ: [board('writ', 'NEW RULE! TAP DECREE: WRITS'), verdict('writ', 'SEAL WRONG? HOLD UNMASK!', 'unmask', 'hold')],
+  card_hats: [board('hats', 'NEW RULE! TAP DECREE: HATS'), verdict('hats', 'TALL LUMPY HAT? HOLD SEARCH!', 'search', 'hold')],
+  card_kits: [board('kits', 'NEW RULE! TAP DECREE: FAKE'), verdict('kits', 'FAKE TELL = NOTHING. ASK TOLL!', 'fair', 'tap')],
+  card_bribe: [board('bribe', 'NEW RULE! TAP DECREE: BRIBES'), verdict('bribe', 'BRIBE! TAP TAKE, OR SEARCH!', 'resp', 'tap')],
+  card_shift: [board('shift', 'NEW RULE! TAP DECREE: SHIFTERS'), verdict('shift', 'TAP TRAVELER TWICE. SEE CLAIM!', 'traveler', 'tap')],
 };
 
 export const bridge: DeptDef = {

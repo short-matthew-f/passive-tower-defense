@@ -42,6 +42,10 @@ const DAYS = 7;
  *    (15-20 baseline minutes in week 1; one seed in three Falls just after day 7);
  *    ratioLocal.all|bridge reads 2.33-2.44x on a 2.3x floor. Added: firstFallDay|mines,
  *    cycleAvg|dungeon, cycleMax|pit, and dreadShare|cauldron for the seven-department set.
+ *  - Pass 7 (Wave 1 pacing reset: cheaper Seals, 24 h offline cap, Night Orders, active play x2 on
+ *    the economy gate): the unlock / first-Fall arcs in sim/metrics.ts were re-baselined to the new
+ *    design (Bridge in session 1, Styx day 1, Spire day 2, Pit day 3). cycleAvg|mines dropped: its
+ *    week-1 cycles now run ~1.5 days, at the floor of the weeks 2-4 band (like the Cauldron's).
  */
 const TUNED_GATES = [
   'firstFallAE|cauldron',
@@ -54,7 +58,6 @@ const TUNED_GATES = [
   'firstFallDay|mines',
   'cycleMin|mines',
   'cycleMax|mines',
-  'cycleAvg|mines',
   'ratioOffline|mines',
   'ratioLocal.drum|mines',
   'returnAffordable|mines',

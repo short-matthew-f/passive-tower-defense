@@ -49,10 +49,10 @@ export const RUINBORN = { max: 20, cost: (l: number) => 4 * 1.5 ** l, desc: '+25
 export const SEAL_COST: Record<DeptId, number> = {
   cauldron: 0,
   mines: 60,
-  dungeon: 2500,
-  bridge: 60000,
-  styx: 120000,
-  spire: 1200000,
-  pit: 3000000,
+  dungeon: 600,
+  bridge: 1500,
+  styx: 6000,
+  spire: 100000,
+  pit: 400000,
 };
-export const SEAL_DREAD: Partial<Record<DeptId, number>> = { styx: 10, spire: 60, pit: 150 };
+export const SEAL_DREAD: Partial<Record<DeptId, number>> = { styx: 10, spire: 30, pit: 75 };

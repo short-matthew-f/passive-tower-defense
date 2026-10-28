@@ -1,6 +1,9 @@
 // Shared pixel UI widgets: panels, buttons, bars. Everything is drawn with Graphics at 1px.
 import { Container, Graphics, Rectangle, type FederatedPointerEvent } from 'pixi.js';
 import { PixelText, measure } from './font';
+import { sfx } from '../core/audio';
+import { tapHaptic } from '../core/haptics';
+import { legendMini, legendPortrait, SILHOUETTE_PAL, type LegendInfo } from '../core/legends';
 
 export const C = {
   bg: 0x140c1c,
@@ -41,6 +44,9 @@ export interface ButtonOpts {
   repeat?: boolean;
   /** Extra touch margin around the drawn button, in game pixels (small buttons, U-14). */
   hitPad?: number;
+  /** Tap feedback (A1): 'tap' (default) plays the shared soft click and an iOS haptic tick;
+   * 'none' leaves feedback to onTap (e.g. a buy that plays its own ka-ching). */
+  feedback?: 'tap' | 'none';
 }
 
 /** A chunky pressable button with a 1px drop "lip". */
@@ -142,7 +148,14 @@ export class Button extends Container {
     this.pressed = false;
     this.clearRepeat();
     this.redraw();
-    if (this.enabledState) this.opts.onTap();
+    if (this.enabledState) {
+      // Synchronously inside the pointer event: the iOS haptic only fires within a gesture.
+      if (this.opts.feedback !== 'none') {
+        sfx.tap();
+        tapHaptic();
+      }
+      this.opts.onTap();
+    }
   }
 
   private cancel(): void {
@@ -181,4 +194,102 @@ export function drawSprite(g: Graphics, rows: string[], palette: Record<string, 
     }
   });
   return g;
+}
+
+/**
+ * A Legend's 24x24 portrait (core/legends.ts), drawn once per set() at an integer scale; as a
+ * silhouette (dark fill, light rim) while the Legend is still unknown.
+ */
+export class LegendSprite extends Container {
+  private g = new Graphics();
+  private key = '';
+
+  constructor(info?: LegendInfo, scale = 2, silhouette = false) {
+    super();
+    this.addChild(this.g);
+    if (info) this.set(info, scale, silhouette);
+  }
+
+  set(info: LegendInfo, scale = 2, silhouette = false): this {
+    const key = `${info.seed}|${scale}|${silhouette}`;
+    if (key === this.key) return this;
+    this.key = key;
+    const p = legendPortrait(info);
+    const pal: Record<string, string> = silhouette ? silhouettePalette(p.palette) : p.palette;
+    drawSprite(this.g.clear(), p.rows, pal, 0, 0, scale);
+    return this;
+  }
+}
+
+function silhouettePalette(pal: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of Object.keys(pal)) out[k] = SILHOUETTE_PAL.fill;
+  out.o = SILHOUETTE_PAL.rim;
+  return out;
+}
+
+/**
+ * The Legend on the road (A7): a strip `w` px wide with a door at the right end and the next
+ * Legend's tiny figure walking toward it as Infamy rises (`approach` 0..1). Silhouetted until the
+ * Legend is known; at the door (waiting) it shows in red and bobs. Mount it anywhere (HUD row,
+ * Trophy wall, Fall card); call update(dt) from a ticker, setState() when the state changes.
+ * Height ROAD_H. No per-frame allocation: the two walk frames are drawn once into two Graphics.
+ */
+export const ROAD_H = 14;
+
+export class LegendRoad extends Container {
+  private road = new Graphics();
+  private frames: [Graphics, Graphics] = [new Graphics(), new Graphics()];
+  private walker = new Container();
+  private t = 0;
+  private approach = 0;
+  private shown = 0;
+  private waiting = false;
+  private infoKey = '';
+  readonly w: number;
+
+  constructor(w: number) {
+    super();
+    this.w = Math.max(30, Math.floor(w));
+    this.walker.addChild(this.frames[0], this.frames[1]);
+    this.addChild(this.road, this.walker);
+    const g = this.road;
+    // Road: dotted path, then the door (an arch) at the right end.
+    for (let x = 0; x < this.w - 10; x += 3) g.rect(x, ROAD_H - 2, 2, 1).fill(0x3c2650);
+    const dx = this.w - 9;
+    g.rect(dx, 2, 9, ROAD_H - 2).fill(0x0a0410);
+    g.rect(dx + 1, 3, 7, ROAD_H - 4).fill(0x5c3a6e);
+    g.rect(dx + 2, 4, 5, ROAD_H - 5).fill(0x2a1418);
+    g.rect(dx + 5, 8, 1, 1).fill(0xe8c04a);
+  }
+
+  /** Legend look, how known it is, progress 0..1 and whether it waits at the door. */
+  setState(info: LegendInfo, known: boolean, approach: number, waiting: boolean): this {
+    const key = `${info.seed}|${known}|${waiting}`;
+    if (key !== this.infoKey) {
+      this.infoKey = key;
+      const color = waiting ? 0xc03a3a : known ? 0x9c8aa8 : 0x120a1a;
+      const rim = waiting ? 0xffe27a : 0x6a4a80;
+      for (let f = 0; f < 2; f++) {
+        const rows = legendMini(info, f);
+        drawSprite(this.frames[f].clear(), rows, { x: color, o: rim });
+      }
+    }
+    this.approach = Math.max(0, Math.min(1, Number.isFinite(approach) ? approach : 0));
+    this.waiting = waiting;
+    return this;
+  }
+
+  update(dt: number): void {
+    this.t += dt;
+    // Ease toward the target so a jump in Infamy reads as walking, not teleporting.
+    this.shown += (this.approach - this.shown) * Math.min(1, dt * 2);
+    const span = this.w - 9 - 10;
+    const x = Math.round(this.shown * span);
+    const moving = Math.abs(this.approach - this.shown) > 0.002 || this.waiting;
+    const f = moving ? Math.floor(this.t * 4) % 2 : 0;
+    this.frames[0].visible = f === 0;
+    this.frames[1].visible = f === 1;
+    this.walker.position.set(x, this.waiting ? (Math.floor(this.t * 3) % 2 ? 0 : 1) : 1);
+  }
 }

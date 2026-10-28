@@ -9,7 +9,7 @@
 //  - Total trigger order: highest attack, then side 0 (yours) before side 1, then slot from the
 //    front, then unit id.
 //  - Sudden Death from exchange 50 (+1 dmg, +1 more every 10 exchanges); 200 exchanges = draw.
-import { HELD_POOL, UNITS, type ItemId, type Trig, type UnitId } from './units';
+import { HELD_POOL, UNITS, type HuntId, type ItemId, type Trig, type UnitId } from './units';
 
 // ---------- RNG ----------
 
@@ -60,6 +60,8 @@ export interface Fighter {
   marked?: boolean;
   /** Index of this unit in the owner's Run line (side 0), for permanent Knockout gains. */
   ref?: number;
+  /** The Huntmaster's counter-move (params version 4); absent = the classic net. */
+  hunt?: HuntId;
 }
 
 export interface BattleOpts {
@@ -109,6 +111,18 @@ export interface BattleResult {
   frames: Frame[];
   /** Ember Hound Knockouts: permanent +atk/+hp per Run line index (side 0). */
   koGains: { ref: number; atk: number; hp: number }[];
+  /** Per-unit tallies for the post-fight recap (only with `log`): damage dealt (strikes,
+   * abilities, thorns), Knockouts and triggers fired. Display only. */
+  stats?: UnitTally[];
+}
+
+export interface UnitTally {
+  u: number;
+  side: 0 | 1;
+  k: UnitId;
+  dmg: number;
+  kos: number;
+  trig: number;
 }
 
 export const SUDDEN_DEATH_AT = 50;
@@ -138,6 +152,7 @@ interface BU {
   hurt: number; // pending Hurt triggers
   killer: number; // uid of the striker that knocked it out (-1 = ability)
   out: boolean; // fainted and removed
+  hunt?: HuntId;
 }
 
 class Battle {
@@ -153,6 +168,10 @@ class Battle {
   koGains = new Map<number, { atk: number; hp: number }>();
   pendingWyvern: BU[] = [];
   byUid = new Map<number, BU>();
+  /** Recap tallies (log only) and the ability source being resolved, for credit. */
+  tally = new Map<number, UnitTally>();
+  cur: BU | null = null;
+  muzzled = false;
 
   constructor(a: Fighter[], b: Fighter[], private o: BattleOpts) {
     this.rng = mulberry32(o.seed);
@@ -184,8 +203,10 @@ class Battle {
       hurt: 0,
       killer: -1,
       out: false,
+      hunt: f.hunt,
     };
     this.byUid.set(u.uid, u);
+    if (this.log) this.tally.set(u.uid, { u: u.uid, side, k: u.kind, dmg: 0, kos: 0, trig: 0 });
     return u;
   }
 
@@ -200,6 +221,10 @@ class Battle {
 
   frame(e: FrameKind, extra?: Partial<Frame>): void {
     if (!this.log) return;
+    if (e === 'trig' && extra?.src !== undefined) {
+      const t = this.tally.get(extra.src);
+      if (t) t.trig++;
+    }
     this.frames.push({ e, ex: this.ex, lines: this.snap(), ...extra });
   }
 
@@ -225,7 +250,7 @@ class Battle {
   }
 
   /** Deals damage after Armor, Gargoyle hide and Chew Toy (min 1). Returns the damage dealt. */
-  damage(t: BU, amount: number, from: BU | null): number {
+  damage(t: BU, amount: number, from: BU | null, by: BU | null = from ?? this.cur): number {
     if (t.hp <= 0 || amount <= 0) return 0;
     let d = amount - t.armor;
     if (t.kind === 'gargoyle') d -= t.lvl;
@@ -234,9 +259,17 @@ class Battle {
       d -= 2;
     }
     d = Math.max(1, d);
+    const before = t.hp;
     t.hp -= d;
     if (t.hp > 0) t.hurt++;
     else t.killer = from ? from.uid : -1;
+    if (this.log && by && by.side !== t.side) {
+      const c = this.tally.get(by.uid);
+      if (c) {
+        c.dmg += Math.min(d, before);
+        if (t.hp <= 0) c.kos++;
+      }
+    }
     return d;
   }
 
@@ -338,7 +371,7 @@ class Battle {
         const foes = this.alive(side === 0 ? 1 : 0);
         for (let i = 0; i < 2 && foes.length; i++) {
           const t = foes.splice(Math.floor(this.rng() * foes.length), 1)[0];
-          this.damage(t, L, null);
+          this.damage(t, L, null, u);
         }
         break;
       }
@@ -381,14 +414,21 @@ class Battle {
     // Marked Prey (15): your first-bought unit (the front one if it's gone) takes 3 at the start.
     if (S >= 15 && A.length) {
       const prey = A.find((u) => u.marked) ?? A[0];
-      this.damage(prey, 3, null);
+      this.damage(prey, 3, null, null);
       this.frame('trig', { src: prey.uid, icon: 'start' });
       this.settle();
     }
+    // The Muzzler (hunt): your Start triggers fizzle this bout.
+    const muz = B.find((u) => u.kind === 'hunt' && u.hunt === 'muzzle');
+    if (muz) {
+      this.muzzled = true;
+      this.frame('trig', { src: muz.uid, icon: 'start' });
+    }
     // Start-of-battle triggers, in total order.
-    const starters = this.order([...A, ...B].filter((u) => UNITS[u.kind].trig === 'start'));
+    const starters = this.order([...A, ...B].filter((u) => UNITS[u.kind].trig === 'start' && !(this.muzzled && u.side === 0)));
     for (const u of starters) {
       if (u.hp <= 0 || u.out) continue;
+      this.cur = u;
       const foeSide: 0 | 1 = u.side === 0 ? 1 : 0;
       const foes = this.alive(foeSide);
       const friends = this.alive(u.side);
@@ -431,18 +471,46 @@ class Battle {
           for (const t of foes) this.damage(t, 2 * L, null);
           fired = foes.length > 0;
           break;
-        case 'hunt': {
-          const t = [...foes].sort((x, y) => y.atk - x.atk || this.slot(x) - this.slot(y))[0];
-          if (t) t.skip += 1;
-          for (const f of friends) if (f !== u) f.atk += 1;
+        case 'hunt':
+          fired = this.huntStart(u, foes, friends);
           break;
-        }
         default:
           fired = false;
       }
       if (fired) this.frame('trig', { src: u.uid, icon: 'start' });
       this.settle();
     }
+    this.cur = null;
+  }
+
+  /** The Huntmaster's Start: his hunt of the bout (units.ts HUNTS). */
+  huntStart(u: BU, foes: BU[], friends: BU[]): boolean {
+    switch (u.hunt ?? 'net') {
+      case 'net': {
+        const t = [...foes].sort((x, y) => y.atk - x.atk || this.slot(x) - this.slot(y))[0];
+        if (t) t.skip += 1;
+        for (const f of friends) if (f !== u) f.atk += 1;
+        return true;
+      }
+      case 'trap':
+        if (!foes.length) return false;
+        this.damage(foes[0], 4, null, u);
+        return true;
+      case 'volley': {
+        const back = foes.slice(-2);
+        for (const t of back) this.damage(t, 2, null, u);
+        return back.length > 0;
+      }
+      case 'muzzle':
+        return false; // already resolved before the Start triggers (and framed there)
+      case 'hamstring': {
+        const t = [...foes].sort((x, y) => y.hp - x.hp || this.slot(x) - this.slot(y))[0];
+        if (!t) return false;
+        t.atk = Math.max(1, t.atk - 3);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** One front strikes the other front. Returns damage dealt (0 if it skipped). */
@@ -489,8 +557,8 @@ class Battle {
     if (aStrikes) this.damage(b, da, a);
     if (bStrikes) this.damage(a, db, b);
     // Thorns hit back.
-    if (aStrikes && b.thorns > 0) this.damage(a, b.thorns, null);
-    if (bStrikes && a.thorns > 0) this.damage(b, a.thorns, null);
+    if (aStrikes && b.thorns > 0) this.damage(a, b.thorns, null, b);
+    if (bStrikes && a.thorns > 0) this.damage(b, a.thorns, null, a);
     const hit: number[] = [];
     if (aStrikes) hit.push(a.uid);
     if (bStrikes) hit.push(b.uid);
@@ -511,7 +579,7 @@ class Battle {
       if (w.hp <= 0 || w.out || !foe || w.wyvernLeft <= 0 || this.lines[w.side][0] !== w) continue;
       w.wyvernLeft--;
       this.damage(foe, w.atk + sd, w);
-      if (foe.thorns > 0) this.damage(w, foe.thorns, null);
+      if (foe.thorns > 0) this.damage(w, foe.thorns, null, foe);
       this.frame('hit', { hit: [w.uid], src: w.uid, icon: 'ko' });
       this.settle();
     }
@@ -526,7 +594,9 @@ class Battle {
     const outcome: 1 | 0 | -1 = a && !b ? 1 : b && !a ? -1 : 0;
     this.frame('end');
     const koGains = [...this.koGains.entries()].map(([ref, g]) => ({ ref, ...g }));
-    return { outcome, exchanges: this.ex, frames: this.frames, koGains };
+    const res: BattleResult = { outcome, exchanges: this.ex, frames: this.frames, koGains };
+    if (this.log) res.stats = [...this.tally.values()];
+    return res;
   }
 }
 
@@ -537,7 +607,7 @@ export function battle(a: Fighter[], b: Fighter[], opts: BattleOpts): BattleResu
 
 /** Canonical string of a line, for the battle seed and cache keys. */
 export function canon(line: Fighter[]): string {
-  return line.map((f) => `${f.kind}${f.lvl}.${f.atk}.${f.hp}${f.item ? f.item[0] : ''}${f.brand ? '*' : ''}`).join(',');
+  return line.map((f) => `${f.kind}${f.lvl}.${f.atk}.${f.hp}${f.item ? f.item[0] : ''}${f.brand ? '*' : ''}${f.hunt && f.hunt !== 'net' ? f.hunt : ''}`).join(',');
 }
 
 export function battleSeed(a: Fighter[], b: Fighter[], round: number, pv: number): number {

@@ -46,12 +46,26 @@ export interface DrawOpts {
   /** Revealed hero: the disguise is gone (unmask). */
   revealed?: boolean;
   lidOpen?: boolean;
+  /** Decree picture (wave 1): draw only this slot in colour, the rest as a dim mannequin. */
+  only?: string;
+}
+
+const SIL = 0x4a3a5a;
+
+/** A Decree tile: a dim mannequin wearing one part in full colour (24x42 at px). */
+export function drawDecreePart(g: Graphics, slot: string, part: string, ox: number, oy: number, px = 1): void {
+  const look: Look = { hat: 'none', body: 'patched', feet: 'worn', hand: 'none', belt: 'none', pack: 'none', aura: 'none', cloak: 5, hair: 1, skin: 0, mark: 0 };
+  (look as unknown as Record<string, string | number>)[slot] = part;
+  drawTraveler(g, look, ox, oy, { px, only: slot });
 }
 
 /** Draws a traveler (24x42 at px=1, feet on the bottom row) into g at (ox, oy). */
 export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o: DrawOpts = {}): void {
   const px = o.px ?? 1;
-  const r = painter(g, ox, oy, px, !!o.flip);
+  const r0 = painter(g, ox, oy, px, !!o.flip);
+  // Decree tiles: everything outside the `only` slot is a flat silhouette.
+  let sec = '';
+  const r: R = o.only ? (x, y, w, h, c, a = 1) => (sec === o.only ? r0(x, y, w, h, c, a) : r0(x, y, w, h, SIL)) : r0;
   let L = look;
   if (o.revealed) L = { ...look, hat: 'helm', body: 'armor', feet: 'steel', hand: 'sword', belt: 'none', pack: 'shield', aura: 'glow' };
   const cloak = CLOAKS[L.cloak] ?? CLOAKS[0];
@@ -59,6 +73,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   const skin = SKINS[L.skin] ?? SKINS[0];
 
   // ---- aura (behind) ----
+  sec = 'aura';
   if (L.aura === 'glow') {
     const y = 0xfff08a;
     r(4, 14, 1, 22, y, 0.6);
@@ -86,6 +101,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- pack (behind) ----
+  sec = 'pack';
   const p = L.pack;
   if (p === 'sack') {
     r(2, 18, 7, 9, TAN_D);
@@ -129,11 +145,13 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- legs ----
+  sec = 'legs';
   const pants = dark(cloak, 0.45);
   r(9, 32, 2, 6, pants);
   r(13, 32, 2, 6, pants);
 
   // ---- feet ----
+  sec = 'feet';
   const f = L.feet;
   if (f === 'bare') {
     r(8, 38, 3, 3, skin);
@@ -177,6 +195,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- body ----
+  sec = 'body';
   const b = L.body;
   const arm = (c: number) => {
     r(5, 19, 2, 9, c);
@@ -227,6 +246,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- belt ----
+  sec = 'belt';
   const bl = L.belt;
   if (bl === 'rope' || bl === 'purse') r(7, 29, 10, 1, TAN);
   if (bl === 'purse') {
@@ -242,6 +262,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- head ----
+  sec = 'head';
   r(8, 10, 8, 8, skin);
   r(8, 10, 8, 2, hair);
   r(8, 12, 1, 3, hair);
@@ -278,6 +299,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- hat ----
+  sec = 'hat';
   const h = L.hat;
   if (h === 'straw') {
     r(4, 9, 16, 2, 0xe0c060);
@@ -317,6 +339,7 @@ export function drawTraveler(g: Graphics, look: Look, ox: number, oy: number, o:
   }
 
   // ---- held item ----
+  sec = 'hand';
   const it = L.hand;
   if (it === 'hoe') {
     r(20, 12, 1, 27, WOOD);

@@ -224,3 +224,129 @@ describe('war pit advancement hooks', () => {
     expect(per.crests).toBe(1);
   });
 });
+
+// ---------- wave 1: record-scaled rivals, hunts, banked Chow, the Encore, recap tallies ----------
+import { BANK_MAX, ENCORE_MAX, GAUNTLET_PV, encoreCashOut, encoreFight, encoreOpen, huntOf, nextRival, rivalAhead, toughRound } from '../src/depts/pit/run';
+import { hashStr } from '../src/depts/pit/engine';
+import { HUNT_LIST, comboWith } from '../src/depts/pit/units';
+
+describe('war pit wave 1', () => {
+  it('rivals follow the record (version 4) and a paused version-3 Run keeps round-scaled rivals', () => {
+    expect(PARAMS_VERSION).toBe(4);
+    expect(GAUNTLET_PV).toBe(3);
+    expect(rivalAhead({ wins: 0, losses: 0, pv: 4 })).toBe(0);
+    expect(rivalAhead({ wins: 6, losses: 0, pv: 4 })).toBeGreaterThan(0);
+    expect(rivalAhead({ wins: 6, losses: 0, pv: 3 })).toBe(0);
+    const rs = newRun(77, 2, OPTS);
+    rs.round = 6;
+    rs.wins = 5;
+    const strong = nextRival(rs);
+    const old = { ...rs, pv: 3 };
+    expect(JSON.stringify(nextRival(old).line)).toBe(JSON.stringify(rival(6, 2, hashStr('run', 77), 3).line));
+    rs.wins = 0;
+    rs.losses = 5;
+    const weak = nextRival(rs);
+    const sum = (l: Fighter[]) => l.reduce((x, f) => x + f.atk + f.hp, 0);
+    expect(sum(strong.line)).toBeGreaterThanOrEqual(sum(weak.line));
+    const t = toughRound(rs);
+    expect(t).toBeGreaterThanOrEqual(3);
+    expect(t).toBeLessThanOrEqual(6);
+  });
+
+  it('the Huntmaster rotates hunts and re-rolls on retry; version 3 keeps the classic net', () => {
+    const hunts = new Set<string>();
+    for (let tries = 0; tries < 12; tries++) hunts.add(huntOf(5, tries));
+    expect(hunts.size).toBeGreaterThan(2);
+    expect(huntOf(5, 3, 3)).toBe('net');
+    const a = huntmaster(8, 4, 9, 4, 0, 0);
+    const b = huntmaster(8, 4, 9, 4, 0, 1);
+    expect(JSON.stringify(a.line)).not.toBe(JSON.stringify(b.line));
+    expect(a.line[a.line.length - 1].hunt).toBe(huntOf(9, 0));
+    expect(huntmaster(8, 4, 9, 3).line.some((f) => f.hunt)).toBe(false);
+    expect(HUNT_LIST.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('hunts do what they say', () => {
+    const boss = (hunt: (typeof HUNT_LIST)[number]): Fighter[] => [{ kind: 'hunt', lvl: 1, atk: 10, hp: 50, armor: 2, hunt }];
+    const mine: Fighter[] = [{ kind: 'gargoyle', lvl: 1, atk: 1, hp: 20 }, { kind: 'rat', lvl: 1, atk: 1, hp: 5 }, { kind: 'stirge', lvl: 1, atk: 1, hp: 5 }];
+    const startFrame = (h: (typeof HUNT_LIST)[number]) => {
+      const r = battle(mine, boss(h), { seed: 3, log: true });
+      return r.frames.filter((f) => f.e === 'trig')[0].lines[0];
+    };
+    expect(startFrame('trap')[0].h).toBe(20 - 3); // 4 minus the Gargoyle's hide
+    const v = startFrame('volley');
+    expect([v[1].h, v[2].h]).toEqual([3, 3]);
+    // Muzzler: the Stirge's Start never fires (no damage on the Huntmaster before the strikes).
+    const m = battle(mine, boss('muzzle'), { seed: 3, log: true });
+    const firstHit = m.frames.findIndex((f) => f.e === 'hit');
+    expect(m.frames.slice(0, firstHit).every((f) => f.lines[1][0].h === 50)).toBe(true);
+  });
+
+  it('recap tallies only with a log, and never change the outcome', () => {
+    const riv = rival(7, 3, 12345).line;
+    const seed = battleSeed(teamA, riv, 7, 4);
+    const a = battle(teamA, riv, { seed, tactics: 3, log: true });
+    const b = battle(teamA, riv, { seed, tactics: 3 });
+    expect(b.stats).toBeUndefined();
+    expect(a.outcome).toBe(b.outcome);
+    expect(a.exchanges).toBe(b.exchanges);
+    expect(a.stats!.some((t) => t.side === 0 && t.dmg > 0)).toBe(true);
+  });
+
+  it('unspent Chow is banked into the next round (version 4)', () => {
+    const rs = newRun(11, 0, OPTS);
+    rs.line[0] = newPet('gargoyle');
+    rs.line[0]!.a = 30;
+    rs.line[0]!.h = 60;
+    rs.chow = 7;
+    fight(rs, false);
+    expect(rs.bankC).toBe(BANK_MAX);
+    expect(rs.chow).toBe(10 + BANK_MAX);
+  });
+
+  it('the Encore opens after a Triumph, grows a pot and loses it on a loss', () => {
+    const rs = newRun(13, 0, OPTS);
+    rs.ended = 'triumph';
+    rs.line[0] = { k: 'gargoyle', a: 400, h: 900, xp: 5, it: null };
+    expect(encoreOpen(rs)).toBe(true);
+    const w = encoreFight(rs, false)!;
+    expect(w.won).toBe(true);
+    expect(rs.encore!.pot).toBeGreaterThan(0);
+    rs.line[0] = { k: 'rat', a: 1, h: 1, xp: 0, it: null };
+    const l = encoreFight(rs, false)!;
+    expect(l.won).toBe(false);
+    expect(rs.encore!.pot).toBe(0);
+    expect(encoreOpen(rs)).toBe(false);
+    expect(encoreCashOut(rs)).toBe(0);
+    expect(ENCORE_MAX).toBeGreaterThan(1);
+  });
+
+  it('shop combos read the line', () => {
+    expect(comboWith('crow', ['rat'])).toMatch(/RAT/);
+    expect(comboWith('crow', ['boar'])).toBeNull();
+    expect(comboWith('wolf', ['boar'])).toMatch(/BOAR/);
+  });
+});
+
+describe('war pit wave 1 hooks', () => {
+  it('nextGoal and Night Orders', () => {
+    const run = defaultRun();
+    const save = mkSave(run);
+    const g = pitEcon.nextGoal!(save)!;
+    expect(g.label).toMatch(/STAKES 1/);
+    expect(g.progress).toBeGreaterThanOrEqual(0);
+    expect(g.progress).toBeLessThanOrEqual(1);
+    run.cur = newRun(1, 0, OPTS);
+    run.cur.wins = 3;
+    expect(pitEcon.nextGoal!(save)!.label).toBe('BEAT THE HUNTMASTER');
+    const orders = pitEcon.nightOrders!(save);
+    expect(orders.length).toBe(2);
+    for (const o of orders) {
+      expect(o.label.length).toBeLessThanOrEqual(15);
+      expect(o.desc.length).toBeLessThanOrEqual(34);
+    }
+    expect(pitEcon.applyNightOrder!(save, 'scout', 3600, 0.75)).toMatch(/SCOUTED/);
+    expect((save.run as ReturnType<typeof defaultRun>).scouted).toBe(true);
+    expect(pitEcon.applyNightOrder!(save, 'skirmish', 3600, 0.75)).toMatch(/GAUNTLETS/);
+  });
+});

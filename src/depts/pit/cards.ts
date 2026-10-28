@@ -34,11 +34,16 @@ export interface CardState {
   cost?: number;
   /** Beast skin (SKINS index) for your own beasts. */
   skin?: number;
+  /** Show the nameplate (shop and line while shopping; statuses then hide, the Brand keeps its
+   * gold border). */
+  nm?: boolean;
+  /** Shop glow: 'twin' merges into your line (+1 pip), 'combo' pairs with it (units.ts comboWith). */
+  glow?: 'twin' | 'combo';
 }
 
 function keyOf(s: CardState | null): string {
   if (!s) return '-';
-  return [s.k, s.food, s.a, s.h, s.lvl, s.xp, s.it, s.brand ? 1 : 0, s.armor, s.thorns, s.skip, s.rival, s.hide ? 1 : 0, s.sel ? 1 : 0, s.target ? 1 : 0, s.empty ? 1 : 0, s.dim ? 1 : 0, s.cost, s.skin ?? 0].join('|');
+  return [s.k, s.food, s.a, s.h, s.lvl, s.xp, s.it, s.brand ? 1 : 0, s.armor, s.thorns, s.skip, s.rival, s.hide ? 1 : 0, s.sel ? 1 : 0, s.target ? 1 : 0, s.empty ? 1 : 0, s.dim ? 1 : 0, s.cost, s.skin ?? 0, s.nm ? 1 : 0, s.glow ?? ''].join('|');
 }
 
 export class CardView extends Container {
@@ -51,6 +56,9 @@ export class CardView extends Container {
   private fl = new Graphics();
   private atkT = new PixelText('', '#fff4e0');
   private hpT = new PixelText('', '#fff4e0');
+  private nameT = new PixelText('', '#d8c8b0');
+  private plusT = new PixelText('', '#8fd14f');
+  private glowG = new Graphics();
   private key = '';
   state: CardState | null = null;
   bx = 0;
@@ -76,7 +84,8 @@ export class CardView extends Container {
     this.hl.alpha = 0;
     this.fl.rect(1, 1, CW - 2, CH - 2).fill(0xffffff);
     this.fl.alpha = 0;
-    this.addChild(this.g, this.spr, this.trig, this.item, this.status, this.atkT, this.hpT, this.fl, this.hl);
+    this.glowG.alpha = 0;
+    this.addChild(this.g, this.spr, this.trig, this.item, this.status, this.atkT, this.hpT, this.nameT, this.plusT, this.fl, this.glowG, this.hl);
     this.eventMode = 'static';
     this.cursor = 'pointer';
     this.hitArea = new Rectangle(-1, -1, CW + 2, CH + 2);
@@ -103,6 +112,9 @@ export class CardView extends Container {
     this.spr.visible = this.trig.visible = this.item.visible = this.status.visible = false;
     this.atkT.set(' ');
     this.hpT.set(' ');
+    this.nameT.set(' ');
+    this.plusT.set(' ');
+    this.glowG.clear();
     this.statuses = [];
     if (!s) return;
     if (s.empty || (!s.k && !s.food)) {
@@ -165,6 +177,21 @@ export class CardView extends Container {
     if (s.armor) this.statuses.push(statusTex('armor'));
     if (s.thorns) this.statuses.push(statusTex('thorns'));
     if (s.skip) this.statuses.push(statusTex('net'));
+    if (s.nm) {
+      // Nameplate between the sprite and the stat bar (07 §13 readability, research R3).
+      this.statuses = [];
+      const nm = UNITS[k].short;
+      this.nameT.set(nm, s.rival !== undefined ? '#ffc8b8' : '#e8dcc0');
+      this.nameT.position.set(10 + Math.floor((23 - measure(nm).w) / 2), 24);
+    }
+    if (s.glow) {
+      const c = s.glow === 'twin' ? 0x8fd14f : 0x6ac8f0;
+      this.glowG.rect(-1, -1, CW + 2, 1).rect(-1, CH, CW + 2, 1).rect(-1, 0, 1, CH).rect(CW, 0, 1, CH).fill(c);
+      if (s.glow === 'twin') {
+        this.plusT.set('+1', '#8fd14f');
+        this.plusT.position.set(CW - 11, 2);
+      }
+    }
     if (this.statuses.length) {
       this.status.texture = this.statuses[0];
       this.status.visible = true;
@@ -193,6 +220,7 @@ export class CardView extends Container {
     this.pop = Math.max(0, this.pop - dt * 4);
     this.hl.alpha = this.pulse > 0 ? Math.min(1, this.pulse * 1.5) : this.state?.target ? 0.35 + 0.35 * Math.sin(t * 8) : 0;
     this.fl.alpha = this.flash * 0.8;
+    this.glowG.alpha = this.state?.glow ? 0.55 + 0.45 * Math.sin(t * 5) : 0;
     this.x = Math.round(this.bx + this.offX);
     // Two-frame idle: a 1 px bob of the sprite.
     const bobUp = this.state?.k && Math.floor(t * 2 + this.bob) % 2 === 0 ? 1 : 0;

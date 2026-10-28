@@ -2,9 +2,10 @@
 // rarity weights, band EVs, hook window, tension rise/drain, reel speed, Wrath, the gate rule,
 // idleObols); its catch loop lives in scene.ts (tangled with Pixi), so this file ports that loop
 // headless, rule for rule, at the scene's 30 Hz logic rate:
-//   cast -> sink (40 px/s) -> wait (exponential bite wait, x1.25 while twitching) -> a biter seeks
-//   the hook (the circling Bog Poet orbits 1.6 s first) -> nibble with fake-out dips (Wrath
-//   fakeChance, Choirboy +1) -> plunge with the hook window -> reel (hold raises tension at
+//   cast -> sink (M.SINK_PX_S) -> wait (bounded bite wait M.biteSample, x1.25 while twitching) -> a
+//   biter seeks the hook (the circling Bog Poet orbits 1.6 s first) -> nibble with a COUNT of
+//   fake-out dips (M.fakeCount, Choirboy/Siren +1, real bite by the 5th nibble) -> plunge with
+//   the hook window -> reel (hold raises tension at
 //   REEL_RISE / lineCap, releasing drains at drainRate, telegraphed thrashes at the scene's
 //   progress points, slip after 0.4 s at >= 100%, drift loose after 2.5 s at 0%, heavy / sinker /
 //   teleport / twin behaviours) -> land (combo, Wrath, Gilded Obol, Codex first-catch bonus, bait
@@ -22,6 +23,12 @@
 // an escape brings the rig up); the Lantern Eel (the bot stops tapping fake-out dips); the Trophy
 // Wall (the bot KEEPs a trophy-worthy catch, forgoing its Obols) and the Chum Barrel (idleObols
 // reads the equipped bait and its stock).
+//
+// Wave 1 rules mirrored from the scene: faster sink, shorter bounded bite wait, nibble counts
+// (above); the moving gold band (M.zoneCenter: holding inside it reels at M.ZONE_IN x, outside at
+// M.ZONE_OUT x; the bot tracks it with its reaction lag, `track` of the time); the catch roll
+// (M.rollHeft / M.rollStars, CLEAN +1 star, value x M.catchMult) and the Codex records; netters
+// bag only species landed by hand (M.netKnows, inside idleObols).
 //
 // Bot (00 §8.1 "Styx" row): casts to the band with the best expected Obols per second, twitches
 // while waiting, taps a fake-out dip by mistake with a small chance, sets the hook with a
@@ -46,10 +53,10 @@ export type Skill = 'novice' | 'reference' | 'expert';
  * lapse: chance per thrash telegraph of an attention lapse (+0.35 s); hold: tension % at which
  * the bot eases off; think: seconds between landing/escape and the recast; wisp: chance of
  * flicking a wisp that crosses while the hook sinks or waits; twitch: share of waits twitched. */
-const SKILL: Record<Skill, { rt: number; rtSd: number; fakeTap: number; lapse: number; hold: number; think: number; wisp: number; twitch: number; aimSd: number }> = {
-  novice: { rt: 0.4, rtSd: 0.12, fakeTap: 0.12, lapse: 0.15, hold: 64, think: 1.4, wisp: 0.35, twitch: 0.4, aimSd: 12 },
-  reference: { rt: 0.29, rtSd: 0.07, fakeTap: 0.04, lapse: 0.06, hold: 72, think: 0.7, wisp: 0.7, twitch: 0.9, aimSd: 5 },
-  expert: { rt: 0.22, rtSd: 0.04, fakeTap: 0.01, lapse: 0.02, hold: 74, think: 0.35, wisp: 0.9, twitch: 1, aimSd: 2 },
+const SKILL: Record<Skill, { rt: number; rtSd: number; fakeTap: number; lapse: number; hold: number; think: number; wisp: number; twitch: number; aimSd: number; track: number }> = {
+  novice: { rt: 0.4, rtSd: 0.12, fakeTap: 0.12, lapse: 0.15, hold: 64, think: 1.4, wisp: 0.35, twitch: 0.4, aimSd: 12, track: 0.3 },
+  reference: { rt: 0.29, rtSd: 0.07, fakeTap: 0.04, lapse: 0.06, hold: 72, think: 0.7, wisp: 0.7, twitch: 0.9, aimSd: 5, track: 0.75 },
+  expert: { rt: 0.22, rtSd: 0.04, fakeTap: 0.01, lapse: 0.02, hold: 74, think: 0.35, wisp: 0.9, twitch: 1, aimSd: 2, track: 0.95 },
 };
 
 export interface StyxOpts {
@@ -125,7 +132,7 @@ function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.ba
   const w = r.wrath;
   const win = M.hookWindowMs(r.lv.strike, w) / 1000;
   const fakeTap = sk.fakeTap * (r.lv.eel > 0 ? 0.2 : 1);
-  const pHook = phi((win - sk.rt) / sk.rtSd) * (1 - fakeTap * M.fakeChance(w) * 1.2);
+  const pHook = phi((win - sk.rt) / sk.rtSd) * (1 - fakeTap * M.fakeMean(w) * 1.1);
   const cap = M.lineCap(r.lv.line);
   const drain = M.drainRate(r.lv.steady);
   // Ripper passes (W >= 10): cut if the bot hasn't drained below the taut mark in time.
@@ -135,10 +142,12 @@ function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.ba
     const depth = b * M.BAND_PX + 30;
     const wt = M.rarityWeights(bait, b, r.lv.scent, w);
     const ev = M.bandEV(b, wt) * M.wallMult(p, b);
-    const tWait = M.biteWait(r.lv.lantern) / (1 + 0.25 * sk.twitch) + 1.2 + 0.7 + M.fakeChance(w) * 0.9;
+    const tWait = M.biteWait(r.lv.lantern) / (1 + 0.25 * sk.twitch) + 1.2 + 0.5 + M.fakeMean(w) * 0.75;
     const duty = drain / (drain + M.REEL_RISE / cap);
+    // The gold band: tracked share at ZONE_IN, the rest about half in, half out.
+    const zoneK = sk.track * M.ZONE_IN + (1 - sk.track) * 0.5 * (M.ZONE_IN + M.ZONE_OUT);
     const thr = 2 + M.wrathThrashes(w);
-    const tReel = (depth + 24) / (M.reelSpeed(r.lv.reel) * duty) + thr * 1.1;
+    const tReel = (depth + 24) / (M.reelSpeed(r.lv.reel) * duty * zoneK) + thr * 1.1;
     // Escape chance per thrash: a lapse that holds into a hard pull.
     const pull = (50 / 30) * M.wrathPull(w);
     const qThr = Math.min(0.6, sk.lapse * Math.min(1, (pull * 0.55) / cap));
@@ -153,7 +162,7 @@ function estimate(r: M.StyxRun, sk: (typeof SKILL)[Skill], bait: M.BaitId = r.ba
       vw += wt[k] * RMULT[k];
       vc += wt[k] * RMULT[k] * M.CLEAN_MULT[k];
     }
-    const cleanK = 1 + pClean * (vc / vw - 1);
+    const cleanK = (1 + pClean * (vc / vw - 1)) * ((1 - pClean) * M.starEV(false, bait) + pClean * M.starEV(true, bait)) * M.CATCH_K;
     // Twin Hooks: after a land the next hook is already down (no sink, think or full wait).
     const q = pHook * pLand * pClean;
     let spares = 0;
@@ -211,6 +220,9 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     let beat = 0;
     let dived = false;
     let rip: { at: number; warn: number } | null = null;
+    let reelT = 0; // seconds into the reel (the gold band's clock)
+    let zoneSeed = 0;
+    let tracking = false;
     let hooksLeft = 0;
     let holding = false;
     let releaseIn = -1; // bot release scheduled after a telegraph
@@ -256,7 +268,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
 
     function sampleBite(): number {
       if (tutorial()) return 1.2;
-      return Math.max(0.6, -Math.log(1 - rnd() * 0.95) * M.biteWait(r.lv.lantern));
+      return M.biteSample(M.biteWait(r.lv.lantern), rnd());
     }
 
     function chooseBiter(): void {
@@ -268,14 +280,9 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
     }
 
     function beginNibble(): void {
-      fakes = 0;
-      if (!tutorial()) {
-        const pf = M.fakeChance(W());
-        while (fakes < 2 && rnd() < pf) fakes++;
-        if (sp.behavior === 'singer') fakes++;
-      }
+      fakes = tutorial() ? 0 : M.fakeCount(W(), sp.behavior === 'singer', rnd());
       nibStep = 'nib';
-      phaseT = 0.5 + rnd() * 0.4;
+      phaseT = M.NIB_S[0] + rnd() * M.NIB_S[1];
       twin = sp.behavior === 'twin' ? 1 : 0;
       phase = 'nibble';
     }
@@ -326,7 +333,7 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         }
       } else if (nibStep === 'dip') {
         nibStep = 'nib';
-        phaseT = 0.4 + rnd() * 0.5;
+        phaseT = M.NIB_AFTER_S[0] + rnd() * M.NIB_AFTER_S[1];
       } else {
         // Missed the window.
         if (tutorial()) {
@@ -356,6 +363,9 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
       pair = false;
       beat = 1.4;
       dived = false;
+      reelT = 0;
+      zoneSeed = rnd();
+      tracking = rnd() < sk.track;
       rip = !tutorial() && rnd() < M.ripperChance(W()) ? { at: 0.25 + 0.45 * rnd(), warn: -1 } : null;
       holding = true;
       releaseIn = -1;
@@ -392,8 +402,16 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
         else if (holding && tension >= 30) holding = false;
         return;
       }
-      if (holding && tension >= sk.hold) holding = false;
+      if (tracking && !tutorial()) {
+        // Track the gold band as seen a reaction time ago (never into the hold limit).
+        const c = M.zoneCenter(sp.behavior, Math.max(0, reelT - sk.rt), zoneSeed, false);
+        const hi = Math.min(sk.hold, c + M.ZONE_W / 2 - 3);
+        if (holding && tension >= hi) holding = false;
+        else if (!holding && tension <= Math.min(hi - 4, c - M.ZONE_W / 2 + 4)) holding = true;
+      } else if (holding && tension >= sk.hold) holding = false;
       else if (!holding && tension <= sk.hold - 28) holding = true;
+      // A tracker re-decides each reel segment (attention comes and goes).
+      if (rnd() < 0.03) tracking = rnd() < sk.track;
       // Never let it drift loose.
       if (!holding && tension < 5) holding = true;
     }
@@ -421,12 +439,15 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
       const thrashing = thr > 0;
       const pullK = tutorial() ? 0.5 : (sp.pull / 30) * M.wrathPull(W());
       const cap = M.lineCap(r.lv.line);
+      reelT += dt;
+      const zc = tutorial() ? 45 : M.zoneCenter(sp.behavior, reelT, zoneSeed, thrashing);
       if (holding) {
         const rise = M.REEL_RISE + (thrashing ? 2 * M.REEL_RISE * pullK : 0);
         tension += (rise / cap) * dt;
         if (tension < RED) {
           const slow = (sp.behavior === 'heavy' || sp.behavior === 'leviathan') && thrashing ? 0.6 : 1;
-          dist -= M.reelSpeed(r.lv.reel) * slow * dt;
+          const zk = tutorial() ? 1 : M.inZone(tension, zc) ? M.ZONE_IN : M.ZONE_OUT;
+          dist -= M.reelSpeed(r.lv.reel) * slow * zk * dt;
         }
       } else {
         tension -= M.drainRate(r.lv.steady) * (thrashing ? 0.5 : 1) * dt;
@@ -520,7 +541,11 @@ export const createStyx = (opts: StyxOpts = {}): AdapterFactory => (seed) => {
 
     function land(): void {
       const clean = !red && !tutorial();
+      const heft = M.rollHeft(gauss(rnd));
+      const stars = M.rollStars(rnd(), clean, r.bait);
+      M.recordCatch(p, sp.id, heft, stars);
       const value =
+        M.catchMult(heft, stars) *
         M.soulBase(sp, band) *
         M.comboMult(r.combo) *
         M.wrathActive(W()) *
